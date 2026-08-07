@@ -326,7 +326,7 @@ Unit Tests
 
 ## Phase 2
 
-LangGraph
+LangChain
 
 Conversation Memory
 
@@ -464,7 +464,7 @@ The 8:00 PM slot has been confirmed.
 | Database | SQLite |
 | Validation | Pydantic |
 | Testing | Pytest |
-| Conversation | LangGraph |
+| Conversation | LangChain |
 | LLM | LangChain |
 | Deployment | AWS Bedrock AgentCore |
 | Observability | LangSmith |
@@ -539,6 +539,7 @@ No direct commits should be made to `main`.
 - Kunal Chabbra
 - Adarsh Gaur
 - Gajanan
+- Teja Sagi
 
 ---
 
