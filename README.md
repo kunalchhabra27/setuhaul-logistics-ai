@@ -536,7 +536,7 @@ No direct commits should be made to `main`.
 # Contributors
 
 - Disha Chaudary
-- Kunal Chabbra
+- Kunal Chhabra
 - Adarsh Gaur
 - Gajanan
 - Teja Sagi
