@@ -1,172 +1,380 @@
-# 🚛 SetuHaul Exception Handling Agent
+# 🚛 SetuHaul Intelligent Dock Rescheduler
 
-> A conversational logistics exception handling system that helps truck drivers report delays and receive deterministic dock rescheduling recommendations.
-
-This project is being developed as part of the **Forward Deployed Engineering (FDE)** program.
-
-Unlike a traditional chatbot, this project separates **conversation** from **business decision making**.
-
-- 🧠 LLM → understands and manages the conversation.
-- ⚙️ Deterministic Scheduler → computes feasible appointment options.
-- 🏭 Warehouse Database → source of operational truth.
-- ☁️ AWS AgentCore + LangSmith + CloudWatch → deployment and observability (future phases).
+> A conversational logistics exception handling system that assists truck drivers in reporting delays while using a deterministic scheduling engine to generate feasible dock appointment recommendations.
 
 ---
 
-# Business Problem
+# Overview
 
-SetuHaul is a logistics company that transports shipments between warehouses.
+SetuHaul is a freight logistics company operating across multiple warehouses.
 
-Every shipment has a **pre-booked dock appointment** at the destination warehouse.
+Every shipment is assigned a destination warehouse and a dock appointment before the truck begins its journey.
 
-When a truck is delayed due to:
+When delays occur due to vehicle breakdowns, traffic, weather, or operational issues, drivers currently contact warehouse coordinators manually to reschedule appointments.
 
-- tyre puncture
-- traffic
-- vehicle breakdown
-- weather
-- loading delays
+This process is repetitive, time-consuming, and difficult to manage when multiple delayed trucks compete for limited warehouse capacity.
 
-the driver usually contacts the warehouse coordinator manually.
-
-The coordinator then
-
-1. identifies the shipment
-2. checks the existing appointment
-3. evaluates whether the appointment is still feasible
-4. checks warehouse capacity
-5. finds alternate appointment slots
-6. communicates with the warehouse
-7. confirms the revised appointment
-
-This process is slow and becomes difficult when many delayed trucks request the same limited dock capacity simultaneously.
-
-Our goal is to automate this workflow.
+This project builds a **Conversational Exception Handling Agent** that assists drivers while ensuring **all scheduling decisions remain deterministic, explainable, and operationally safe.**
 
 ---
 
 # Problem Statement
 
-> How might SetuHaul provide a conversational way for drivers to report delays, ask questions, and consider revised appointments while ensuring many simultaneous requests are handled without conflicting warehouse commitments?
-
----
-
-# Project Goals
-
-The system should allow a driver to
-
-- report a delay
-- update ETA
-- ask for alternate appointments
-- compare appointment options
-- specify constraints
-- confirm a revised appointment
-
-while ensuring
-
-- deterministic scheduling
-- no double booking
-- explainable decisions
-- human confirmation before booking
-
----
-
-# System Architecture
-
-```
-                    Driver
-
-                       │
-
-             Natural Language Chat
-
-                       │
-
-         LangGraph Conversation Agent
-        (LLM understanding only)
-
-                       │
-
-        Deterministic Scheduling Engine
-
-                       │
-
-         Warehouse Operational Database
-
-                       │
-
-       Appointment Confirmation Service
-
-                       │
-
-        CloudWatch • LangSmith • AgentCore
-```
+> How can SetuHaul provide a conversational interface for drivers to report delays, ask questions, and receive revised appointment options while ensuring limited warehouse capacity is allocated deterministically without conflicting promises?
 
 ---
 
 # Design Philosophy
 
-This project intentionally separates AI reasoning from operational decisions.
+The architecture intentionally separates **conversation** from **business decision making**.
 
-## LLM Responsibilities
+```text
+Driver
 
-The conversational layer is responsible for
+      │
 
-- understanding free-text messages
-- identifying user intent
-- asking clarification questions
-- maintaining conversation context
-- presenting scheduling options
-- collecting driver confirmation
+      ▼
 
-The LLM **never**
+LangChain Conversational Agent
+(Conversation & Understanding)
 
-- allocates warehouse capacity
-- books appointments
-- decides priority
-- overrides business rules
+      │
+
+      ▼
+
+Deterministic Scheduling Engine
+(Business Rules)
+
+      │
+
+      ▼
+
+Backend Systems of Record
+
+      │
+
+      ▼
+
+Shared Operational Data Layer
+(Supabase PostgreSQL)
+```
+
+The conversational layer **never allocates warehouse capacity.**
+
+The scheduling engine **never interprets natural language.**
 
 ---
 
-## Deterministic Responsibilities
+# System Architecture
 
-The scheduling engine is responsible for
+```text
+                          Driver
 
-- validating shipment information
-- computing latest ETA
-- checking facility compatibility
-- checking dock availability
-- checking operating hours
-- enforcing driver constraints
-- preventing double booking
-- ranking feasible slots
+                             │
 
-Every execution of the scheduling engine with identical inputs produces identical outputs.
+                             ▼
+
+                 LangChain Conversational Agent
+
+                             │
+
+        ┌────────────┬────────────┬────────────┬────────────┐
+
+        ▼            ▼            ▼            ▼
+
+      TMS      Dock Scheduler   Driver Chat   Check-in Portal
+
+                             │
+
+                             ▼
+
+                    Messaging Service
+
+                             │
+
+                             ▼
+
+             Shared Operational Data Layer
+                 (Supabase PostgreSQL)
+
+                             │
+
+                             ▼
+
+                  Human Coordinator (Escalation)
+```
 
 ---
 
-# Current Scope
+# Backend Systems
 
-This project only handles
+The repository is organised into independent backend systems.
 
-✅ Driver delay reporting
+Each backend owns a single business capability.
 
-✅ Appointment rescheduling
+---
 
-The following are intentionally **out of scope**
+## Transport Management System (TMS)
 
-- GPS tracking
-- Route optimization
-- Fleet optimization
-- Driver safety decisions
-- Customer compensation
-- Warehouse labor planning
+Responsible for shipment planning.
+
+Owns
+
+- Drivers
+- Vehicles
+- Shipments
+- Planned ETA
+- Shipment Priority
+- Origin & Destination
+
+Does **not** own
+
+- Appointment scheduling
+- Driver conversations
+- Facility check-ins
+
+---
+
+## Dock Scheduler (Warehouse Management System)
+
+Responsible for warehouse scheduling.
+
+Owns
+
+- Facilities
+- Docks
+- Appointment Slots
+- Dock Rules
+- Current Appointments
+- Deterministic Scheduling Engine
+
+Does **not** own
+
+- ETA updates
+- Physical truck arrival
+- Driver conversations
+
+---
+
+## Driver Chat / ETA Portal
+
+Responsible for communication with drivers.
+
+Owns
+
+- Driver conversations
+- ETA updates
+- Delay reports
+- Exception records
+- Conversation Threads
+
+Does **not** own
+
+- Capacity allocation
+- Appointment scheduling
+
+---
+
+## Check-in Portal
+
+Responsible for recording the truck's physical state once it reaches the destination warehouse.
+
+Owns
+
+- Facility Check-ins
+- Gate Arrival
+- Yard Queue
+- Dock Entry
+- Unloading Completion
+
+Does **not** own
+
+- Appointment allocation
+- ETA interpretation
+- Driver conversations
+
+---
+
+# Repository Structure
+
+```text
+setuhaul-exception-agent/
+│
+├── README.md
+├── pyproject.toml
+├── requirements.txt
+├── .gitignore
+├── .env.example
+├── locustfile.py
+│
+├── docs/
+│   ├── architecture.md
+│   ├── business_flow.md
+│   ├── scheduling_engine.md
+│   ├── api_contracts.md
+│   ├── database_design.md
+│   ├── concurrency_strategy.md
+│   └── demo_scenarios.md
+│
+├── src/
+│   └── setuhaul/
+│       │
+│       ├── __init__.py
+│       │
+│       ├── backend/
+│       │   ├── __init__.py
+│       │   │
+│       │   ├── tms/
+│       │   │   ├── __init__.py
+│       │   │   ├── README.md
+│       │   │   ├── SKILLS.md
+│       │   │   ├── models.py
+│       │   │   ├── repository.py
+│       │   │   ├── service.py
+│       │   │   ├── api.py
+│       │   │   ├── exceptions.py
+│       │   │   └── tests/
+│       │   │       ├── __init__.py
+│       │   │       ├── test_repository.py
+│       │   │       ├── test_service.py
+│       │   │       └── test_api.py
+│       │   │
+│       │   ├── dock_scheduler/
+│       │   │   ├── __init__.py
+│       │   │   ├── README.md
+│       │   │   ├── SKILLS.md
+│       │   │   ├── models.py
+│       │   │   ├── repository.py
+│       │   │   ├── service.py
+│       │   │   ├── scheduler.py
+│       │   │   ├── ranking.py
+│       │   │   ├── constraints.py
+│       │   │   ├── api.py
+│       │   │   ├── exceptions.py
+│       │   │   └── tests/
+│       │   │       ├── __init__.py
+│       │   │       ├── test_repository.py
+│       │   │       ├── test_constraints.py
+│       │   │       ├── test_scheduler.py
+│       │   │       ├── test_priority_rules.py
+│       │   │       ├── test_concurrency.py
+│       │   │       └── test_api.py
+│       │   │
+│       │   ├── driver_chat_eta/
+│       │   │   ├── __init__.py
+│       │   │   ├── README.md
+│       │   │   ├── SKILLS.md
+│       │   │   ├── models.py
+│       │   │   ├── repository.py
+│       │   │   ├── service.py
+│       │   │   ├── thread_manager.py
+│       │   │   ├── deduplication.py
+│       │   │   ├── api.py
+│       │   │   ├── exceptions.py
+│       │   │   └── tests/
+│       │   │       ├── __init__.py
+│       │   │       ├── test_repository.py
+│       │   │       ├── test_service.py
+│       │   │       ├── test_thread_manager.py
+│       │   │       ├── test_deduplication.py
+│       │   │       └── test_api.py
+│       │   │
+│       │   └── checkin_portal/
+│       │       ├── __init__.py
+│       │       ├── README.md
+│       │       ├── SKILLS.md
+│       │       ├── models.py
+│       │       ├── repository.py
+│       │       ├── service.py
+│       │       ├── state_machine.py
+│       │       ├── api.py
+│       │       ├── exceptions.py
+│       │       └── tests/
+│       │           ├── __init__.py
+│       │           ├── test_repository.py
+│       │           ├── test_service.py
+│       │           ├── test_state_machine.py
+│       │           └── test_api.py
+│       │
+│       ├── orchestration/
+│       │   ├── __init__.py
+│       │   ├── README.md
+│       │   ├── SKILLS.md
+│       │   ├── agent.py
+│       │   ├── prompts.py
+│       │   ├── chains.py
+│       │   ├── tools.py
+│       │   ├── tool_registry.py
+│       │   ├── session_manager.py
+│       │   └── tests/
+│       │       ├── __init__.py
+│       │       ├── test_tools.py
+│       │       └── test_session_manager.py
+│       │
+│       ├── infrastructure/
+│       │   ├── __init__.py
+│       │   ├── README.md
+│       │   ├── SKILLS.md
+│       │   ├── settings.py
+│       │   ├── supabase_client.py
+│       │   ├── auth.py
+│       │   ├── logging.py
+│       │   ├── observability.py
+│       │   └── database.py
+│       │
+│       └── main.py
+│
+├── tests/
+│   ├── integration/
+│   │   ├── test_delay_to_reschedule_flow.py
+│   │   ├── test_driver_rejects_option.py
+│   │   ├── test_slot_conflict_retry.py
+│   │   ├── test_docked_shipment_locked.py
+│   │   └── test_duplicate_message_flow.py
+│   │
+│   └── fixtures/
+│       ├── shipments.py
+│       ├── appointments.py
+│       └── checkins.py
+│
+└── scripts/
+    ├── seed_supabase.py
+    ├── reset_local_data.py
+    └── run_demo.py
+locust.py
+```
+
+---
+
+# Backend Folder Structure
+
+Every backend follows the same internal structure.
+
+```text
+backend/
+
+└── module_name/
+
+    ├── README.md
+
+    ├── models.py
+
+    ├── repository.py
+
+    ├── service.py
+
+    ├── api.py
+
+    └── tests/
+```
+
+This allows every backend system to remain independently testable and maintainable.
 
 ---
 
 # Scheduling Workflow
 
-```
+```text
 Driver reports delay
 
 ↓
@@ -175,140 +383,170 @@ Identify shipment
 
 ↓
 
-Retrieve appointment
+Retrieve latest ETA
 
 ↓
 
-Determine latest ETA
+Retrieve current appointment
 
 ↓
 
-Check appointment feasibility
+Is current appointment feasible?
+
+        │
+
+        ├── Yes
+
+        │
+
+        ▼
+
+Keep Appointment
+
+        │
+
+        └── No
 
 ↓
 
-Find feasible slots
+Find compatible docks
 
 ↓
 
-Rank options
+Find feasible appointment slots
 
 ↓
 
-Show driver
+Rank appointment options
 
 ↓
 
-Driver accepts
+Present options to driver
 
 ↓
 
-Book appointment
+Driver confirms
+
+↓
+
+Revalidate capacity
+
+↓
+
+Update appointment
+
+↓
+
+Notify stakeholders
 ```
 
 ---
 
-# Scheduling Constraints
+# Deterministic Scheduling Engine
 
-The scheduler considers
+The scheduling engine is entirely deterministic.
 
-- latest ETA
-- warehouse operating hours
-- dock compatibility
-- unloading duration
-- existing appointments
-- shipment priority
-- driver deadline
+Inputs
 
-The scheduler ignores
+- Current Appointments
+- Available Slots
+- Latest ETA
+- Driver Constraints
+- Shipment Priority
+- Dock Compatibility
 
-- labor planning
-- fuel optimization
-- route optimization
+Outputs
 
-to keep the assignment focused.
+- Ranked Appointment Recommendations
 
----
-
-# Appointment States
-
-```
-OPEN
-
-↓
-
-HELD
-
-↓
-
-CONFIRMED
-```
-
-A shown appointment is **not** reserved.
-
-A reserved appointment is **not** confirmed.
-
-Only explicit driver confirmation creates a confirmed appointment.
+The same inputs will always generate the same scheduling outcome.
 
 ---
 
-# Repository Structure
+# Human-in-the-Loop
+
+Appointments are never automatically confirmed.
 
 ```
-setuhaul-exception-agent/
+Generate Options
 
-│
+↓
 
-├── README.md
+Driver Selects
 
-├── requirements.txt
+↓
 
-├── pyproject.toml
+Validate Again
 
-├── .env.example
+↓
 
-│
-
-├── data/
-
-│ ├── schema.sql
-
-│ ├── seed.sql
-
-│ └── database.db
-
-│
-
-├── app/
-
-│ ├── scheduler.py
-
-│ ├── repository.py
-
-│ ├── database.py
-
-│ ├── models.py
-
-│ ├── services/
-
-│ ├── graph/
-
-│ ├── prompts/
-
-│ └── tools/
-
-│
-
-├── tests/
-
-│
-
-├── docs/
-
-│
-
-└── locustfile.py
+Confirm Appointment
 ```
+
+If another request claims the slot before confirmation
+
+```
+Conflict Detected
+
+↓
+
+Re-run Scheduler
+
+↓
+
+Return Updated Options
+```
+
+---
+
+# Conversational Layer
+
+The conversational interface is implemented using **LangChain**.
+
+Responsibilities
+
+- Understand driver messages
+- Identify shipment
+- Extract ETA updates
+- Ask clarification questions
+- Present scheduling options
+- Capture driver confirmation
+
+The conversational layer never makes scheduling decisions.
+
+---
+
+# Authentication & Data Layer
+
+The project uses **Supabase** as the shared operational data layer.
+
+Supabase provides
+
+- PostgreSQL database
+- Authentication
+- Row-Level Security (RLS)
+- API access
+- Real-time capabilities (future scope)
+
+All backend systems communicate with the same operational database while maintaining clear ownership boundaries over their respective tables.
+
+---
+
+# Technology Stack
+
+| Layer | Technology |
+|---------|------------|
+| Language | Python 3.11 |
+| API Framework | FastAPI |
+| LLM Framework | LangChain |
+| Database | Supabase PostgreSQL |
+| Authentication | Supabase Auth |
+| Validation | Pydantic |
+| Testing | Pytest |
+| Load Testing | Locust |
+| Deployment *(Planned)* | AWS Bedrock AgentCore |
+| Observability *(Planned)* | LangSmith |
+| Monitoring *(Planned)* | Amazon CloudWatch |
 
 ---
 
@@ -316,246 +554,60 @@ setuhaul-exception-agent/
 
 ## Phase 1
 
-Database
-
-Deterministic Scheduler
-
-Unit Tests
-
----
+- Backend Systems
+- Supabase Integration
+- Deterministic Scheduling Engine
 
 ## Phase 2
 
-LangChain
-
-Conversation Memory
-
-Clarification Logic
-
----
+- LangChain Agent
+- Tool Integration
+- Conversation Context
 
 ## Phase 3
 
-AgentCore Deployment
-
-CloudWatch
-
-LangSmith
-
-OpenTelemetry
-
----
+- AWS Bedrock AgentCore
+- LangSmith
+- CloudWatch
 
 ## Phase 4
 
-Locust Load Testing
-
-Concurrent Requests
-
-Slot Hold Logic
+- Concurrent Scheduling
+- Load Testing
+- Production Hardening
 
 ---
 
-# Scheduling Algorithm
+# Contributing
 
-The scheduler follows these steps.
-
-## Step 1
-
-Load shipment
-
-## Step 2
-
-Find latest ETA
-
-## Step 3
-
-Retrieve current appointment
-
-## Step 4
-
-Check whether current appointment is still feasible
-
-## Step 5
-
-Retrieve compatible docks
-
-## Step 6
-
-Find available appointment slots
-
-## Step 7
-
-Filter infeasible slots
-
-## Step 8
-
-Rank feasible slots
-
-## Step 9
-
-Return top recommendations
-
-The scheduler never updates the database until explicit driver confirmation.
-
----
-
-# Concurrency
-
-The scheduling engine is designed to prevent
-
-- duplicate bookings
-- stale availability
-- conflicting reservations
-
-Future versions will implement temporary slot holds using transactional database operations.
-
----
-
-# Example Conversation
-
-Driver
-
-```
-Tyre damaged near Neemrana.
-Around 90 minutes late.
-Can I get something after 7 PM?
-```
-
-System
-
-```
-I found your active shipment SHP1006.
-
-Your current appointment is no longer feasible.
-
-Here are the next available slots
-
-1. 7:30 PM
-
-2. 8:00 PM
-
-3. 8:30 PM
-
-Would you like to request one?
-```
-
-Driver
-
-```
-Book the second one.
-```
-
-System
-
-```
-Checking availability...
-
-The 8:00 PM slot has been confirmed.
-```
-
----
-
-# Technology Stack
-
-| Layer | Technology |
-|----------|----------------|
-| Language | Python |
-| Database | SQLite |
-| Validation | Pydantic |
-| Testing | Pytest |
-| Conversation | LangChain |
-| LLM | LangChain |
-| Deployment | AWS Bedrock AgentCore |
-| Observability | LangSmith |
-| Metrics | CloudWatch |
-| Load Testing | Locust |
-
----
-
-# Local Setup
-
-Clone
+1. Create a feature branch.
 
 ```bash
-git clone <repo-url>
+git checkout -b feature/checkin-portal
 ```
 
-Create virtual environment
+2. Commit frequently using meaningful commit messages.
 
-```bash
-python -m venv .venv
-```
+3. Open a Pull Request.
 
-Activate
+4. Request a review before merging into `main`.
 
-```bash
-source .venv/bin/activate
-```
-
-Install
-
-```bash
-pip install -r requirements.txt
-```
-
-Initialize database
-
-```bash
-python app/database.py
-```
-
-Run tests
-
-```bash
-pytest
-```
-
----
-
-# Team Workflow
-
-Every contributor should work on an independent feature branch.
-
-```
-main
-
-├── feature/scheduler
-
-├── feature/database
-
-├── feature/langgraph
-
-└── feature/testing
-```
-
-No direct commits should be made to `main`.
-
----
-
-# Contributors
-
-- Disha Chaudary
-- Kunal Chhabra
-- Adarsh Gaur
-- Gajanan
-- Teja Sagi
+Direct commits to the `main` branch are discouraged.
 
 ---
 
 # Future Enhancements
 
+- Distributed session management
 - Multi-facility scheduling
-- Redis-backed session memory
-- Real-time ETA updates
-- Constraint optimization using OR-Tools
-- Multi-agent coordination
-- Facility-level scheduling engine
-- Customer notifications
-- Analytics dashboard
+- Real-time warehouse notifications
+- Advanced scheduling heuristics
+- Human escalation dashboard
+- Operational analytics
+- OR-Tools based optimization
 
 ---
 
 # License
 
-This repository is created as part of the FDE classroom project and is intended for educational purposes.
+Developed as part of the **SetuHaul Forward Deployed Engineering Challenge**.
