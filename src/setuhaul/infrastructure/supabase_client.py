@@ -2,9 +2,22 @@
 
 from __future__ import annotations
 
-from supabase import Client, ClientOptions, create_client
+from typing import TYPE_CHECKING, Any
 
 from setuhaul.infrastructure.settings import Settings
+
+try:  # pragma: no cover - import-time compatibility shim
+    from supabase import ClientOptions, create_client
+except ModuleNotFoundError:  # pragma: no cover - minimal-runtime fallback
+    ClientOptions = Any  # type: ignore[assignment]
+
+    def create_client(*_: Any, **__: Any) -> Any:
+        raise ModuleNotFoundError("supabase package is not available in this Python environment")
+
+if TYPE_CHECKING:
+    from supabase import Client
+else:
+    Client = Any
 
 
 def create_public_client(settings: Settings) -> Client:

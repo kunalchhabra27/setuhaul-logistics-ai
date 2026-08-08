@@ -1,0 +1,99 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Plus Jakarta Sans", "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+
+  --color-ink: #12121a;
+  --color-ink-soft: #55566b;
+  --color-mist: #8a8ba0;
+  --color-cloud: #f6f6fb;
+  --color-line: #e7e7f1;
+
+  --color-brand-pink: #ec4899;
+  --color-brand-purple: #9333ea;
+  --color-brand-orange: #f97316;
+
+  --color-tms: #2563eb;
+  --color-tms-soft: #eaf0ff;
+  --color-wms: #d97706;
+  --color-wms-soft: #fef3e2;
+  --color-checkin: #059669;
+  --color-checkin-soft: #e6f7f1;
+  --color-drivers: #db2777;
+  --color-drivers-soft: #fdeaf3;
+
+  --shadow-soft: 0 1px 2px rgba(18, 18, 26, 0.04), 0 12px 32px -12px rgba(18, 18, 26, 0.12);
+  --shadow-pop: 0 1px 2px rgba(18, 18, 26, 0.06), 0 24px 48px -16px rgba(18, 18, 26, 0.22);
+
+  --animate-drift: drift 18s linear infinite;
+  --animate-dash: dash 0.9s linear infinite;
+  --animate-float: float 5s ease-in-out infinite;
+  --animate-bob: bob 2.4s ease-in-out infinite;
+}
+
+@keyframes drift {
+  from { background-position: 0 0; }
+  to { background-position: -200px 0; }
+}
+@keyframes dash {
+  to { stroke-dashoffset: -40; }
+}
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
+}
+@keyframes bob {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  50% { transform: translateY(-3px) rotate(-0.4deg); }
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-cloud);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--color-brand-pink);
+  color: white;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #d9d9e6 transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #d9d9e6;
+  border-radius: 999px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #c3c3d6;
+}
+
+.brand-gradient-text {
+  background-image: linear-gradient(90deg, var(--color-brand-pink), var(--color-brand-purple), var(--color-brand-orange));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.road-strip {
+  background-image: repeating-linear-gradient(
+    90deg,
+    #fff 0px,
+    #fff 22px,
+    transparent 22px,
+    transparent 40px
+  );
+}

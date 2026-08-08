@@ -6,7 +6,12 @@ from typing import Any, Iterable
 from uuid import UUID
 
 from postgrest.exceptions import APIError
-from supabase import Client
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from supabase import Client
+else:
+    Client = Any
 
 from setuhaul.backend.tms.exceptions import (
     BusinessValidationError,

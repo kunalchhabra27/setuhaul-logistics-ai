@@ -3,9 +3,20 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import os
 
-from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import BaseModel, Field, field_validator
+
+try:
+    from pydantic_settings import BaseSettings, SettingsConfigDict
+except ModuleNotFoundError:  # pragma: no cover - fallback for minimal runtimes
+    BaseSettings = BaseModel
+
+    class SettingsConfigDict(dict):  # type: ignore[override]
+        """Fallback config container when pydantic-settings is unavailable."""
+
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
 
 
 class Settings(BaseSettings):
@@ -28,4 +39,17 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     """Return the process-wide immutable settings instance."""
-    return Settings()  # type: ignore[call-arg]
+    if hasattr(Settings, "model_validate"):
+        data = {
+            "SUPABASE_URL": os.getenv("SUPABASE_URL"),
+            "SUPABASE_PUBLISHABLE_KEY": os.getenv("SUPABASE_PUBLISHABLE_KEY"),
+            "ENVIRONMENT": os.getenv("ENVIRONMENT", "development"),
+            "LOG_LEVEL": os.getenv("LOG_LEVEL", "INFO"),
+        }
+        return Settings.model_validate(data)  # type: ignore[attr-defined]
+    return Settings(
+        SUPABASE_URL=os.getenv("SUPABASE_URL"),
+        SUPABASE_PUBLISHABLE_KEY=os.getenv("SUPABASE_PUBLISHABLE_KEY"),
+        ENVIRONMENT=os.getenv("ENVIRONMENT", "development"),
+        LOG_LEVEL=os.getenv("LOG_LEVEL", "INFO"),
+    )
