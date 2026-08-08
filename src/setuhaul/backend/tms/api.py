@@ -30,8 +30,16 @@ from setuhaul.infrastructure.auth import Principal, require_admin, require_reade
 from setuhaul.infrastructure.settings import get_settings
 from setuhaul.infrastructure.supabase_client import create_caller_client
 
-router = APIRouter(prefix="/api/v1/tms", tags=["tms"])
+router = APIRouter(prefix="/tms", tags=["tms"])
 
+@router.get("/health")
+def health() -> dict[str, str]:
+    """Return a lightweight status payload for TMS smoke checks.
+
+    Example:
+    `GET /tms/health`
+    """
+    return {"status": "ok", "system": "tms"}
 
 def get_service(
     principal: Principal = Depends(require_reader),

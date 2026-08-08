@@ -26,7 +26,17 @@ class CheckInRepository:
             (shipment_id,),
         ).fetchone()
 
-        return dict(row) if row else None
+        if row is None:
+            return None
+        record = dict(row)
+        return {
+            **record,
+            "arrival_status": record.get("arrival_state"),
+            "queue_status": record.get("queue_state"),
+            "gate_in_at": record.get("gate_in_ts"),
+            "dock_in_at": record.get("dock_in_ts"),
+            "completed_at": record.get("unload_end_ts"),
+        }
 
     def create_gate_checkin(
         self,
@@ -42,11 +52,12 @@ class CheckInRepository:
                 checkin_id,
                 shipment_id,
                 facility_id,
-                gate_in_at,
-                arrival_status,
-                queue_status
+                gate_in_ts,
+                arrival_state,
+                queue_state,
+                updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 checkin_id,
@@ -55,6 +66,7 @@ class CheckInRepository:
                 gate_in_at,
                 "GATE_IN",
                 "GATE_QUEUE",
+                gate_in_at,
             ),
         )
 
@@ -65,7 +77,9 @@ class CheckInRepository:
         self.connection.execute(
             """
             UPDATE facility_checkins
-            SET queue_status = ?
+            SET arrival_state = 'WAITING',
+                queue_state = ?,
+                updated_at = CURRENT_TIMESTAMP
             WHERE shipment_id = ?
             """,
             (queue_status, shipment_id),
@@ -77,8 +91,10 @@ class CheckInRepository:
         self.connection.execute(
             """
             UPDATE facility_checkins
-            SET arrival_status = 'DOCKED',
-                dock_in_at = ?
+            SET arrival_state = 'DOCKED',
+                queue_state = 'NONE',
+                dock_in_ts = ?,
+                updated_at = CURRENT_TIMESTAMP
             WHERE shipment_id = ?
             """,
             (dock_in_at, shipment_id),
@@ -90,8 +106,10 @@ class CheckInRepository:
         self.connection.execute(
             """
             UPDATE facility_checkins
-            SET arrival_status = 'COMPLETED',
-                completed_at = ?
+            SET arrival_state = 'COMPLETED',
+                queue_state = 'NONE',
+                unload_end_ts = ?,
+                updated_at = CURRENT_TIMESTAMP
             WHERE shipment_id = ?
             """,
             (completed_at, shipment_id),
@@ -103,41 +121,44 @@ class CheckInRepository:
         return [
             {
                 "system": "TMS",
+                "label": "Transport Management System",
                 "owns": [
-                    "shipment identity",
-                    "vehicle assignment",
-                    "driver assignment",
-                    "destination facility",
-                    "shipment status",
+                    "Shipment identity",
+                    "Vehicle assignment",
+                    "Driver assignment",
+                    "Destination facility",
+                    "Shipment status",
                 ],
                 "consumes": [],
-                "notes": "Check-in Portal may use TMS data to validate destination facility.",
+                "notes": "Check-in Portal may use TMS data to validate the destination facility.",
             },
             {
                 "system": "DOCK_SCHEDULER",
+                "label": "Dock Scheduler / WMS",
                 "owns": [
-                    "docks",
-                    "appointment slots",
-                    "appointments",
-                    "scheduling decisions",
+                    "Docks",
+                    "Appointment slots",
+                    "Appointments",
+                    "Scheduling decisions",
                 ],
                 "consumes": [
-                    "check-in state",
-                    "gate-in status",
-                    "dock status",
-                    "completion status",
+                    "Check-in state",
+                    "Gate-in status",
+                    "Dock status",
+                    "Completion status",
                 ],
-                "notes": "Dock Scheduler uses check-in state to assess operational feasibility.",
+                "notes": "Dock Scheduler uses Check-in Portal state to assess operational feasibility.",
             },
             {
                 "system": "DRIVER_CHAT_ETA",
+                "label": "Driver Chat / ETA Portal",
                 "owns": [
-                    "driver messages",
-                    "exceptions",
-                    "declared ETA updates",
-                    "conversation threads",
+                    "Driver messages",
+                    "Exceptions",
+                    "Declared ETA updates",
+                    "Conversation threads",
                 ],
                 "consumes": [],
-                "notes": "Driver ETA updates do not define actual warehouse arrival state.",
+                "notes": "Driver ETA updates do not define the actual warehouse arrival state.",
             },
         ]
