@@ -1,6 +1,6 @@
 # 🚛 SetuHaul Intelligent Dock Rescheduler
 
-> A conversational logistics exception handling system that assists truck drivers in reporting delays while using a deterministic scheduling engine to generate feasible dock appointment recommendations.
+> A logistics operations platform with a deterministic backend and a React portal for TMS, dock scheduling, driver communication, and check-in workflows.
 
 ---
 
@@ -10,23 +10,37 @@ SetuHaul is a freight logistics company operating across multiple warehouses.
 
 Every shipment is assigned a destination warehouse and a dock appointment before the truck begins its journey.
 
-When delays occur due to vehicle breakdowns, traffic, weather, or operational issues, drivers currently contact warehouse coordinators manually to reschedule appointments.
+When delays occur due to vehicle breakdowns, traffic, weather, or operational issues, drivers can report exceptions through the portal while the backend keeps all scheduling and state transitions deterministic.
 
-This process is repetitive, time-consuming, and difficult to manage when multiple delayed trucks compete for limited warehouse capacity.
+The repository now contains:
 
-This project builds a **Conversational Exception Handling Agent** that assists drivers while ensuring **all scheduling decisions remain deterministic, explainable, and operationally safe.**
-
----
-
-# Problem Statement
-
-> How can SetuHaul provide a conversational interface for drivers to report delays, ask questions, and receive revised appointment options while ensuring limited warehouse capacity is allocated deterministically without conflicting promises?
+- a FastAPI backend with TMS, dock scheduler, check-in, and driver chat routers
+- a React + TypeScript + Vite frontend in [`frontend/`](./frontend/)
+- deterministic backend tests and a production frontend build
 
 ---
+
+# What You Can Do
+
+## Frontend Portal
+
+- open the landing page and choose a workspace
+- sign in to a service-specific portal shell
+- move between TMS, dock scheduler, check-in, and driver chat views
+- use the real check-in UI against the backend `/checkins` APIs
+- see the existing truck transition animation and portal visuals preserved from the supplied portal ZIP
+
+## Backend Systems
+
+- query and manage TMS records
+- ask the dock scheduler for slot suggestions, holds, and confirmations
+- record check-in lifecycle transitions
+- expose driver chat service availability
+- keep all business rules and state transitions in the Python backend, not in React
 
 # Design Philosophy
 
-The architecture intentionally separates **conversation** from **business decision making**.
+The architecture intentionally separates **UI**, **conversation**, and **business decision making**.
 
 ```text
 Driver
@@ -64,6 +78,13 @@ The conversational layer **never allocates warehouse capacity.**
 The scheduling engine **never interprets natural language.**
 
 The FastAPI application is the thin HTTP layer that exposes each backend system as a router while keeping the business logic inside the corresponding service classes.
+
+The new React portal in [`frontend/`](./frontend/) is intentionally thin:
+
+- it renders the existing portal experience
+- it reads data from FastAPI where endpoints already exist
+- it never reproduces the backend state machine in React
+- it keeps auth, API clients, and feature screens separated for future expansion
 
 ---
 
@@ -128,12 +149,26 @@ Owns
 - Planned ETA
 - Shipment Priority
 - Origin & Destination
+- Driver and shipment context lookups
 
 Does **not** own
 
 - Appointment scheduling
 - Driver conversations
 - Facility check-ins
+
+### TMS features
+
+- list shipments with pagination and filters
+- fetch shipment details
+- fetch driver details by phone or ID
+- fetch shipments assigned to a driver
+- fetch active shipments assigned to a driver
+- create drivers, vehicles, and shipments
+- update drivers, vehicles, and shipments
+- return driver context for portal use
+- return shipment context for portal use
+- preserve backend authorization rules for reader and admin roles
 
 ---
 
@@ -149,12 +184,23 @@ Owns
 - Dock Rules
 - Current Appointments
 - Deterministic Scheduling Engine
+- Slot holds and confirmations
 
 Does **not** own
 
 - ETA updates
 - Physical truck arrival
 - Driver conversations
+
+### Dock Scheduler features
+
+- suggest feasible dock slots for a shipment
+- create temporary holds for a slot
+- request confirmation for a hold
+- confirm or reject a slot booking
+- cancel an active hold
+- enforce deterministic conflict handling and error responses
+- keep slot allocation logic inside the backend scheduler, not the frontend
 
 ---
 
@@ -174,6 +220,13 @@ Does **not** own
 
 - Capacity allocation
 - Appointment scheduling
+
+### Driver Chat / ETA features
+
+- health endpoint for service availability
+- supports the chat/ETA portal shell in the frontend
+- remains isolated so future driver message and ETA APIs can be added without changing the UI architecture
+- the current frontend intentionally does not fake message persistence or OTP flows
 
 ---
 
@@ -195,6 +248,16 @@ Does **not** own
 - ETA interpretation
 - Driver conversations
 
+### Check-in Portal features
+
+- fetch the current check-in state for a shipment
+- create gate check-ins
+- update queue status
+- mark shipments as docked
+- mark unloads as completed
+- enforce backend-validated state transitions only
+- refresh the UI from the backend after each mutation
+
 ---
 
 # FastAPI App
@@ -204,35 +267,204 @@ The current application entrypoint is [`src/setuhaul/main.py`](./src/setuhaul/ma
 It wires the backend routers into one FastAPI app:
 
 - `/health`
-- `/tms/health`
+- `/tms/*`
 - `/dock-scheduler/*`
 - `/checkins/*`
-- `/driver-chat-eta/health`
+- `/driver-chat-eta/*`
 
-## Local Run
+The effective API prefix is `/api/v1` for the feature routers:
+
+- `/api/v1/tms/*`
+- `/api/v1/dock-scheduler/*`
+- `/api/v1/checkins/*`
+- `/api/v1/driver-chat-eta/*`
+
+---
+
+# How To Run
+
+## 1. Prerequisites
+
+Install:
+
+- Python 3.11 or newer
+- `uv`
+- Node.js 20+ and `npm`
+
+Optional but recommended:
+
+- a local `.env` file for backend secrets
+- a local `.env` file in [`frontend/`](./frontend/) for frontend environment variables
+
+## 2. Backend Environment
 
 From the repository root:
 
 ```bash
+uv sync
+```
+
+This installs the Python dependencies declared in [`pyproject.toml`](./pyproject.toml).
+
+If `uv` uses a cache path your system cannot access, run:
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache uv sync
+```
+
+## 3. Backend Configuration
+
+Set these environment variables for the backend:
+
+```bash
+export SUPABASE_URL="https://your-project.supabase.co"
+export SUPABASE_PUBLISHABLE_KEY="your-publishable-key"
+export FRONTEND_ORIGIN="http://localhost:5173"
+export LOG_LEVEL="INFO"
+```
+
+Notes:
+
+- `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` are required by the Python backend.
+- `FRONTEND_ORIGIN` is used for CORS.
+- The backend does not expose or require a Supabase service-role key.
+- backend env examples live in [`.env.example`](./.env.example)
+
+## 4. Start The Backend
+
+From the repository root:
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache uv run uvicorn setuhaul.main:app --reload
+```
+
+If you prefer to use an activated virtual environment instead of `uv run`:
+
+```bash
+source .venv/bin/activate
 PYTHONPATH=src uvicorn setuhaul.main:app --reload
 ```
 
-Then open:
+Backend URLs:
 
 - `http://127.0.0.1:8000/health`
 - `http://127.0.0.1:8000/docs`
+- `http://127.0.0.1:8000/api/v1/tms/health`
 
-## Check-in Portal API
+## 5. Frontend Environment
 
-The Check-in Portal exposes the physical facility lifecycle through FastAPI.
+From the `frontend/` folder:
 
-Available endpoints:
+```bash
+cp .env.example .env
+```
 
-- `GET /checkins/{shipment_id}`
-- `POST /checkins/gate`
-- `PATCH /checkins/queue`
-- `PATCH /checkins/dock`
-- `PATCH /checkins/complete`
+Edit `frontend/.env` as needed:
+
+```bash
+VITE_API_BASE_URL=http://localhost:8000
+VITE_SUPABASE_URL=
+VITE_SUPABASE_ANON_KEY=
+```
+
+Notes:
+
+- `VITE_API_BASE_URL` should point at the backend origin, not include `/api/v1`.
+- the frontend app will add `/api/v1` internally
+- Supabase auth bootstrap is isolated under `frontend/src/auth/`
+- OTP/Twilio flows are intentionally not faked
+- frontend env examples live in [`frontend/.env.example`](./frontend/.env.example)
+
+## 6. Start The Frontend
+
+## Frontend
+
+The portal frontend now lives in [`frontend/`](./frontend/).
+
+From a second terminal:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Frontend URLs:
+
+- `http://127.0.0.1:5173`
+- `http://127.0.0.1:5173/auth/tms`
+- `http://127.0.0.1:5173/portal/checkin`
+
+The check-in portal is wired to the real backend `/checkins` APIs and refreshes state after each mutation. TMS and dock scheduler screens call the existing backend endpoints; driver chat currently consumes the existing health endpoint until more API coverage is available.
+
+---
+
+---
+
+# API Reference
+
+All routes below are prefixed by the FastAPI app and are available from the same server.
+
+## System
+
+- `GET /health`
+
+## TMS
+
+All routes below are under `/api/v1/tms`.
+
+Public:
+
+- `GET /api/v1/tms/health`
+
+Read access:
+
+- `GET /api/v1/tms/drivers?phone=...`
+- `GET /api/v1/tms/drivers/{driver_id}`
+- `GET /api/v1/tms/drivers/{driver_id}/shipments`
+- `GET /api/v1/tms/drivers/{driver_id}/active-shipments`
+- `GET /api/v1/tms/vehicles/{vehicle_id}`
+- `GET /api/v1/tms/shipments`
+- `GET /api/v1/tms/shipments/{shipment_id}`
+- `GET /api/v1/tms/context/drivers/{driver_id}`
+- `GET /api/v1/tms/context/shipments/{shipment_id}`
+
+Write access:
+
+- `POST /api/v1/tms/drivers`
+- `PATCH /api/v1/tms/drivers/{driver_id}`
+- `POST /api/v1/tms/vehicles`
+- `PATCH /api/v1/tms/vehicles/{vehicle_id}`
+- `POST /api/v1/tms/shipments`
+- `PATCH /api/v1/tms/shipments/{shipment_id}`
+
+Query parameters for `GET /tms/shipments`:
+
+- `driver_id`
+- `destination_id`
+- `status`
+- `limit`
+- `offset`
+
+## Dock Scheduler
+
+All routes below are under `/api/v1/dock-scheduler`.
+
+- `POST /api/v1/dock-scheduler/suggest`
+- `POST /api/v1/dock-scheduler/hold`
+- `POST /api/v1/dock-scheduler/request-confirmation`
+- `POST /api/v1/dock-scheduler/confirm`
+- `POST /api/v1/dock-scheduler/cancel-hold`
+
+## Check-in Portal
+
+All routes below are under `/api/v1/checkins`.
+
+- `GET /api/v1/checkins/{shipment_id}`
+- `POST /api/v1/checkins/gate`
+- `PATCH /api/v1/checkins/queue`
+- `PATCH /api/v1/checkins/dock`
+- `PATCH /api/v1/checkins/complete`
 
 Example gate-in payload:
 
@@ -271,11 +503,104 @@ Example completion payload:
 }
 ```
 
+## Driver Chat / ETA
+
+All routes below are under `/api/v1/driver-chat-eta`.
+
+- `GET /api/v1/driver-chat-eta/health`
+
+---
+
+## Frontend Integration Notes
+
+The React frontend uses these integration points:
+
+- check-in status refresh after every mutation
+- TMS shipment list reads from `/api/v1/tms/shipments`
+- dock scheduler suggestions read from `/api/v1/dock-scheduler/suggest`
+- driver chat shell reads `/api/v1/driver-chat-eta/health`
+- Supabase auth bootstrap lives under `frontend/src/auth/`
+- Twilio OTP integration is intentionally not faked and should be added only when backend support is ready
+
 ## Current Local Validation
 
-The check-in portal business layer is covered by deterministic unit tests and currently passes locally with SQLite-backed testing.
+- Check-in portal backend tests pass locally.
+- Frontend production build passes locally.
+- Backend business logic, scheduler logic, and state machine logic were not refactored for the frontend integration.
 
-The FastAPI layer is live for local smoke testing, while the shared Supabase-backed persistence layer is still the next planned step.
+---
+
+# Feature Matrix
+
+## Landing Page
+
+- animated SetuHaul hero
+- service cards for TMS, dock scheduler, check-in, and driver portal
+- truck transition animation between service routes
+- responsive desktop and mobile layout
+
+## Auth Page
+
+- per-service sign-in shell
+- isolated auth state per workspace
+- placeholder auth UI ready for Supabase integration
+
+## Portal Workspace
+
+- header with service switching
+- sidebar navigation
+- workspace-specific panels
+- preserved portal styling and motion
+
+## Check-in Workspace
+
+- fetch shipment check-in state
+- gate check-in
+- queue update
+- mark docked
+- complete unload
+- backend refresh after every mutation
+
+## TMS Workspace
+
+- shipment table view
+- API-backed shipment listing
+- future-ready structure for shipment create/update flows
+
+## Dock Scheduler Workspace
+
+- slot suggestion list
+- API-backed scheduler calls
+- future-ready hold/confirmation structure
+
+## Driver Chat Workspace
+
+- service health integration
+- placeholder conversation shell
+- isolated for future chat/ETA API expansion
+
+---
+
+# Verification
+
+What currently passes:
+
+- backend test suite
+- frontend production build
+
+Recommended local commands:
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache uv run pytest -q
+cd frontend && npm run build
+```
+
+If you want to run the app end-to-end, keep both servers open:
+
+```bash
+UV_CACHE_DIR=/private/tmp/uv-cache uv run uvicorn setuhaul.main:app --reload
+cd frontend && npm run dev
+```
 
 ---
 
