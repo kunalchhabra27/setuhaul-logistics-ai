@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 import os
+from pathlib import Path
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -26,6 +27,7 @@ class Settings(BaseSettings):
 
     supabase_url: str = Field(alias="SUPABASE_URL")
     supabase_publishable_key: str = Field(alias="SUPABASE_PUBLISHABLE_KEY")
+    data_backend: str = Field(default="local", alias="DATA_BACKEND")
     environment: str = Field(default="development", alias="ENVIRONMENT")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
@@ -35,6 +37,11 @@ class Settings(BaseSettings):
         """Remove trailing slashes so client paths remain stable."""
         return value.rstrip("/")
 
+    @field_validator("data_backend")
+    @classmethod
+    def normalize_data_backend(cls, value: str) -> str:
+        return value.strip().lower()
+
 
 @lru_cache
 def get_settings() -> Settings:
@@ -43,6 +50,7 @@ def get_settings() -> Settings:
         data = {
             "SUPABASE_URL": os.getenv("SUPABASE_URL"),
             "SUPABASE_PUBLISHABLE_KEY": os.getenv("SUPABASE_PUBLISHABLE_KEY"),
+            "DATA_BACKEND": os.getenv("DATA_BACKEND", "local"),
             "ENVIRONMENT": os.getenv("ENVIRONMENT", "development"),
             "LOG_LEVEL": os.getenv("LOG_LEVEL", "INFO"),
         }
@@ -50,6 +58,7 @@ def get_settings() -> Settings:
     return Settings(
         SUPABASE_URL=os.getenv("SUPABASE_URL"),
         SUPABASE_PUBLISHABLE_KEY=os.getenv("SUPABASE_PUBLISHABLE_KEY"),
+        DATA_BACKEND=os.getenv("DATA_BACKEND", "local"),
         ENVIRONMENT=os.getenv("ENVIRONMENT", "development"),
         LOG_LEVEL=os.getenv("LOG_LEVEL", "INFO"),
     )
