@@ -63,6 +63,8 @@ The conversational layer **never allocates warehouse capacity.**
 
 The scheduling engine **never interprets natural language.**
 
+The FastAPI application is the thin HTTP layer that exposes each backend system as a router while keeping the business logic inside the corresponding service classes.
+
 ---
 
 # System Architecture
@@ -192,6 +194,88 @@ Does **not** own
 - Appointment allocation
 - ETA interpretation
 - Driver conversations
+
+---
+
+# FastAPI App
+
+The current application entrypoint is [`src/setuhaul/main.py`](./src/setuhaul/main.py).
+
+It wires the backend routers into one FastAPI app:
+
+- `/health`
+- `/tms/health`
+- `/dock-scheduler/*`
+- `/checkins/*`
+- `/driver-chat-eta/health`
+
+## Local Run
+
+From the repository root:
+
+```bash
+PYTHONPATH=src uvicorn setuhaul.main:app --reload
+```
+
+Then open:
+
+- `http://127.0.0.1:8000/health`
+- `http://127.0.0.1:8000/docs`
+
+## Check-in Portal API
+
+The Check-in Portal exposes the physical facility lifecycle through FastAPI.
+
+Available endpoints:
+
+- `GET /checkins/{shipment_id}`
+- `POST /checkins/gate`
+- `PATCH /checkins/queue`
+- `PATCH /checkins/dock`
+- `PATCH /checkins/complete`
+
+Example gate-in payload:
+
+```json
+{
+  "shipment_id": "SHP1006",
+  "facility_id": "FAC-JAI-01",
+  "gate_in_at": "2026-08-08T18:03:00+05:30"
+}
+```
+
+Example queue update payload:
+
+```json
+{
+  "shipment_id": "SHP1006",
+  "queue_status": "YARD_QUEUE"
+}
+```
+
+Example dock-in payload:
+
+```json
+{
+  "shipment_id": "SHP1006",
+  "dock_in_at": "2026-08-08T18:25:00+05:30"
+}
+```
+
+Example completion payload:
+
+```json
+{
+  "shipment_id": "SHP1006",
+  "completed_at": "2026-08-08T19:05:00+05:30"
+}
+```
+
+## Current Local Validation
+
+The check-in portal business layer is covered by deterministic unit tests and currently passes locally with SQLite-backed testing.
+
+The FastAPI layer is live for local smoke testing, while the shared Supabase-backed persistence layer is still the next planned step.
 
 ---
 
