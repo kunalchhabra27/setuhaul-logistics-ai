@@ -580,6 +580,18 @@ SELECT
     r.created_at AS eta_updated_at
 FROM shipments s
 LEFT JOIN ranked r ON r.shipment_id = s.shipment_id AND r.rn = 1;
+CREATE TABLE slot_holds (
+    hold_id TEXT PRIMARY KEY,
+    slot_id TEXT NOT NULL,
+    shipment_id TEXT NOT NULL,
+    hold_status TEXT NOT NULL DEFAULT 'HELD'
+        CHECK (hold_status IN ('HELD','EXPIRED','CONVERTED','RELEASED')),
+    held_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    released_at TEXT,
+    FOREIGN KEY (slot_id) REFERENCES appointment_slots(slot_id),
+    FOREIGN KEY (shipment_id) REFERENCES shipments(shipment_id)
+);
 CREATE VIEW v_slot_availability AS
 SELECT
     sl.slot_id,
@@ -593,16 +605,24 @@ SELECT
     CASE
         WHEN sl.slot_status <> 'OPEN' THEN sl.slot_status
         WHEN a.appointment_id IS NOT NULL THEN 'OCCUPIED'
+        WHEN h.hold_id IS NOT NULL THEN 'HELD'
         ELSE 'AVAILABLE'
     END AS availability_status,
     a.appointment_id,
     a.shipment_id,
-    a.appointment_status
+    a.appointment_status,
+    h.hold_id,
+    h.held_shipment_id
 FROM appointment_slots sl
 JOIN docks d ON d.dock_id = sl.dock_id
 LEFT JOIN appointments a
     ON a.slot_id = sl.slot_id
-   AND a.appointment_status IN ('PENDING_CONFIRMATION','CONFIRMED','IN_PROGRESS');
+   AND a.appointment_status IN ('PENDING_CONFIRMATION','CONFIRMED','IN_PROGRESS')
+LEFT JOIN (
+    SELECT hold_id, slot_id, shipment_id AS held_shipment_id
+    FROM slot_holds
+    WHERE hold_status = 'HELD'
+) h ON h.slot_id = sl.slot_id;
 CREATE VIEW v_inbound_operational_state AS
 SELECT
     s.shipment_id,

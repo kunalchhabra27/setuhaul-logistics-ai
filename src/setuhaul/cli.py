@@ -4,10 +4,10 @@ import argparse
 from datetime import datetime
 from pathlib import Path
 
+from setuhaul.backend.dock_scheduler.models import DriverConstraints
+from setuhaul.backend.dock_scheduler.repository import DockSchedulerRepository
+from setuhaul.backend.dock_scheduler.service import DockSchedulerService
 from setuhaul.db.connection import build_database, connect
-from setuhaul.db.repository import OperationsRepository
-from setuhaul.models import DriverConstraints
-from setuhaul.scheduling.engine import DeterministicReschedulingEngine
 
 
 def main() -> None:
@@ -29,8 +29,8 @@ def main() -> None:
         else None
     )
     with connect(db_path) as connection:
-        engine = DeterministicReschedulingEngine(OperationsRepository(connection))
-        suggestions = engine.suggest(args.shipment_id, constraints)
+        service = DockSchedulerService(DockSchedulerRepository(connection))
+        suggestions = service.suggest_slots(args.shipment_id, constraints)
 
     if not suggestions:
         print("No feasible slot found. Escalate to human operations.")
