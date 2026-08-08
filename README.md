@@ -350,6 +350,9 @@ Backend URLs:
 - `http://127.0.0.1:8000/health`
 - `http://127.0.0.1:8000/docs`
 - `http://127.0.0.1:8000/api/v1/tms/health`
+- `http://127.0.0.1:8000/api/v1/checkins/SHP1006`
+
+By default the backend uses the local seeded SQLite dataset so the app stays runnable even when Supabase is unavailable. If you later wire in Supabase-backed persistence again, keep the same API surface and switch only the repository layer.
 
 ## 5. Frontend Environment
 
@@ -364,13 +367,14 @@ Edit `frontend/.env` as needed:
 ```bash
 VITE_API_BASE_URL=http://localhost:8000
 VITE_SUPABASE_URL=
-VITE_SUPABASE_ANON_KEY=
+VITE_SUPABASE_PUBLISHABLE_KEY=
 ```
 
 Notes:
 
 - `VITE_API_BASE_URL` should point at the backend origin, not include `/api/v1`.
 - the frontend app will add `/api/v1` internally
+- frontend and backend should point at the same Supabase project when Supabase is enabled
 - Supabase auth bootstrap is isolated under `frontend/src/auth/`
 - OTP/Twilio flows are intentionally not faked
 - frontend env examples live in [`frontend/.env.example`](./frontend/.env.example)
@@ -396,6 +400,12 @@ Frontend URLs:
 - `http://127.0.0.1:5173/portal/checkin`
 
 The check-in portal is wired to the real backend `/checkins` APIs and refreshes state after each mutation. TMS and dock scheduler screens call the existing backend endpoints; driver chat currently consumes the existing health endpoint until more API coverage is available.
+
+Important routing note:
+
+- the backend API is mounted under `/api/v1`
+- check-in URLs in Swagger should use `/api/v1/checkins/...`
+- if you open `/checkins/...` directly, that is a different path and may return 404
 
 ---
 
@@ -600,6 +610,12 @@ If you want to run the app end-to-end, keep both servers open:
 ```bash
 UV_CACHE_DIR=/private/tmp/uv-cache uv run uvicorn setuhaul.main:app --reload
 cd frontend && npm run dev
+```
+
+If you need to force the local backend explicitly:
+
+```bash
+DATA_BACKEND=local UV_CACHE_DIR=/private/tmp/uv-cache uv run uvicorn setuhaul.main:app --reload
 ```
 
 ---
