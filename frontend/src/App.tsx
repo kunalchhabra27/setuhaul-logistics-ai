@@ -6,6 +6,7 @@ import TruckTransition from "./components/TruckTransition";
 import Landing from "./pages/Landing";
 import AuthPage from "./pages/AuthPage";
 import PortalWorkspace from "./pages/PortalWorkspace";
+import ProtectedServiceRoute from "./routes/ProtectedServiceRoute";
 
 export default function App() {
   return (
@@ -16,7 +17,7 @@ export default function App() {
             <Route element={<Layout />}>
               <Route path="/" element={<Landing />} />
               <Route path="/auth/:serviceId" element={<AuthPage />} />
-              <Route path="/portal/:serviceId" element={<PortalWorkspace />} />
+              <Route path="/portal/:serviceId" element={<ProtectedServiceRoute><PortalWorkspace /></ProtectedServiceRoute>} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Route>
           </Routes>

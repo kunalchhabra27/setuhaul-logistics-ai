@@ -65,12 +65,12 @@ export default function HeroIllustration() {
 
         <motion.div
           className="absolute top-1/2 -translate-y-[68%]"
-          animate={{ left: ["4%", "82%", "4%"] }}
-          transition={{ duration: 9, repeat: Infinity, ease: "easeInOut" }}
+          animate={{ x: ["-18vw", "110vw"] }}
+          transition={{ duration: 9, repeat: Infinity, ease: "linear" }}
         >
           <motion.div animate={{ y: [0, -3, 0] }} transition={{ duration: 0.4, repeat: Infinity }}>
             <Truck
-              className="h-9 w-9 -scale-x-100 text-ink drop-shadow-[0_10px_10px_rgba(0,0,0,0.15)]"
+              className="h-9 w-9 text-ink drop-shadow-[0_10px_10px_rgba(0,0,0,0.15)]"
               strokeWidth={1.75}
             />
           </motion.div>

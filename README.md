@@ -25,8 +25,9 @@ The repository now contains:
 ## Frontend Portal
 
 - open the landing page and choose a workspace
-- sign in to a service-specific portal shell
-- move between TMS, dock scheduler, check-in, and driver chat views
+- sign in to a service-specific portal shell using Supabase Auth
+- access only the portal your account is authorized for
+- move between TMS, dock scheduler, check-in, and driver chat views when authorized
 - use the real check-in UI against the backend `/checkins` APIs
 - see the existing truck transition animation and portal visuals preserved from the supplied portal ZIP
 
@@ -365,16 +366,23 @@ cp .env.example .env
 Edit `frontend/.env` as needed:
 
 ```bash
-VITE_API_BASE_URL=http://localhost:8000
-VITE_SUPABASE_URL=
-VITE_SUPABASE_PUBLISHABLE_KEY=
+VITE_API_BASE_URL=http://127.0.0.1:8000
+VITE_SUPABASE_URL=https://dhwvaqfwdjddmuzzbguc.supabase.co
+VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_cN-8VtoDPUrfCnpWMXRsPA_v-utcoAU
 ```
 
 Notes:
 
 - `VITE_API_BASE_URL` should point at the backend origin, not include `/api/v1`.
 - the frontend app will add `/api/v1` internally
-- frontend and backend should point at the same Supabase project when Supabase is enabled
+- frontend and backend point at the same Supabase project
+- use the same Supabase URL value in both places:
+  - backend: `SUPABASE_URL`
+  - frontend: `VITE_SUPABASE_URL`
+- use the same Supabase publishable key value in both places:
+  - backend: `SUPABASE_PUBLISHABLE_KEY`
+  - frontend: `VITE_SUPABASE_PUBLISHABLE_KEY`
+- frontend authorization is department-scoped through the signed-in Supabase user metadata
 - Supabase auth bootstrap is isolated under `frontend/src/auth/`
 - OTP/Twilio flows are intentionally not faked
 - frontend env examples live in [`frontend/.env.example`](./frontend/.env.example)
@@ -400,6 +408,13 @@ Frontend URLs:
 - `http://127.0.0.1:5173/portal/checkin`
 
 The check-in portal is wired to the real backend `/checkins` APIs and refreshes state after each mutation. TMS and dock scheduler screens call the existing backend endpoints; driver chat currently consumes the existing health endpoint until more API coverage is available.
+
+Auth and authorization notes:
+
+- `/auth/drivers`, `/auth/tms`, `/auth/wms`, and `/auth/checkin` are service-specific entry points
+- a valid Supabase session means the user is authenticated, not authorized for every portal
+- portal access is restricted by the user's `service_role` metadata
+- unauthorized service switches redirect to the matching auth page with an access-denied message
 
 Important routing note:
 
@@ -513,6 +528,61 @@ Example completion payload:
 }
 ```
 
+### Check-in test values
+
+The backend service accepts business identifiers like `SHP1006` and `FAC-JAI-01`, but the live Supabase schema shown in the attached table definition stores `shipment_id` and `facility_id` as UUIDs.
+
+Use these values when you want to test the Supabase-backed table directly:
+
+- `shipment_id`: a real UUID from `public.shipments.shipment_id`
+- `facility_id`: a real UUID from `public.facilities.facility_id`
+
+Use these values when you want to test the local seeded SQLite backend:
+
+- `shipment_id`: `SHP1006`
+- `facility_id`: `FAC-JAI-01`
+
+Recommended local test sequence for the check-in portal:
+
+1. `GET /api/v1/checkins/SHP1006`
+2. `POST /api/v1/checkins/gate`
+3. `PATCH /api/v1/checkins/queue`
+4. `PATCH /api/v1/checkins/dock`
+5. `PATCH /api/v1/checkins/complete`
+
+Example payloads for the local backend:
+
+```json
+{
+  "shipment_id": "SHP1006",
+  "facility_id": "FAC-JAI-01",
+  "gate_in_at": "2026-08-08T18:03:00+05:30"
+}
+```
+
+```json
+{
+  "shipment_id": "SHP1006",
+  "queue_status": "YARD_QUEUE"
+}
+```
+
+```json
+{
+  "shipment_id": "SHP1006",
+  "dock_in_at": "2026-08-08T18:25:00+05:30"
+}
+```
+
+```json
+{
+  "shipment_id": "SHP1006",
+  "completed_at": "2026-08-08T19:05:00+05:30"
+}
+```
+
+If you are calling the live Supabase table directly, replace `SHP1006` and `FAC-JAI-01` with the UUID values that exist in your project.
+
 ## Driver Chat / ETA
 
 All routes below are under `/api/v1/driver-chat-eta`.
@@ -553,7 +623,8 @@ The React frontend uses these integration points:
 
 - per-service sign-in shell
 - isolated auth state per workspace
-- placeholder auth UI ready for Supabase integration
+- Supabase Auth sign-in and registration
+- department-scoped authorization based on user metadata
 
 ## Portal Workspace
 
@@ -561,6 +632,7 @@ The React frontend uses these integration points:
 - sidebar navigation
 - workspace-specific panels
 - preserved portal styling and motion
+- protected route access per service
 
 ## Check-in Workspace
 
@@ -570,6 +642,7 @@ The React frontend uses these integration points:
 - mark docked
 - complete unload
 - backend refresh after every mutation
+- local SQLite fallback remains available when Supabase is unavailable
 
 ## TMS Workspace
 

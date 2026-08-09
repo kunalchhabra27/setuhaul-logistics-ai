@@ -72,7 +72,7 @@ export default function TruckTransition() {
                 transition={{ duration: 0.35, repeat: Infinity, ease: "easeInOut" }}
                 className="drop-shadow-[0_18px_20px_rgba(0,0,0,0.18)]"
               >
-                <Truck className="h-16 w-16 -scale-x-100" style={{ color: def.color }} strokeWidth={1.75} />
+                <Truck className="h-16 w-16" style={{ color: def.color }} strokeWidth={1.75} />
               </motion.div>
             </motion.div>
 
