@@ -27,9 +27,20 @@ router = APIRouter(prefix="/dock-scheduler", tags=["dock-scheduler"])
 
 
 def _service() -> DockSchedulerService:
-    from setuhaul.db.connection import connect
     from pathlib import Path
 
+    from setuhaul.infrastructure.settings import get_settings
+    settings = get_settings()
+
+    if settings.data_backend == "supabase":
+        from setuhaul.backend.dock_scheduler.supabase_repository import (
+            SupabaseDockSchedulerRepository,
+        )
+
+        return DockSchedulerService(SupabaseDockSchedulerRepository())
+
+    # default: local SQLite repository
+    from setuhaul.db.connection import connect
     from setuhaul.backend.dock_scheduler.repository import DockSchedulerRepository
 
     root = Path(__file__).resolve().parents[4]
