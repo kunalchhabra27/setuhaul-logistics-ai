@@ -1,3 +1,5 @@
+import { getAccessToken } from "../auth/authService";
+
 const baseUrl = (import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "") ?? "") + "/api/v1";
 
 export class ApiClientError extends Error {
@@ -13,9 +15,11 @@ export class ApiClientError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = getAccessToken();
   const response = await fetch(`${baseUrl}${path}`, {
     headers: {
       "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(init?.headers ?? {}),
     },
     ...init,

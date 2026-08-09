@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { useParams, Navigate, Link } from "react-router-dom";
+import { useState, type FormEvent } from "react";
+import { useNavigate, useParams, Navigate, Link } from "react-router-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   ArrowLeft,
@@ -14,16 +14,16 @@ import {
 } from "lucide-react";
 import { getService, type ServiceId } from "../data/services";
 import { useAuth } from "../context/AuthContext";
-import { useTransition } from "../context/TransitionContext";
 import { cn } from "../lib/cn";
+import { useEffect } from "react";
 
 type Mode = "login" | "register";
 
 export default function AuthPage() {
   const { serviceId } = useParams();
+  const navigate = useNavigate();
   const service = getService(serviceId);
-  const { login } = useAuth();
-  const { goToService } = useTransition();
+  const { login, register, session, canAccess, logout } = useAuth();
 
   const [mode, setMode] = useState<Mode>("login");
   const [name, setName] = useState("");
@@ -32,23 +32,42 @@ export default function AuthPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [success, setSuccess] = useState(false);
+  const [error, setError] = useState("");
 
   if (!service) return <Navigate to="/" replace />;
 
   const displayName = name.trim() || email.split("@")[0] || "Guest";
+  const denied = new URLSearchParams(window.location.search).has("denied");
+  const unauthorized = Boolean(session && !canAccess(service.id as ServiceId));
 
-  const handleSubmit = (e: React.FormEvent) => {
+  useEffect(() => {
+    if (session && canAccess(service.id as ServiceId)) {
+      navigate(`/portal/${service.id}`, { replace: true });
+    }
+  }, [session, service.id, canAccess, navigate]);
+
+  const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
     if (submitting || success) return;
     setSubmitting(true);
-    window.setTimeout(() => {
-      setSubmitting(false);
-      setSuccess(true);
-      login(service.id as ServiceId, displayName);
-      window.setTimeout(() => {
-        goToService(service.id as ServiceId);
-      }, 700);
-    }, 850);
+    setError("");
+    void (async () => {
+      try {
+        if (mode === "login") {
+          await login(service.id as ServiceId, email, password);
+        } else {
+          await register(service.id as ServiceId, displayName, email, password);
+        }
+        setSuccess(true);
+        window.setTimeout(() => {
+          navigate(`/portal/${service.id}`, { replace: true });
+        }, 700);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Unable to authenticate.");
+      } finally {
+        setSubmitting(false);
+      }
+    })();
   };
 
   return (
@@ -133,6 +152,28 @@ export default function AuthPage() {
           </div>
 
           <AnimatePresence mode="wait">
+            {(denied || unauthorized) && (
+              <motion.div
+                key="denied"
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="mb-5 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800"
+              >
+                <p className="font-bold">You are not authorized for this portal.</p>
+                <p className="mt-1">
+                  Sign in with an account authorized for {service.shortName}.
+                </p>
+                {session && (
+                  <button
+                    type="button"
+                    onClick={() => void logout(service.id as ServiceId)}
+                    className="mt-3 rounded-full bg-amber-600 px-3 py-1.5 text-xs font-bold text-white"
+                  >
+                    Sign out and switch account
+                  </button>
+                )}
+              </motion.div>
+            )}
             {success ? (
               <motion.div
                 key="success"
@@ -256,6 +297,12 @@ export default function AuthPage() {
                   )}
                   {mode === "login" ? "Sign in" : "Create account"}
                 </button>
+
+                {error && (
+                  <p className="mt-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+                    {error}
+                  </p>
+                )}
 
                 <p className="mt-5 text-center text-xs font-medium text-ink-soft">
                   {mode === "login" ? "New to " + service.shortName + "? " : "Already have access? "}
