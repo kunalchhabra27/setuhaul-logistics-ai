@@ -13,7 +13,13 @@ def _iso(ts: datetime) -> str:
 
 
 class SupabaseDockSchedulerRepository:
-    """A lightweight Supabase-backed repository implementing the same surface
+    """
+    Supabase-backed repository for the WMS service.
+
+    Implements the same interface as the SQLite DockSchedulerRepository.
+    Assumes the database contains views like v_slot_availability and
+    v_inbound_operational_state.
+    """
     as the SQLite `DockSchedulerRepository` used by the WMS service.
 
     This implementation assumes the project contains the same views and tables
