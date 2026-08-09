@@ -58,7 +58,15 @@ class SupabaseDockSchedulerRepository:
 
     def current_appointment(self, shipment_id: str) -> dict | None:
         resp = (
-            self.client.postgrest.from_("appointments").select("*, appointment_slots(slot_start_ts,slot_end_ts,dock_id)").eq("shipment_id", shipment_id).eq("is_current", 1).in_("appointment_status", ["PENDING_CONFIRMATION","CONFIRMED","IN_PROGRESS"]).limit(1).execute()
+        resp = (
+            self.client.postgrest.from_("appointments")
+            .select("*, appointment_slots(slot_start_ts,slot_end_ts,dock_id)")
+            .eq("shipment_id", shipment_id)
+            .eq("is_current", 1)
+            .in_("appointment_status", ["PENDING_CONFIRMATION", "CONFIRMED", "IN_PROGRESS"])
+            .limit(1)
+            .execute()
+        )
         )
         data = resp.data or []
         return data[0] if data else None
