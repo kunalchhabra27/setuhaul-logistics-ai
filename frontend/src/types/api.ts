@@ -24,6 +24,25 @@ export type ShipmentSummary = {
   planned_eta?: string | null;
   destination_id?: string;
   driver_id?: string;
+  vehicle_id?: string;
+  product_class?: string;
+  priority?: number;
+  expected_unload_minutes?: number;
+};
+
+export type ShipmentRecord = {
+  shipment_id: string;
+  driver_id: string;
+  vehicle_id: string;
+  origin_id?: string | null;
+  destination_id: string;
+  product_class: string;
+  priority: number;
+  planned_eta?: string | null;
+  expected_unload_minutes: number;
+  status: string;
+  created_at?: string | null;
+  updated_at?: string | null;
 };
 
 export type DockSuggestion = {
@@ -37,4 +56,13 @@ export type DockSuggestion = {
   lifecycle_stage: string;
   displaced_shipment_id?: string | null;
   displaced_to_slot_id?: string | null;
+};
+
+export type HoldResponse = {
+  hold_id: string;
+  slot_id: string;
+  shipment_id: string;
+  expires_at: string;
+  lifecycle_stage: string;
+  appointment_id?: string | null;
 };

@@ -6,6 +6,15 @@ let currentSession: SupabaseSession | null = null;
 const listeners = new Set<AuthStateListener>();
 let initialized = false;
 
+function readStoredSession() {
+  try {
+    const raw = localStorage.getItem("setuhaul.supabase.session");
+    return raw ? (JSON.parse(raw) as SupabaseSession) : null;
+  } catch {
+    return null;
+  }
+}
+
 function emit(session: SupabaseSession | null) {
   currentSession = session;
   listeners.forEach((listener) => listener(session));
@@ -66,7 +75,7 @@ export function getCurrentUser(): SupabaseUser | null {
 }
 
 export function getAccessToken() {
-  return currentSession?.access_token ?? null;
+  return currentSession?.access_token ?? readStoredSession()?.access_token ?? null;
 }
 
 export const isAuthConfigured = supabase.isConfigured;
