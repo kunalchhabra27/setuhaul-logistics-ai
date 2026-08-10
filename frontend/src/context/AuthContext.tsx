@@ -1,18 +1,31 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import type { ServiceId } from "../data/services";
-import { ensureAuthState, getCurrentSession, isAuthConfigured, signInWithEmail, signOut, signUpWithEmail, subscribeAuthState, type SupabaseSession, type SupabaseUser } from "../auth/authService";
+import { services, type ServiceId } from "../data/services";
+import {
+  ensureAuthState,
+  getCurrentSession,
+  isAuthConfigured,
+  signInWithEmail,
+  signOut,
+  signUpWithEmail,
+  subscribeAuthState,
+  type SupabaseSession,
+  type SupabaseUser,
+} from "../auth/authService";
 
 type ServiceSession = {
   name: string;
 };
 
+// Sessions are tracked per portal (drivers/tms/wms/checkin) rather than as one
+// shared value -- each portal can have a different person signed in at the same
+// time, in the same browser, and none of them log the others out.
+type SessionsByService = Partial<Record<ServiceId, SupabaseSession | null>>;
+
 interface AuthContextValue {
-  session: SupabaseSession | null;
-  user: SupabaseUser | null;
   loading: boolean;
-  serviceRole: ServiceId | null;
   sessions: Partial<Record<ServiceId, ServiceSession>>;
+  hasSession: (id: ServiceId) => boolean;
   isAuthed: (id: ServiceId) => boolean;
   canAccess: (id: ServiceId) => boolean;
   login: (id: ServiceId, email: string, password: string) => Promise<void>;
@@ -21,6 +34,8 @@ interface AuthContextValue {
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
+
+const ALL_SERVICE_IDS = services.map((s) => s.id);
 
 function displayNameFor(user: SupabaseUser | null) {
   const fullName = user?.user_metadata?.full_name;
@@ -38,65 +53,84 @@ function roleFor(user: SupabaseUser | null): ServiceId | null {
     : null;
 }
 
+function initialSessions(): SessionsByService {
+  const value: SessionsByService = {};
+  ALL_SERVICE_IDS.forEach((id) => {
+    value[id] = getCurrentSession(id);
+  });
+  return value;
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [session, setSession] = useState<SupabaseSession | null>(getCurrentSession());
+  const [sessionsByService, setSessionsByService] = useState<SessionsByService>(initialSessions);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    let mounted = true;
     if (!isAuthConfigured) {
       setLoading(false);
-      return () => {
-        mounted = false;
-      };
+      return;
     }
-    void ensureAuthState()
-      .catch(() => null)
-      .finally(() => {
-        if (mounted) setLoading(false);
+    let mounted = true;
+    let pending = ALL_SERVICE_IDS.length;
+    const unsubscribes = ALL_SERVICE_IDS.map((id) => {
+      void ensureAuthState(id)
+        .catch(() => null)
+        .finally(() => {
+          pending -= 1;
+          if (mounted && pending <= 0) setLoading(false);
+        });
+      return subscribeAuthState(id, (next) => {
+        if (!mounted) return;
+        setSessionsByService((prev) => ({ ...prev, [id]: next }));
       });
-    const unsubscribe = subscribeAuthState((next) => {
-      setSession(next);
-      setLoading(false);
     });
     return () => {
       mounted = false;
-      unsubscribe();
+      unsubscribes.forEach((unsubscribe) => unsubscribe());
     };
   }, []);
 
-  const user = session?.user ?? null;
-  const name = displayNameFor(user);
-  const serviceRole = roleFor(user);
+  const hasSession = useCallback((id: ServiceId) => Boolean(sessionsByService[id]), [sessionsByService]);
+
+  const isAuthed = useCallback(
+    (id: ServiceId) => {
+      const session = sessionsByService[id];
+      return Boolean(session) && roleFor(session!.user ?? null) === id;
+    },
+    [sessionsByService]
+  );
+
+  // canAccess mirrors isAuthed: a session for a portal is only usable for that
+  // same portal's role. Kept as a distinct function since callers reach for it
+  // semantically ("can this signed-in user open this portal?").
+  const canAccess = isAuthed;
 
   const sessions = useMemo<Partial<Record<ServiceId, ServiceSession>>>(() => {
     const value: Partial<Record<ServiceId, ServiceSession>> = {};
-    if (session && serviceRole) {
-      ([serviceRole] as ServiceId[]).forEach((id) => {
-        value[id] = { name };
-      });
-    }
+    ALL_SERVICE_IDS.forEach((id) => {
+      const session = sessionsByService[id];
+      if (session && roleFor(session.user ?? null) === id) {
+        value[id] = { name: displayNameFor(session.user ?? null) };
+      }
+    });
     return value;
-  }, [name, session, serviceRole]);
+  }, [sessionsByService]);
 
-  const isAuthed = useCallback((id: ServiceId) => Boolean(session) && serviceRole === id, [session, serviceRole]);
-  const canAccess = useCallback((id: ServiceId) => Boolean(session) && serviceRole === id, [session, serviceRole]);
-
-  const login = useCallback(async (_id: ServiceId, email: string, password: string) => {
-    await signInWithEmail(email, password);
+  const login = useCallback(async (id: ServiceId, email: string, password: string) => {
+    await signInWithEmail(id, email, password);
   }, []);
 
   const register = useCallback(async (id: ServiceId, name: string, email: string, password: string) => {
-    await signUpWithEmail(email, password, name, id);
+    await signUpWithEmail(id, email, password, name, id);
   }, []);
 
-  const logout = useCallback(async (_id: ServiceId) => {
-    await signOut();
+  const logout = useCallback(async (id: ServiceId) => {
+    await signOut(id);
   }, []);
 
   const value = useMemo(
-    () => ({ session, user, loading, serviceRole, sessions, isAuthed, canAccess, login, register, logout }),
-    [session, user, loading, serviceRole, sessions, isAuthed, canAccess, login, register, logout]
+    () => ({ loading, sessions, hasSession, isAuthed, canAccess, login, register, logout }),
+    [loading, sessions, hasSession, isAuthed, canAccess, login, register, logout]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

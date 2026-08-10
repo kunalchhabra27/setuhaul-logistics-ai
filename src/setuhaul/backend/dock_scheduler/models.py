@@ -127,3 +127,17 @@ class ConfirmResponse(BaseModel):
     shipment_id: str
     slot_id: str
     lifecycle_stage: SlotLifecycleStage
+
+
+class DockSlot(BaseModel):
+    """A single slot on the visual dock board -- every compatible slot for a
+    shipment (not just the top-ranked ones from /suggest), for rendering a
+    full per-dock schedule."""
+
+    slot_id: str
+    dock_code: str
+    dock_type: str
+    start: datetime
+    end: datetime
+    availability_status: str
+    occupant_shipment_id: str | None = None

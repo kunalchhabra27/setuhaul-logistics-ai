@@ -1,27 +1,109 @@
-"""Persistence helpers for the check-in portal domain."""
+"""Persistence boundary for facility check-ins (public.facility_checkins).
+
+Rewritten against the real Supabase project (verified live on 2026-08-10),
+replacing the local SQLite version this used to run against. The real table's
+`arrival_state` (EARLY/ON_TIME/LATE/NO_SHOW -- timeliness vs. schedule) and
+`queue_state` (NOT_QUEUED/WAITING_EARLY/WAITING_LATE/WAITING_DOCK_UNAVAILABLE/
+CALLED_TO_DOCK/IN_DOCK/COMPLETED -- gate-to-dock progression) columns and
+value vocabularies exactly matched what the old SQLite prototype (seeded from
+`data/setuhaul_schema_and_seed.sql`) already assumed, confirmed via a live
+schema probe. So the domain-mapping logic below (`_to_domain_*`/`_to_db_*`) is
+carried over unchanged from the SQLite version -- only the storage calls
+themselves moved from sqlite3 to the Supabase Data API.
+"""
 
 from __future__ import annotations
 
-import sqlite3
 from datetime import datetime
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+from postgrest.exceptions import APIError
+
+if TYPE_CHECKING:
+    from supabase import Client
+else:
+    Client = Any
+
+CHECKIN_COLUMNS = (
+    "checkin_id,shipment_id,facility_id,gate_in_ts,yard_queue_enter_ts,dock_in_ts,"
+    "unload_start_ts,unload_end_ts,gate_out_ts,arrival_state,queue_state,"
+    "queue_position,actual_dock_id,notes,updated_at"
+)
+
+
+class PersistenceError(Exception):
+    """Raised when an unexpected Supabase/PostgREST error occurs."""
 
 
 class CheckInRepository:
-    """Access facility check-in records stored in SQLite."""
+    """Access facility check-in records stored in Supabase."""
 
-    def __init__(self, connection: sqlite3.Connection):
-        self.connection = connection
-        self.connection.row_factory = sqlite3.Row
+    def __init__(self, backend: Client):
+        self.backend = backend
+
+    @staticmethod
+    def _data(response: Any) -> list[dict[str, Any]]:
+        return list(response.data or [])
+
+    def _raise_persistence(self, exc: APIError) -> None:
+        raise PersistenceError(str(getattr(exc, "message", "Check-in database operation failed."))) from exc
+
+    def get_driver_contact_for_shipment(self, shipment_id: str) -> dict[str, Any] | None:
+        """Look up the phone number of the driver currently assigned to a
+        shipment, for the gate check-in SMS notification. Reads straight from
+        the shipments/drivers tables via the same caller-scoped client used
+        everywhere else in this repository -- there is no cross-table view,
+        so this is two plain lookups rather than a join. Returns None if the
+        shipment has no driver assigned or the driver has no phone on file.
+        """
+        try:
+            shipment_rows = self._data(
+                self.backend.table("shipments")
+                .select("shipment_id,driver_id,order_reference")
+                .eq("shipment_id", shipment_id)
+                .limit(1)
+                .execute()
+            )
+        except APIError as exc:
+            self._raise_persistence(exc)
+        if not shipment_rows or not shipment_rows[0].get("driver_id"):
+            return None
+
+        driver_id = shipment_rows[0]["driver_id"]
+        try:
+            driver_rows = self._data(
+                self.backend.table("drivers")
+                .select("driver_id,driver_name,phone")
+                .eq("driver_id", driver_id)
+                .limit(1)
+                .execute()
+            )
+        except APIError as exc:
+            self._raise_persistence(exc)
+        if not driver_rows or not driver_rows[0].get("phone"):
+            return None
+
+        return {
+            "driver_id": driver_id,
+            "driver_name": driver_rows[0].get("driver_name"),
+            "phone": driver_rows[0]["phone"],
+            "order_reference": shipment_rows[0].get("order_reference"),
+        }
 
     def get_by_shipment(self, shipment_id: str) -> dict[str, Any] | None:
-        row = self.connection.execute(
-            "SELECT * FROM facility_checkins WHERE shipment_id = ?",
-            (shipment_id,),
-        ).fetchone()
-        if row is None:
+        try:
+            rows = self._data(
+                self.backend.table("facility_checkins")
+                .select(CHECKIN_COLUMNS)
+                .eq("shipment_id", shipment_id)
+                .limit(1)
+                .execute()
+            )
+        except APIError as exc:
+            self._raise_persistence(exc)
+        if not rows:
             return None
-        record = dict(row)
+        record = rows[0]
         return {
             **record,
             "arrival_status": self._to_domain_arrival_status(record.get("arrival_state")),
@@ -32,67 +114,67 @@ class CheckInRepository:
         }
 
     def create_gate_checkin(self, checkin_id: str, shipment_id: str, facility_id: str, gate_in_at: str | datetime) -> None:
-        self.connection.execute(
-            """
-            INSERT INTO facility_checkins (
-                checkin_id, shipment_id, facility_id,
-                gate_in_ts, arrival_state, queue_state, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                checkin_id,
-                shipment_id,
-                facility_id,
-                gate_in_at,
-                self._to_db_arrival_status("GATE_IN"),
-                self._to_db_queue_status("GATE_QUEUE"),
-                gate_in_at,
-            ),
-        )
-        self.connection.commit()
+        try:
+            self.backend.table("facility_checkins").insert(
+                {
+                    "checkin_id": checkin_id,
+                    "shipment_id": shipment_id,
+                    "facility_id": facility_id,
+                    "gate_in_ts": str(gate_in_at),
+                    "arrival_state": self._to_db_arrival_status("GATE_IN"),
+                    "queue_state": self._to_db_queue_status("GATE_QUEUE"),
+                    "updated_at": str(gate_in_at),
+                }
+            ).execute()
+        except APIError as exc:
+            self._raise_persistence(exc)
 
     def update_queue(self, shipment_id: str, queue_status: str) -> None:
-        self.connection.execute(
-            """
-            UPDATE facility_checkins
-            SET arrival_state = ?, queue_state = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE shipment_id = ?
-            """,
-            (self._to_db_arrival_status("WAITING"), self._to_db_queue_status(queue_status), shipment_id),
-        )
-        self.connection.commit()
+        try:
+            self.backend.table("facility_checkins").update(
+                {
+                    "arrival_state": self._to_db_arrival_status("WAITING"),
+                    "queue_state": self._to_db_queue_status(queue_status),
+                    "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                }
+            ).eq("shipment_id", shipment_id).execute()
+        except APIError as exc:
+            self._raise_persistence(exc)
 
     def mark_docked(self, shipment_id: str, dock_in_at: str | datetime) -> None:
-        self.connection.execute(
-            """
-            UPDATE facility_checkins
-            SET arrival_state = ?, queue_state = ?, dock_in_ts = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE shipment_id = ?
-            """,
-            (
-                self._to_db_arrival_status("DOCKED"),
-                self._to_db_queue_status("NONE"),
-                dock_in_at,
-                shipment_id,
-            ),
-        )
-        self.connection.commit()
+        try:
+            self.backend.table("facility_checkins").update(
+                {
+                    "arrival_state": self._to_db_arrival_status("DOCKED"),
+                    "queue_state": self._to_db_queue_status("NONE"),
+                    "dock_in_ts": str(dock_in_at),
+                    "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                }
+            ).eq("shipment_id", shipment_id).execute()
+        except APIError as exc:
+            self._raise_persistence(exc)
 
     def mark_completed(self, shipment_id: str, completed_at: str | datetime) -> None:
-        self.connection.execute(
-            """
-            UPDATE facility_checkins
-            SET arrival_state = ?, queue_state = ?, unload_end_ts = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE shipment_id = ?
-            """,
-            (
-                self._to_db_arrival_status("COMPLETED"),
-                self._to_db_queue_status("NONE"),
-                completed_at,
-                shipment_id,
-            ),
-        )
-        self.connection.commit()
+        try:
+            self.backend.table("facility_checkins").update(
+                {
+                    "arrival_state": self._to_db_arrival_status("COMPLETED"),
+                    "queue_state": self._to_db_queue_status("NONE"),
+                    "unload_end_ts": str(completed_at),
+                    "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                }
+            ).eq("shipment_id", shipment_id).execute()
+        except APIError as exc:
+            self._raise_persistence(exc)
+
+    # -- domain <-> real-column value mapping ---------------------------------
+    #
+    # arrival_status (API/domain): GATE_IN / WAITING / DOCKED / COMPLETED
+    # arrival_state (real column): EARLY / ON_TIME / LATE / NO_SHOW
+    #
+    # queue_status (API/domain): NONE / GATE_QUEUE / YARD_QUEUE / CALLED_TO_DOCK
+    # queue_state (real column): NOT_QUEUED / WAITING_EARLY / WAITING_LATE /
+    #   WAITING_DOCK_UNAVAILABLE / CALLED_TO_DOCK / IN_DOCK / COMPLETED
 
     @staticmethod
     def _to_domain_arrival_status(value: str | None) -> str | None:

@@ -1,5 +1,14 @@
-import { api } from "./api";
-import type { CheckInRecord } from "../types/api";
+import { createApiClient } from "./api";
+import type { CheckInRecord, ShipmentSummary } from "../types/api";
+
+const api = createApiClient("checkin");
+
+// Uses the Check-in portal's own session token (not TMS's) to hit the shared
+// shipments listing -- lets the Check-in panel offer a real shipment picker
+// instead of a hardcoded shipment id, without depending on a TMS login.
+export function listShipmentsForCheckin() {
+  return api.request<ShipmentSummary[]>("/tms/shipments");
+}
 
 export function fetchCheckInStatus(shipmentId: string) {
   return api.request<CheckInRecord>(`/checkins/${encodeURIComponent(shipmentId)}`);

@@ -1,39 +1,15 @@
 from __future__ import annotations
 
-import sqlite3
-
+from setuhaul.backend._testing.fake_supabase import FakeSupabaseClient
 from setuhaul.backend.checkin_portal.repository import CheckInRepository
 
 
-def _connection() -> sqlite3.Connection:
-    connection = sqlite3.connect(":memory:")
-    connection.execute(
-        """
-        CREATE TABLE facility_checkins (
-            checkin_id TEXT PRIMARY KEY,
-            shipment_id TEXT NOT NULL UNIQUE,
-            facility_id TEXT NOT NULL,
-            gate_in_ts TEXT,
-            yard_queue_enter_ts TEXT,
-            dock_in_ts TEXT,
-            unload_start_ts TEXT,
-            unload_end_ts TEXT,
-            gate_out_ts TEXT,
-            arrival_state TEXT,
-            queue_state TEXT,
-            queue_position INTEGER,
-            actual_dock_id TEXT,
-            notes TEXT,
-            updated_at TEXT NOT NULL
-        )
-        """
-    )
-    return connection
+def _repository() -> CheckInRepository:
+    return CheckInRepository(FakeSupabaseClient({"facility_checkins": []}))
 
 
 def test_repository_crud_round_trip() -> None:
-    connection = _connection()
-    repo = CheckInRepository(connection)
+    repo = _repository()
 
     repo.create_gate_checkin("CHK-1", "SHP1006", "FAC-1", "2026-08-08T10:00:00")
     assert repo.get_by_shipment("SHP1006")["arrival_status"] == "GATE_IN"
@@ -46,3 +22,49 @@ def test_repository_crud_round_trip() -> None:
 
     repo.mark_completed("SHP1006", "2026-08-08T12:00:00")
     assert repo.get_by_shipment("SHP1006")["arrival_status"] == "COMPLETED"
+
+
+def test_get_by_shipment_returns_none_when_missing() -> None:
+    repo = _repository()
+    assert repo.get_by_shipment("SHP-NOPE") is None
+
+
+def test_get_driver_contact_for_shipment_returns_phone() -> None:
+    repo = CheckInRepository(
+        FakeSupabaseClient(
+            {
+                "facility_checkins": [],
+                "shipments": [
+                    {"shipment_id": "SHP1006", "driver_id": "DRV001", "order_reference": "ORD-1"},
+                ],
+                "drivers": [
+                    {"driver_id": "DRV001", "driver_name": "Rajesh Kumar", "phone": "+91-9000010001"},
+                ],
+            }
+        )
+    )
+    contact = repo.get_driver_contact_for_shipment("SHP1006")
+    assert contact == {
+        "driver_id": "DRV001",
+        "driver_name": "Rajesh Kumar",
+        "phone": "+91-9000010001",
+        "order_reference": "ORD-1",
+    }
+
+
+def test_get_driver_contact_for_shipment_returns_none_without_driver() -> None:
+    repo = CheckInRepository(
+        FakeSupabaseClient(
+            {
+                "facility_checkins": [],
+                "shipments": [{"shipment_id": "SHP1006", "driver_id": None, "order_reference": "ORD-1"}],
+                "drivers": [],
+            }
+        )
+    )
+    assert repo.get_driver_contact_for_shipment("SHP1006") is None
+
+
+def test_get_driver_contact_for_shipment_returns_none_when_shipment_missing() -> None:
+    repo = _repository()
+    assert repo.get_driver_contact_for_shipment("SHP-NOPE") is None

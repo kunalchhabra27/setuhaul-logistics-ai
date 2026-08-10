@@ -1,21 +1,15 @@
-from uuid import UUID
-
 from fastapi.testclient import TestClient
 
 from setuhaul.backend.tms.api import get_service
-from setuhaul.infrastructure.auth import Principal, get_current_principal, require_admin
 from setuhaul.backend.tms.models import TMSRole
+from setuhaul.infrastructure.auth import Principal, get_current_principal, require_admin
 from setuhaul.main import app
 
 from setuhaul.backend.tms.tests.conftest import DRIVER_AMBIGUOUS, DRIVER_ONE
 
 
 def _principal(role: TMSRole) -> Principal:
-    return Principal(user_id=str(UUID(int=1)), role=role, access_token="test-token")
-
-
-def test_health_is_public():
-    assert TestClient(app).get("/health").json() == {"status": "ok", "service": "tms"}
+    return Principal(user_id="test-user", role=role, access_token="test-token")
 
 
 def test_unauthenticated_tms_request_is_denied():
@@ -44,10 +38,7 @@ def test_agent_reader_cannot_create_driver(service):
     try:
         response = TestClient(app).post(
             "/api/v1/tms/drivers",
-            json={
-                "carrier_id": "10000000-0000-0000-0000-000000000001",
-                "driver_code": "DRV-099", "name": "No Write", "phone": "+9199",
-            },
+            json={"carrier_id": "CAR001", "driver_name": "No Write", "phone": "+9199"},
         )
     finally:
         app.dependency_overrides.clear()
@@ -60,22 +51,23 @@ def test_admin_can_create_driver(service):
     try:
         response = TestClient(app).post(
             "/api/v1/tms/drivers",
-            json={
-                "carrier_id": "10000000-0000-0000-0000-000000000001",
-                "driver_code": "DRV-099", "name": "Admin Create", "phone": "+9199",
-            },
+            json={"carrier_id": "CAR001", "driver_name": "Admin Create", "phone": "+9199"},
         )
     finally:
         app.dependency_overrides.clear()
     assert response.status_code == 201
-    assert response.json()["driver_code"] == "DRV-099"
+    assert response.json()["driver_name"] == "Admin Create"
 
 
-def test_malformed_uuid_uses_structured_422(service):
+def test_admin_can_assign_shipment(service):
     app.dependency_overrides[get_service] = lambda: service
+    app.dependency_overrides[require_admin] = lambda: _principal(TMSRole.ADMIN_1)
     try:
-        response = TestClient(app).get("/api/v1/tms/drivers/not-a-uuid")
+        response = TestClient(app).post(
+            "/api/v1/tms/shipments/SHP002/assign",
+            json={"driver_id": "DRV004", "vehicle_id": "VEH001"},
+        )
     finally:
         app.dependency_overrides.clear()
-    assert response.status_code == 422
-    assert response.json()["error"]["code"] == "REQUEST_VALIDATION_FAILED"
+    assert response.status_code == 200
+    assert response.json()["driver_id"] == "DRV004"

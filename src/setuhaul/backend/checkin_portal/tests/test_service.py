@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import sqlite3
 from datetime import datetime
 
 import pytest
 
+from setuhaul.backend._testing.fake_supabase import FakeSupabaseClient
 from setuhaul.backend.checkin_portal.exceptions import InvalidCheckInTransition
 from setuhaul.backend.checkin_portal.models import (
     CompleteRequest,
@@ -17,34 +17,10 @@ from setuhaul.backend.checkin_portal.repository import CheckInRepository
 from setuhaul.backend.checkin_portal.service import CheckInService
 
 
-def _connection() -> sqlite3.Connection:
-    connection = sqlite3.connect(":memory:")
-    connection.execute(
-        """
-        CREATE TABLE facility_checkins (
-            checkin_id TEXT PRIMARY KEY,
-            shipment_id TEXT NOT NULL UNIQUE,
-            facility_id TEXT NOT NULL,
-            gate_in_ts TEXT,
-            yard_queue_enter_ts TEXT,
-            dock_in_ts TEXT,
-            unload_start_ts TEXT,
-            unload_end_ts TEXT,
-            gate_out_ts TEXT,
-            arrival_state TEXT,
-            queue_state TEXT,
-            queue_position INTEGER,
-            actual_dock_id TEXT,
-            notes TEXT,
-            updated_at TEXT NOT NULL
-        )
-        """
-    )
-    return connection
-
-
-def _service() -> CheckInService:
-    return CheckInService(CheckInRepository(_connection()))
+def _service(extra_tables: dict | None = None) -> CheckInService:
+    tables = {"facility_checkins": []}
+    tables.update(extra_tables or {})
+    return CheckInService(CheckInRepository(FakeSupabaseClient(tables)))
 
 
 def _gate_request(shipment_id: str = "SHP1006") -> GateCheckInRequest:
@@ -164,6 +140,59 @@ def test_completed_cannot_return_to_queue() -> None:
         service.update_queue(
             QueueUpdateRequest(shipment_id="SHP1006", queue_status=QueueStatus.GATE_QUEUE)
         )
+
+
+def test_gate_checkin_sends_sms_to_assigned_driver(monkeypatch) -> None:
+    import setuhaul.backend.checkin_portal.service as checkin_service_module
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        checkin_service_module,
+        "send_sms",
+        lambda to, body, **_kwargs: captured.update(to=to, body=body) or "SM_FAKE",
+    )
+
+    service = _service(
+        {
+            "shipments": [{"shipment_id": "SHP1006", "driver_id": "DRV001", "order_reference": "ORD-1"}],
+            "drivers": [{"driver_id": "DRV001", "driver_name": "Rajesh Kumar", "phone": "+91-9000010001"}],
+        }
+    )
+    service.gate_check_in(_gate_request())
+
+    assert captured["to"] == "+91-9000010001"
+    assert "ORD-1" in captured["body"]
+
+
+def test_gate_checkin_succeeds_even_if_sms_lookup_fails(monkeypatch) -> None:
+    import setuhaul.backend.checkin_portal.service as checkin_service_module
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(checkin_service_module, "send_sms", _boom)
+
+    service = _service(
+        {
+            "shipments": [{"shipment_id": "SHP1006", "driver_id": "DRV001", "order_reference": "ORD-1"}],
+            "drivers": [{"driver_id": "DRV001", "driver_name": "Rajesh Kumar", "phone": "+91-9000010001"}],
+        }
+    )
+    # Must not raise even though the SMS lookup/send blows up.
+    record = service.gate_check_in(_gate_request())
+    assert record["arrival_status"] == "GATE_IN"
+
+
+def test_gate_checkin_without_driver_skips_sms_silently(monkeypatch) -> None:
+    import setuhaul.backend.checkin_portal.service as checkin_service_module
+
+    calls = []
+    monkeypatch.setattr(checkin_service_module, "send_sms", lambda *a, **k: calls.append((a, k)))
+
+    service = _service()  # no shipments/drivers tables -> no driver on file
+    service.gate_check_in(_gate_request())
+
+    assert calls == []
 
 
 def test_locked_for_rescheduling() -> None:

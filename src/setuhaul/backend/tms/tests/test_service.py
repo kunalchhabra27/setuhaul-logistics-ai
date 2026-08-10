@@ -1,14 +1,9 @@
-from uuid import UUID
-
 import pytest
 
 from setuhaul.backend.tms.exceptions import BusinessValidationError, DriverNotFoundError
-from setuhaul.backend.tms.models import (
-    ContextResolution,
-    ShipmentCreate,
-    ShipmentStatus,
-)
+from setuhaul.backend.tms.models import ContextResolution, ShipmentCreate, ShipmentStatus
 from setuhaul.backend.tms.tests.conftest import (
+    CARRIER_A,
     CARRIER_B,
     DRIVER_AMBIGUOUS,
     DRIVER_EMPTY,
@@ -46,25 +41,27 @@ def test_inactive_driver_returns_no_context(service):
 
 def test_unknown_driver_raises_404_domain_error(service):
     with pytest.raises(DriverNotFoundError):
-        service.driver_context(UUID(int=999))
+        service.driver_context("DRV-DOES-NOT-EXIST")
 
 
 def test_maintenance_vehicle_cannot_receive_active_shipment(service):
     request = ShipmentCreate(
+        order_reference="ORD-1", carrier_id="CAR001", origin_name="Depot",
         driver_id=DRIVER_ONE, vehicle_id=VEHICLE_MAINTENANCE,
-        destination_id=FACILITY, product_class="dry", priority=1,
-        expected_unload_minutes=40, status=ShipmentStatus.PLANNED,
+        destination_facility_id=FACILITY, product_category="dry",
+        expected_unload_min=40, current_status=ShipmentStatus.PLANNED,
     )
-    with pytest.raises(BusinessValidationError, match="maintenance"):
+    with pytest.raises(BusinessValidationError, match="inactive"):
         service.create_shipment(request)
 
 
 def test_mismatched_carriers_are_rejected(service, repository):
-    repository.vehicles[VEHICLE_ONE]["carrier_id"] = str(CARRIER_B)
+    repository.vehicles[VEHICLE_ONE]["carrier_id"] = CARRIER_B
     request = ShipmentCreate(
+        order_reference="ORD-1", carrier_id="CAR001", origin_name="Depot",
         driver_id=DRIVER_ONE, vehicle_id=VEHICLE_ONE,
-        destination_id=FACILITY, product_class="dry", priority=1,
-        expected_unload_minutes=40, status=ShipmentStatus.IN_TRANSIT,
+        destination_facility_id=FACILITY, product_category="dry",
+        expected_unload_min=40, current_status=ShipmentStatus.IN_TRANSIT,
     )
     with pytest.raises(BusinessValidationError, match="same carrier"):
         service.create_shipment(request)
@@ -74,3 +71,89 @@ def test_context_does_not_cross_system_boundary(service):
     payload = service.driver_context(DRIVER_ONE).model_dump()
     forbidden = {"latest_declared_eta", "appointment_slot", "dock_id", "gate_in_at", "queue_status"}
     assert forbidden.isdisjoint(str(payload))
+
+
+def test_assign_shipment_sets_driver_and_vehicle(service, repository):
+    result = service.assign_shipment("SHP002", driver_id=DRIVER_ONE, vehicle_id=VEHICLE_ONE)
+    assert result.driver_id == DRIVER_ONE
+    assert result.vehicle_id == VEHICLE_ONE
+
+
+def test_assign_shipment_without_vehicle_reuses_existing(service):
+    result = service.assign_shipment("SHP001", driver_id=DRIVER_ONE)
+    assert result.driver_id == DRIVER_ONE
+    assert result.vehicle_id == VEHICLE_ONE
+
+
+def test_archive_requires_completed_status(service):
+    # SHP002 is PLANNED in the fixture, not COMPLETED.
+    with pytest.raises(BusinessValidationError, match="completed"):
+        service.archive_shipment("SHP002")
+
+
+def test_archive_completed_shipment(service, repository):
+    repository.shipments["SHP001"]["current_status"] = "COMPLETED"
+    result = service.archive_shipment("SHP001")
+    assert result.archived_flag is True
+
+
+def test_assign_shipment_sends_sms_to_the_assigned_driver(service, monkeypatch):
+    import setuhaul.backend.tms.service as tms_service_module
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        tms_service_module,
+        "send_sms",
+        lambda to, body, **_kwargs: captured.update(to=to, body=body) or "SM_FAKE",
+    )
+
+    result = service.assign_shipment("SHP002", driver_id=DRIVER_ONE, vehicle_id=VEHICLE_ONE)
+
+    assert captured["to"] == "+91001"  # DRIVER_ONE's phone in the fixture
+    assert result.shipment_id in captured["body"] or (result.order_reference or "") in captured["body"]
+
+
+def test_assign_shipment_succeeds_even_if_sms_send_fails(service, monkeypatch):
+    import setuhaul.backend.tms.service as tms_service_module
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("Twilio is down")
+
+    monkeypatch.setattr(tms_service_module, "send_sms", _boom)
+
+    # Must not raise even though the notification blows up.
+    result = service.assign_shipment("SHP002", driver_id=DRIVER_ONE, vehicle_id=VEHICLE_ONE)
+    assert result.driver_id == DRIVER_ONE
+
+
+def test_assign_shipment_skips_sms_when_driver_has_no_phone(service, repository, monkeypatch):
+    import setuhaul.backend.tms.service as tms_service_module
+
+    repository.drivers[DRIVER_ONE]["phone"] = None
+    calls = []
+    monkeypatch.setattr(tms_service_module, "send_sms", lambda *a, **k: calls.append((a, k)))
+
+    service.assign_shipment("SHP002", driver_id=DRIVER_ONE, vehicle_id=VEHICLE_ONE)
+    assert calls == []
+
+
+def test_create_shipment_with_driver_sends_sms(service, monkeypatch):
+    import setuhaul.backend.tms.service as tms_service_module
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        tms_service_module,
+        "send_sms",
+        lambda to, body, **_kwargs: captured.update(to=to, body=body) or "SM_FAKE",
+    )
+
+    request = ShipmentCreate(
+        order_reference="ORD-99", carrier_id=CARRIER_A, origin_name="Depot",
+        driver_id=DRIVER_ONE, vehicle_id=VEHICLE_ONE,
+        destination_facility_id=FACILITY, product_category="dry",
+        expected_unload_min=40, current_status=ShipmentStatus.PLANNED,
+    )
+    service.create_shipment(request)
+
+    assert captured["to"] == "+91001"
+    assert "ORD-99" in captured["body"]

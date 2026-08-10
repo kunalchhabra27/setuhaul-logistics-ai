@@ -11,8 +11,13 @@ dependencies = [
     "fastapi>=0.110",
     "pydantic>=2.0",
     "pydantic-settings==2.14.2",
+    "python-dotenv>=1.0",
     "supabase==2.31.0",
     "uvicorn>=0.30",
+    "langchain>=0.3",
+    "langchain-google-genai>=2.0",
+    "redis>=5.0",
+    "twilio>=9.0",
 ]
 
 [project.optional-dependencies]

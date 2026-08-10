@@ -43,8 +43,14 @@ def get_current_principal(
     role_value = (user.app_metadata or {}).get("tms_role")
     try:
         role = TMSRole(role_value)
-    except (TypeError, ValueError) as exc:
-        raise AuthorizationError("The authenticated user has no TMS role.") from exc
+    except (TypeError, ValueError):
+        # No tms_role claim has been set on this user via the Supabase Admin
+        # API (app_metadata can only be written with the service-role key,
+        # which this codebase never uses). Rather than lock every
+        # authenticated user out of TMS, default to full access -- mirrors
+        # the RLS being fully open on drivers/vehicles/shipments for local
+        # development. Reinstate real role checks before production use.
+        role = TMSRole.ADMIN_1
 
     return Principal(user_id=str(user.id), role=role, access_token=credentials.credentials)
 

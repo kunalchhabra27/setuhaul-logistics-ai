@@ -23,7 +23,7 @@ export default function AuthPage() {
   const { serviceId } = useParams();
   const navigate = useNavigate();
   const service = getService(serviceId);
-  const { login, register, session, canAccess, logout } = useAuth();
+  const { login, register, hasSession, canAccess, logout } = useAuth();
 
   const [mode, setMode] = useState<Mode>("login");
   const [name, setName] = useState("");
@@ -38,13 +38,13 @@ export default function AuthPage() {
 
   const displayName = name.trim() || email.split("@")[0] || "Guest";
   const denied = new URLSearchParams(window.location.search).has("denied");
-  const unauthorized = Boolean(session && !canAccess(service.id as ServiceId));
+  const unauthorized = Boolean(hasSession(service.id as ServiceId) && !canAccess(service.id as ServiceId));
 
   useEffect(() => {
-    if (session && canAccess(service.id as ServiceId)) {
+    if (canAccess(service.id as ServiceId)) {
       navigate(`/portal/${service.id}`, { replace: true });
     }
-  }, [session, service.id, canAccess, navigate]);
+  }, [service.id, canAccess, navigate]);
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -163,7 +163,7 @@ export default function AuthPage() {
                 <p className="mt-1">
                   Sign in with an account authorized for {service.shortName}.
                 </p>
-                {session && (
+                {hasSession(service.id as ServiceId) && (
                   <button
                     type="button"
                     onClick={() => void logout(service.id as ServiceId)}

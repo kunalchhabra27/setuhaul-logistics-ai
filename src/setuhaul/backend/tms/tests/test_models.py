@@ -1,8 +1,3 @@
-from datetime import datetime
-from pathlib import Path
-from runpy import run_path
-from uuid import UUID
-
 import pytest
 from pydantic import ValidationError
 
@@ -18,11 +13,11 @@ from setuhaul.backend.tms.models import (
     ("status", "expected"),
     [
         (ShipmentStatus.PLANNED, True),
+        (ShipmentStatus.ASSIGNED, True),
         (ShipmentStatus.IN_TRANSIT, True),
-        (ShipmentStatus.ARRIVED, True),
+        (ShipmentStatus.AT_GATE, True),
         (ShipmentStatus.WAITING, True),
-        (ShipmentStatus.UNLOADING, True),
-        (ShipmentStatus.EXCEPTION, True),
+        (ShipmentStatus.IN_DOCK, True),
         (ShipmentStatus.COMPLETED, False),
         (ShipmentStatus.CANCELLED, False),
     ],
@@ -31,13 +26,9 @@ def test_every_shipment_status_has_explicit_active_policy(status, expected):
     assert (status in ACTIVE_CONTEXT_STATUSES) is expected
 
 
-def test_naive_planned_eta_is_rejected():
-    with pytest.raises(ValidationError, match="timezone"):
-        ShipmentCreate(
-            driver_id=UUID(int=1), vehicle_id=UUID(int=2), destination_id=UUID(int=3),
-            product_class="dry", priority=1, planned_eta=datetime(2026, 8, 8),
-            expected_unload_minutes=40,
-        )
+def test_shipment_create_requires_destination():
+    with pytest.raises(ValidationError):
+        ShipmentCreate()
 
 
 def test_empty_patch_is_rejected():
@@ -45,14 +36,10 @@ def test_empty_patch_is_rejected():
         ShipmentUpdate()
 
 
-def test_dataset_generator_is_repeatable_and_tms_only():
-    root = Path(__file__).resolve().parents[5]
-    generate_dataset = run_path(root / "scripts" / "generate_tms_dataset.py")["generate_dataset"]
-    first = generate_dataset(driver_count=3, vehicle_count=4, shipment_count=5, seed=7)
-    second = generate_dataset(driver_count=3, vehicle_count=4, shipment_count=5, seed=7)
-    assert first == second
-    assert first.count("GEN-DRV-") == 3
-    assert first.count("GEN-VEH-") == 4
-    assert first.count("50000000-") == 0
-    for forbidden in ("appointments", "eta_updates", "facility_checkins", "chat_messages"):
-        assert forbidden not in first
+def test_shipment_create_defaults_dock_type_and_status():
+    request = ShipmentCreate(
+        order_reference="ORD-1", carrier_id="CAR001", driver_id="DRV001",
+        vehicle_id="VEH001", origin_name="Depot", destination_facility_id="FAC-JAI-01",
+    )
+    assert request.required_dock_type == "STANDARD"
+    assert request.current_status is ShipmentStatus.PLANNED

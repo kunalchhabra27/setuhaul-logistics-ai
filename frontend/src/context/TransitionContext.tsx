@@ -19,13 +19,9 @@ const RIDE_MS = 1450;
 
 export function TransitionProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<TransitionState>({ active: false, service: null });
-  const { session, canAccess } = useAuth();
+  const { canAccess } = useAuth();
   const navigate = useNavigate();
 
-  const sessionRef = useRef(session);
-  useEffect(() => {
-    sessionRef.current = session;
-  }, [session]);
   const canAccessRef = useRef(canAccess);
   useEffect(() => {
     canAccessRef.current = canAccess;
@@ -41,10 +37,7 @@ export function TransitionProvider({ children }: { children: ReactNode }) {
       if (activeRef.current) return;
       setState({ active: true, service: id });
       window.setTimeout(() => {
-        const destination =
-          sessionRef.current && canAccessRef.current(id)
-            ? `/portal/${id}`
-            : `/auth/${id}?denied=1`;
+        const destination = canAccessRef.current(id) ? `/portal/${id}` : `/auth/${id}?denied=1`;
         navigate(destination);
         setState({ active: false, service: null });
       }, RIDE_MS);

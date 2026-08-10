@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from setuhaul.backend.dock_scheduler.exceptions import (
     DockSchedulerError,
@@ -14,28 +14,28 @@ from setuhaul.backend.dock_scheduler.models import (
     CancelHoldRequest,
     ConfirmRequest,
     ConfirmResponse,
+    DockSlot,
     DriverConstraints,
     HoldRequest,
     HoldResponse,
+    HoldResult,
     SlotLifecycleStage,
     SlotSuggestionResponse,
     SuggestRequest,
 )
+from setuhaul.backend.dock_scheduler.repository import DockSchedulerRepository, parse_ts
 from setuhaul.backend.dock_scheduler.service import DockSchedulerService
+from setuhaul.infrastructure.auth import Principal, require_admin, require_reader
+from setuhaul.infrastructure.settings import get_settings
+from setuhaul.infrastructure.supabase_client import create_caller_client
 
 router = APIRouter(prefix="/dock-scheduler", tags=["dock-scheduler"])
 
 
-def _service() -> DockSchedulerService:
-    from setuhaul.db.connection import connect
-    from pathlib import Path
-
-    from setuhaul.backend.dock_scheduler.repository import DockSchedulerRepository
-
-    root = Path(__file__).resolve().parents[4]
-    db_path = root / "data" / "setuhaul_freight_operations.db"
-    connection = connect(db_path)
-    return DockSchedulerService(DockSchedulerRepository(connection))
+def get_service(principal: Principal = Depends(require_reader)) -> DockSchedulerService:
+    """Create a caller-scoped service whose repository is protected by RLS."""
+    client = create_caller_client(get_settings(), principal.access_token)
+    return DockSchedulerService(DockSchedulerRepository(client))
 
 
 def _handle_error(exc: DockSchedulerError) -> HTTPException:
@@ -49,8 +49,9 @@ def _handle_error(exc: DockSchedulerError) -> HTTPException:
 
 
 @router.post("/suggest", response_model=list[SlotSuggestionResponse])
-def suggest_slots(request: SuggestRequest) -> list[SlotSuggestionResponse]:
-    service = _service()
+def suggest_slots(
+    request: SuggestRequest, service: DockSchedulerService = Depends(get_service)
+) -> list[SlotSuggestionResponse]:
     constraints = DriverConstraints(
         earliest_start=request.earliest_start,
         must_finish_by=request.must_finish_by,
@@ -62,9 +63,27 @@ def suggest_slots(request: SuggestRequest) -> list[SlotSuggestionResponse]:
     return [SlotSuggestionResponse.from_suggestion(item) for item in suggestions]
 
 
+@router.get("/board", response_model=list[DockSlot])
+def dock_board(shipment_id: str, service: DockSchedulerService = Depends(get_service)) -> list[DockSlot]:
+    """Every compatible slot for a shipment, grouped by dock on the frontend,
+    for rendering the full visual dock board (not just the top-ranked
+    suggestions from POST /suggest).
+
+    Example:
+    `GET /dock-scheduler/board?shipment_id=SHP1006`
+    """
+    try:
+        return service.dock_board(shipment_id)
+    except DockSchedulerError as exc:
+        raise _handle_error(exc) from exc
+
+
 @router.post("/hold", response_model=HoldResponse)
-def hold_slot(request: HoldRequest) -> HoldResponse:
-    service = _service()
+def hold_slot(
+    request: HoldRequest,
+    _: Principal = Depends(require_admin),
+    service: DockSchedulerService = Depends(get_service),
+) -> HoldResponse:
     try:
         hold = service.hold_slot(request.shipment_id, request.slot_id, request.ttl_minutes)
     except DockSchedulerError as exc:
@@ -73,11 +92,11 @@ def hold_slot(request: HoldRequest) -> HoldResponse:
 
 
 @router.post("/request-confirmation", response_model=HoldResponse)
-def request_confirmation(request: HoldRequest) -> HoldResponse:
-    from setuhaul.backend.dock_scheduler.models import HoldResult
-    from setuhaul.backend.dock_scheduler.repository import parse_ts
-
-    service = _service()
+def request_confirmation(
+    request: HoldRequest,
+    _: Principal = Depends(require_admin),
+    service: DockSchedulerService = Depends(get_service),
+) -> HoldResponse:
     try:
         appointment_id = service.request_confirmation(request.shipment_id, request.slot_id)
         hold = service.repository.active_hold_for_shipment(request.shipment_id, request.slot_id)
@@ -96,8 +115,11 @@ def request_confirmation(request: HoldRequest) -> HoldResponse:
 
 
 @router.post("/confirm", response_model=ConfirmResponse)
-def confirm_booking(request: ConfirmRequest) -> ConfirmResponse:
-    service = _service()
+def confirm_booking(
+    request: ConfirmRequest,
+    _: Principal = Depends(require_admin),
+    service: DockSchedulerService = Depends(get_service),
+) -> ConfirmResponse:
     try:
         appointment_id = service.confirm_booking(
             request.shipment_id, request.slot_id, request.accepted
@@ -113,7 +135,10 @@ def confirm_booking(request: ConfirmRequest) -> ConfirmResponse:
 
 
 @router.post("/cancel-hold")
-def cancel_hold(request: CancelHoldRequest) -> dict[str, str]:
-    service = _service()
+def cancel_hold(
+    request: CancelHoldRequest,
+    _: Principal = Depends(require_admin),
+    service: DockSchedulerService = Depends(get_service),
+) -> dict[str, str]:
     service.cancel_hold(request.hold_id)
     return {"status": "released", "hold_id": request.hold_id}

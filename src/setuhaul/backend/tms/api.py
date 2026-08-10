@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from uuid import UUID
-
 from fastapi import APIRouter, Depends, FastAPI, Query, Request, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 from setuhaul.backend.tms.exceptions import TMSError
 from setuhaul.backend.tms.models import (
@@ -15,6 +14,7 @@ from setuhaul.backend.tms.models import (
     DriverCreate,
     DriverResponse,
     DriverUpdate,
+    FacilityResponse,
     ShipmentContextResponse,
     ShipmentCreate,
     ShipmentResponse,
@@ -32,6 +32,7 @@ from setuhaul.infrastructure.supabase_client import create_caller_client
 
 router = APIRouter(prefix="/tms", tags=["tms"])
 
+
 @router.get("/health")
 def health() -> dict[str, str]:
     """Return a lightweight status payload for TMS smoke checks.
@@ -41,6 +42,7 @@ def health() -> dict[str, str]:
     """
     return {"status": "ok", "system": "tms"}
 
+
 def get_service(
     principal: Principal = Depends(require_reader),
 ) -> TMSService:
@@ -49,28 +51,33 @@ def get_service(
     return TMSService(TMSRepository(client))
 
 
-@router.get("/drivers", response_model=DriverResponse)
-def get_driver_by_phone(
-    phone: str = Query(min_length=1), service: TMSService = Depends(get_service)
-) -> DriverResponse:
-    return service.get_driver_by_phone(phone)
+@router.get("/drivers", response_model=list[DriverResponse])
+def list_or_find_drivers(
+    phone: str | None = Query(default=None, min_length=1),
+    limit: int = Query(default=200, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    service: TMSService = Depends(get_service),
+) -> list[DriverResponse]:
+    if phone:
+        return [service.get_driver_by_phone(phone)]
+    return service.list_drivers(limit=limit, offset=offset)
 
 
 @router.get("/drivers/{driver_id}", response_model=DriverResponse)
-def get_driver(driver_id: UUID, service: TMSService = Depends(get_service)) -> DriverResponse:
+def get_driver(driver_id: str, service: TMSService = Depends(get_service)) -> DriverResponse:
     return service.get_driver(driver_id)
 
 
 @router.get("/drivers/{driver_id}/shipments", response_model=list[ShipmentResponse])
 def get_driver_shipments(
-    driver_id: UUID, service: TMSService = Depends(get_service)
+    driver_id: str, service: TMSService = Depends(get_service)
 ) -> list[ShipmentResponse]:
     return service.driver_shipments(driver_id)
 
 
 @router.get("/drivers/{driver_id}/active-shipments", response_model=list[ShipmentResponse])
 def get_driver_active_shipments(
-    driver_id: UUID, service: TMSService = Depends(get_service)
+    driver_id: str, service: TMSService = Depends(get_service)
 ) -> list[ShipmentResponse]:
     return service.driver_shipments(driver_id, active_only=True)
 
@@ -86,7 +93,7 @@ def create_driver(
 
 @router.patch("/drivers/{driver_id}", response_model=DriverResponse)
 def update_driver(
-    driver_id: UUID,
+    driver_id: str,
     request: DriverUpdate,
     _: Principal = Depends(require_admin),
     service: TMSService = Depends(get_service),
@@ -94,8 +101,17 @@ def update_driver(
     return service.update_driver(driver_id, request)
 
 
+@router.get("/vehicles", response_model=list[VehicleResponse])
+def list_vehicles(
+    limit: int = Query(default=200, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    service: TMSService = Depends(get_service),
+) -> list[VehicleResponse]:
+    return service.list_vehicles(limit=limit, offset=offset)
+
+
 @router.get("/vehicles/{vehicle_id}", response_model=VehicleResponse)
-def get_vehicle(vehicle_id: UUID, service: TMSService = Depends(get_service)) -> VehicleResponse:
+def get_vehicle(vehicle_id: str, service: TMSService = Depends(get_service)) -> VehicleResponse:
     return service.get_vehicle(vehicle_id)
 
 
@@ -110,7 +126,7 @@ def create_vehicle(
 
 @router.patch("/vehicles/{vehicle_id}", response_model=VehicleResponse)
 def update_vehicle(
-    vehicle_id: UUID,
+    vehicle_id: str,
     request: VehicleUpdate,
     _: Principal = Depends(require_admin),
     service: TMSService = Depends(get_service),
@@ -120,17 +136,21 @@ def update_vehicle(
 
 @router.get("/shipments", response_model=list[ShipmentResponse])
 def list_shipments(
-    driver_id: UUID | None = None,
-    destination_id: UUID | None = None,
+    driver_id: str | None = None,
+    destination_facility_id: str | None = None,
     shipment_status: ShipmentStatus | None = Query(default=None, alias="status"),
+    unassigned_only: bool = False,
+    include_archived: bool = False,
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     service: TMSService = Depends(get_service),
 ) -> list[ShipmentResponse]:
     return service.list_shipments(
         driver_id=driver_id,
-        destination_id=destination_id,
+        destination_facility_id=destination_facility_id,
         status=shipment_status,
+        unassigned_only=unassigned_only,
+        include_archived=include_archived,
         limit=limit,
         offset=offset,
     )
@@ -138,7 +158,7 @@ def list_shipments(
 
 @router.get("/shipments/{shipment_id}", response_model=ShipmentResponse)
 def get_shipment(
-    shipment_id: UUID, service: TMSService = Depends(get_service)
+    shipment_id: str, service: TMSService = Depends(get_service)
 ) -> ShipmentResponse:
     return service.get_shipment(shipment_id)
 
@@ -154,7 +174,7 @@ def create_shipment(
 
 @router.patch("/shipments/{shipment_id}", response_model=ShipmentResponse)
 def update_shipment(
-    shipment_id: UUID,
+    shipment_id: str,
     request: ShipmentUpdate,
     _: Principal = Depends(require_admin),
     service: TMSService = Depends(get_service),
@@ -162,16 +182,58 @@ def update_shipment(
     return service.update_shipment(shipment_id, request)
 
 
+class AssignShipmentRequest(BaseModel):
+    driver_id: str = Field(min_length=1)
+    vehicle_id: str | None = None
+
+
+@router.post("/shipments/{shipment_id}/assign", response_model=ShipmentResponse)
+def assign_shipment(
+    shipment_id: str,
+    request: AssignShipmentRequest,
+    _: Principal = Depends(require_admin),
+    service: TMSService = Depends(get_service),
+) -> ShipmentResponse:
+    return service.assign_shipment(shipment_id, driver_id=request.driver_id, vehicle_id=request.vehicle_id)
+
+
+@router.post("/shipments/{shipment_id}/archive", response_model=ShipmentResponse)
+def archive_shipment(
+    shipment_id: str,
+    _: Principal = Depends(require_admin),
+    service: TMSService = Depends(get_service),
+) -> ShipmentResponse:
+    return service.archive_shipment(shipment_id)
+
+
+@router.post("/shipments/{shipment_id}/unarchive", response_model=ShipmentResponse)
+def unarchive_shipment(
+    shipment_id: str,
+    _: Principal = Depends(require_admin),
+    service: TMSService = Depends(get_service),
+) -> ShipmentResponse:
+    return service.unarchive_shipment(shipment_id)
+
+
+@router.get("/facilities", response_model=list[FacilityResponse])
+def list_facilities(
+    limit: int = Query(default=200, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    service: TMSService = Depends(get_service),
+) -> list[FacilityResponse]:
+    return service.list_facilities(limit=limit, offset=offset)
+
+
 @router.get("/context/drivers/{driver_id}", response_model=DriverContextResponse)
 def get_driver_context(
-    driver_id: UUID, service: TMSService = Depends(get_service)
+    driver_id: str, service: TMSService = Depends(get_service)
 ) -> DriverContextResponse:
     return service.driver_context(driver_id)
 
 
 @router.get("/context/shipments/{shipment_id}", response_model=ShipmentContextResponse)
 def get_shipment_context(
-    shipment_id: UUID, service: TMSService = Depends(get_service)
+    shipment_id: str, service: TMSService = Depends(get_service)
 ) -> ShipmentContextResponse:
     return service.shipment_context(shipment_id)
 

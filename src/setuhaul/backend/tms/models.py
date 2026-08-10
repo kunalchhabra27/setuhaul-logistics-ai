@@ -1,13 +1,22 @@
-"""Pydantic domain and API models for the Transportation Management System."""
+"""Pydantic domain and API models for the Transportation Management System.
+
+Field names mirror the real Supabase columns on public.drivers / public.vehicles /
+public.shipments (verified live against the project on 2026-08-10) rather than the
+earlier UUID/`planned_eta`-style schema this module was originally written against.
+IDs on these tables are plain text (e.g. "DRV001", "SHP1001"), not UUIDs.
+"""
 
 from __future__ import annotations
 
-from datetime import date, datetime
 from enum import Enum
-from typing import Any, Self
-from uuid import UUID
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+try:
+    from typing import Self
+except ImportError:  # pragma: no cover - Python < 3.11 compatibility shim
+    from typing_extensions import Self
 
 
 class TMSRole(str, Enum):
@@ -16,42 +25,51 @@ class TMSRole(str, Enum):
 
 
 class DriverStatus(str, Enum):
-    ACTIVE = "active"
-    INACTIVE = "inactive"
-    SUSPENDED = "suspended"
-
-
-class VehicleStatus(str, Enum):
-    ACTIVE = "active"
-    INACTIVE = "inactive"
-    MAINTENANCE = "maintenance"
+    ACTIVE = "ACTIVE"
+    OFF_DUTY = "OFF_DUTY"
+    SUSPENDED = "SUSPENDED"
+    INACTIVE = "INACTIVE"
 
 
 class ShipmentStatus(str, Enum):
-    PLANNED = "planned"
-    IN_TRANSIT = "in_transit"
-    ARRIVED = "arrived"
-    WAITING = "waiting"
-    UNLOADING = "unloading"
-    COMPLETED = "completed"
-    CANCELLED = "cancelled"
-    EXCEPTION = "exception"
+    PLANNED = "PLANNED"
+    ASSIGNED = "ASSIGNED"
+    IN_TRANSIT = "IN_TRANSIT"
+    AT_GATE = "AT_GATE"
+    WAITING = "WAITING"
+    IN_DOCK = "IN_DOCK"
+    COMPLETED = "COMPLETED"
+    CANCELLED = "CANCELLED"
 
 
 ACTIVE_CONTEXT_STATUSES = frozenset(
     {
         ShipmentStatus.PLANNED,
+        ShipmentStatus.ASSIGNED,
         ShipmentStatus.IN_TRANSIT,
-        ShipmentStatus.ARRIVED,
+        ShipmentStatus.AT_GATE,
         ShipmentStatus.WAITING,
-        ShipmentStatus.UNLOADING,
-        ShipmentStatus.EXCEPTION,
+        ShipmentStatus.IN_DOCK,
     }
 )
 
 
 class APIModel(BaseModel):
+    """Base for request models -- rejects unknown fields."""
+
     model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+
+class DBModel(BaseModel):
+    """Base for models parsed straight from a Supabase row.
+
+    Uses extra="ignore" rather than "forbid": repository queries select an
+    explicit, known column list, but staying lenient here means an
+    unexpected/extra column from Supabase degrades gracefully instead of
+    500-ing every request.
+    """
+
+    model_config = ConfigDict(extra="ignore", from_attributes=True)
 
 
 class NonEmptyPatch(APIModel):
@@ -62,104 +80,158 @@ class NonEmptyPatch(APIModel):
         return self
 
 
+# --------------------------------------------------------------------------
+# Drivers (public.drivers)
+# --------------------------------------------------------------------------
+
+
 class DriverCreate(APIModel):
-    carrier_id: UUID
-    driver_code: str | None = Field(default=None, min_length=1)
-    name: str = Field(min_length=1)
+    carrier_id: str = Field(min_length=1)
+    driver_name: str = Field(min_length=1)
     phone: str = Field(min_length=1)
-    email: str | None = None
-    license_number: str | None = None
-    license_expiry: date | None = None
-    home_base: str | None = None
-    active_flag: bool = True
-    status: DriverStatus = DriverStatus.ACTIVE
+    licence_number: str | None = None
+    home_base_city: str | None = None
+    driver_status: DriverStatus = DriverStatus.ACTIVE
 
 
 class DriverUpdate(NonEmptyPatch):
-    carrier_id: UUID | None = None
-    driver_code: str | None = Field(default=None, min_length=1)
-    name: str | None = Field(default=None, min_length=1)
+    carrier_id: str | None = Field(default=None, min_length=1)
+    driver_name: str | None = Field(default=None, min_length=1)
     phone: str | None = Field(default=None, min_length=1)
-    email: str | None = None
-    license_number: str | None = None
-    license_expiry: date | None = None
-    home_base: str | None = None
-    active_flag: bool | None = None
-    status: DriverStatus | None = None
+    licence_number: str | None = None
+    home_base_city: str | None = None
+    driver_status: DriverStatus | None = None
 
 
-class DriverResponse(DriverCreate):
-    driver_id: UUID
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
+class DriverResponse(DBModel):
+    driver_id: str
+    carrier_id: str | None = None
+    driver_name: str | None = None
+    phone: str | None = None
+    licence_number: str | None = None
+    home_base_city: str | None = None
+    driver_status: DriverStatus | None = None
+
+    @property
+    def is_active(self) -> bool:
+        return self.driver_status is DriverStatus.ACTIVE
+
+
+# --------------------------------------------------------------------------
+# Vehicles (public.vehicles)
+# --------------------------------------------------------------------------
 
 
 class VehicleCreate(APIModel):
-    carrier_id: UUID
-    vehicle_number: str = Field(min_length=1)
-    vehicle_type: str = Field(min_length=1)
-    length_ft: float | None = Field(default=None, gt=0)
-    capacity_weight_kg: float | None = Field(default=None, gt=0)
-    refrigeration_required: bool = False
+    carrier_id: str = Field(min_length=1)
+    registration_number: str = Field(min_length=1)
+    vehicle_type_code: str = Field(min_length=1)
+    capacity_kg: float | None = Field(default=None, gt=0)
+    refrigeration_capable: bool = False
     active_flag: bool = True
-    status: VehicleStatus = VehicleStatus.ACTIVE
 
 
 class VehicleUpdate(NonEmptyPatch):
-    carrier_id: UUID | None = None
-    vehicle_number: str | None = Field(default=None, min_length=1)
-    vehicle_type: str | None = Field(default=None, min_length=1)
-    length_ft: float | None = Field(default=None, gt=0)
-    capacity_weight_kg: float | None = Field(default=None, gt=0)
-    refrigeration_required: bool | None = None
+    carrier_id: str | None = Field(default=None, min_length=1)
+    registration_number: str | None = Field(default=None, min_length=1)
+    vehicle_type_code: str | None = Field(default=None, min_length=1)
+    capacity_kg: float | None = Field(default=None, gt=0)
+    refrigeration_capable: bool | None = None
     active_flag: bool | None = None
-    status: VehicleStatus | None = None
 
 
-class VehicleResponse(VehicleCreate):
-    vehicle_id: UUID
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
+class VehicleResponse(DBModel):
+    vehicle_id: str
+    carrier_id: str | None = None
+    registration_number: str | None = None
+    vehicle_type_code: str | None = None
+    capacity_kg: float | None = None
+    refrigeration_capable: bool | None = None
+    active_flag: bool | None = None
 
 
-def _validate_timezone(value: datetime | None) -> datetime | None:
-    if value is not None and (value.tzinfo is None or value.utcoffset() is None):
-        raise ValueError("planned_eta must include a timezone offset")
-    return value
+# --------------------------------------------------------------------------
+# Shipments (public.shipments)
+# --------------------------------------------------------------------------
 
 
 class ShipmentCreate(APIModel):
-    driver_id: UUID
-    vehicle_id: UUID
-    origin_id: UUID | None = None
-    destination_id: UUID
-    product_class: str = Field(min_length=1)
-    priority: int = Field(gt=0)
-    planned_eta: datetime | None = None
-    expected_unload_minutes: int = Field(gt=0)
-    status: ShipmentStatus = ShipmentStatus.PLANNED
-
-    _timezone = field_validator("planned_eta")(_validate_timezone)
+    shipment_id: str | None = Field(default=None, min_length=1)
+    order_reference: str = Field(min_length=1)
+    carrier_id: str = Field(min_length=1)
+    driver_id: str = Field(min_length=1)
+    vehicle_id: str = Field(min_length=1)
+    origin_name: str = Field(min_length=1)
+    origin_city: str | None = None
+    destination_facility_id: str = Field(min_length=1)
+    customer_name: str | None = None
+    product_category: str | None = None
+    load_weight_kg: int | None = Field(default=None, gt=0)
+    required_dock_type: str = Field(default="STANDARD", min_length=1)
+    temperature_control_required: bool = False
+    priority_code: str | None = None
+    planned_departure_ts: str | None = None
+    original_eta_ts: str | None = None
+    latest_eta_ts: str | None = None
+    expected_unload_min: int | None = Field(default=None, gt=0)
+    current_status: ShipmentStatus = ShipmentStatus.PLANNED
+    # Note: no archived_flag here -- a shipment is never created pre-archived,
+    # that only happens later via archive_shipment(). Keeping it off this model
+    # also avoids sending a column that may not exist yet (see the
+    # 20260811100000_tms_shipments_archive.sql migration).
 
 
 class ShipmentUpdate(NonEmptyPatch):
-    driver_id: UUID | None = None
-    vehicle_id: UUID | None = None
-    origin_id: UUID | None = None
-    destination_id: UUID | None = None
-    product_class: str | None = Field(default=None, min_length=1)
-    priority: int | None = Field(default=None, gt=0)
-    planned_eta: datetime | None = None
-    expected_unload_minutes: int | None = Field(default=None, gt=0)
-    status: ShipmentStatus | None = None
+    carrier_id: str | None = Field(default=None, min_length=1)
+    driver_id: str | None = None
+    vehicle_id: str | None = None
+    origin_name: str | None = None
+    origin_city: str | None = None
+    destination_facility_id: str | None = Field(default=None, min_length=1)
+    customer_name: str | None = None
+    product_category: str | None = None
+    load_weight_kg: int | None = Field(default=None, gt=0)
+    required_dock_type: str | None = None
+    temperature_control_required: bool | None = None
+    priority_code: str | None = None
+    planned_departure_ts: str | None = None
+    original_eta_ts: str | None = None
+    latest_eta_ts: str | None = None
+    expected_unload_min: int | None = Field(default=None, gt=0)
+    current_status: ShipmentStatus | None = None
+    archived_flag: bool | None = None
 
-    _timezone = field_validator("planned_eta")(_validate_timezone)
+
+class ShipmentResponse(DBModel):
+    shipment_id: str
+    order_reference: str | None = None
+    carrier_id: str | None = None
+    driver_id: str | None = None
+    vehicle_id: str | None = None
+    origin_name: str | None = None
+    origin_city: str | None = None
+    destination_facility_id: str | None = None
+    customer_name: str | None = None
+    product_category: str | None = None
+    load_weight_kg: int | None = None
+    required_dock_type: str | None = None
+    temperature_control_required: bool | None = None
+    priority_code: str | None = None
+    planned_departure_ts: str | None = None
+    original_eta_ts: str | None = None
+    latest_eta_ts: str | None = None
+    expected_unload_min: int | None = None
+    current_status: ShipmentStatus | None = None
+    archived_flag: bool | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
 
 
-class ShipmentResponse(ShipmentCreate):
-    shipment_id: UUID
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
+class FacilityResponse(DBModel):
+    facility_id: str
+    facility_name: str | None = None
+    city: str | None = None
+    state: str | None = None
 
 
 class ContextResolution(str, Enum):
@@ -168,44 +240,40 @@ class ContextResolution(str, Enum):
     NOT_FOUND = "not_found"
 
 
-class DriverSummary(APIModel):
-    driver_id: UUID
-    driver_code: str | None
-    name: str
-    carrier_id: UUID
-    status: DriverStatus
-    active_flag: bool
+class DriverSummary(DBModel):
+    driver_id: str
+    driver_name: str | None = None
+    carrier_id: str | None = None
+    driver_status: DriverStatus | None = None
 
 
-class VehicleContext(APIModel):
-    vehicle_id: UUID
-    vehicle_number: str
-    vehicle_type: str
-    length_ft: float | None
-    refrigeration_required: bool
-    status: VehicleStatus
+class VehicleContext(DBModel):
+    vehicle_id: str
+    registration_number: str | None = None
+    vehicle_type_code: str | None = None
+    refrigeration_capable: bool | None = None
+    active_flag: bool | None = None
 
 
-class ShipmentCandidate(APIModel):
-    shipment_id: UUID
+class ShipmentCandidate(DBModel):
+    shipment_id: str
     vehicle: VehicleContext
-    origin_id: UUID | None
-    destination_id: UUID
-    product_class: str
-    priority: int
-    planned_eta: datetime | None
-    expected_unload_minutes: int
-    status: ShipmentStatus
+    destination_facility_id: str | None = None
+    product_category: str | None = None
+    priority_code: str | None = None
+    original_eta_ts: str | None = None
+    expected_unload_min: int | None = None
+    current_status: ShipmentStatus | None = None
 
 
-class DriverContextResponse(APIModel):
+class DriverContextResponse(DBModel):
     resolution: ContextResolution
     requires_disambiguation: bool
     driver: DriverSummary
     active_shipments: list[ShipmentCandidate]
 
 
-class ShipmentContextResponse(APIModel):
+class ShipmentContextResponse(DBModel):
     driver: DriverSummary
     vehicle: VehicleContext
     shipment: ShipmentResponse

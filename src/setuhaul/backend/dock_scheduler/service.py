@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from setuhaul.backend.dock_scheduler.exceptions import InvalidBookingError
 from setuhaul.backend.dock_scheduler.models import (
+    DockSlot,
     DriverConstraints,
     HoldResult,
     SlotLifecycleStage,
     SlotSuggestion,
 )
-from setuhaul.backend.dock_scheduler.repository import DockSchedulerRepository
+from setuhaul.backend.dock_scheduler.repository import DockSchedulerRepository, parse_ts
 from setuhaul.backend.dock_scheduler.scheduler import DeterministicReschedulingEngine
 
 
@@ -29,11 +30,30 @@ class DockSchedulerService:
         """Return ranked slot options without mutating capacity."""
         return self.engine.suggest(shipment_id, constraints, limit)
 
+    def dock_board(self, shipment_id: str) -> list[DockSlot]:
+        """Return every compatible slot (not just the top-ranked ones) grouped
+        by dock, for rendering a full visual dock board. Unlike suggest_slots
+        this is not limited/ranked -- it's meant to show the whole day's
+        capacity across every dock the shipment could use.
+        """
+        slots = self.repository.compatible_slots(shipment_id)
+        return [
+            DockSlot(
+                slot_id=row["slot_id"],
+                dock_code=row["dock_code"],
+                dock_type=row["dock_type"],
+                start=parse_ts(row["slot_start_ts"]),
+                end=parse_ts(row["slot_end_ts"]),
+                availability_status=row["availability_status"],
+                occupant_shipment_id=row.get("shipment_id"),
+            )
+            for row in slots
+        ]
+
     def hold_slot(self, shipment_id: str, slot_id: str, ttl_minutes: int = 15) -> HoldResult:
         """Reserve a slot temporarily while the driver considers the option."""
-        suggestions = self.engine.suggest(shipment_id, limit=20)
-        allowed = {item.slot_id for item in suggestions if item.suggestion_type.value != "PRIORITY_SWAP"}
-        if slot_id not in allowed:
+        compatible = self.repository.compatible_slots(shipment_id)
+        if not any(slot["slot_id"] == slot_id for slot in compatible):
             raise InvalidBookingError("Slot is not a feasible option for this shipment")
         return self.repository.create_hold(shipment_id, slot_id, ttl_minutes)
 
@@ -60,19 +80,10 @@ class DockSchedulerService:
     def lifecycle_stage_for_slot(slot_id: str, shipment_id: str, repository: DockSchedulerRepository) -> SlotLifecycleStage:
         hold = repository.active_hold_for_shipment(shipment_id, slot_id)
         if hold:
-            pending = repository.connection.execute(
-                """
-                SELECT appointment_status
-                FROM appointments
-                WHERE shipment_id = ? AND slot_id = ? AND is_current = 1
-                ORDER BY booked_at DESC
-                LIMIT 1
-                """,
-                (shipment_id, slot_id),
-            ).fetchone()
-            if pending and pending["appointment_status"] == "PENDING_CONFIRMATION":
+            status = repository.current_appointment_status(shipment_id, slot_id)
+            if status == "PENDING_CONFIRMATION":
                 return SlotLifecycleStage.PENDING_CONFIRMATION
-            if pending and pending["appointment_status"] == "CONFIRMED":
+            if status == "CONFIRMED":
                 return SlotLifecycleStage.CONFIRMED
             return SlotLifecycleStage.HELD
         return SlotLifecycleStage.PROPOSED
