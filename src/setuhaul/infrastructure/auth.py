@@ -40,7 +40,9 @@ def get_current_principal(
     if user is None:
         raise AuthenticationError("The bearer token is invalid or expired.")
 
-    role_value = (user.app_metadata or {}).get("tms_role")
+    metadata = user.app_metadata or {}
+    user_metadata = user.user_metadata or {}
+    role_value = metadata.get("tms_role") or metadata.get("service_role") or user_metadata.get("service_role")
     try:
         role = TMSRole(role_value)
     except (TypeError, ValueError) as exc:

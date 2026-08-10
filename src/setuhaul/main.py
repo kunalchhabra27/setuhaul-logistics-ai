@@ -19,9 +19,20 @@ configure_logging(os.getenv("LOG_LEVEL", "INFO"))
 app = FastAPI(title="SetuHaul Backend", version="0.1.0")
 app.add_middleware(RequestObservabilityMiddleware)
 frontend_origin = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
+frontend_origins = {
+    origin.strip()
+    for origin in frontend_origin.split(",")
+    if origin.strip()
+}
+frontend_origins.update(
+    {
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    }
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[frontend_origin],
+    allow_origins=sorted(frontend_origins),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
