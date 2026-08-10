@@ -169,9 +169,14 @@ class ProfileCompleteRequest(BaseModel):
 
     driver_name: str = Field(min_length=1)
     phone: str = Field(min_length=1)
-    licence_number: str = Field(min_length=1)
+    licence_number: str = Field(min_length=1, max_length=16, pattern=r"^[A-Z]{2}[0-9]{2}[- ]?[0-9]{4}[- ]?[0-9]{6,7}$")
     home_base_city: str = Field(min_length=1)
-    carrier_name: str = Field(min_length=1)
+    carrier_id: str = Field(min_length=1)
+
+
+class OnboardingOptions(APIModel):
+    carrier_ids: list[str]
+    home_base_cities: list[str]
 
 
 class DriverProfile(APIModel):

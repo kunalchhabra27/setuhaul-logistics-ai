@@ -15,6 +15,7 @@ from setuhaul.backend.driver_chat_eta.models import (
     ConfirmSlotResponse,
     DriverProfile,
     DriverSnapshot,
+    OnboardingOptions,
     EscalateRequest,
     EscalateResponse,
     HoldSlotRequest,
@@ -25,7 +26,7 @@ from setuhaul.backend.driver_chat_eta.models import (
 from setuhaul.backend.driver_chat_eta.repository import DriverChatRepository
 from setuhaul.backend.driver_chat_eta.service import DriverChatService
 from setuhaul.infrastructure.settings import get_settings
-from setuhaul.infrastructure.supabase_client import create_caller_client
+from setuhaul.infrastructure.supabase_client import create_caller_client, create_public_client
 
 router = APIRouter(prefix="/driver-chat-eta", tags=["driver-chat-eta"])
 
@@ -69,6 +70,15 @@ def complete_profile(
 ) -> DriverProfile:
     try:
         return service.complete_profile(principal, request)
+    except DriverChatError as exc:
+        _raise_http(exc)
+
+
+@router.get("/profile/options", response_model=OnboardingOptions)
+def get_profile_options() -> OnboardingOptions:
+    try:
+        client = create_public_client(get_settings())
+        return DriverChatService(DriverChatRepository(client)).onboarding_options()
     except DriverChatError as exc:
         _raise_http(exc)
 

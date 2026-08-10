@@ -37,12 +37,20 @@ export function createApiClient(serviceId: string) {
       : await response.text();
 
     if (!response.ok) {
-      const message =
-        typeof payload === "object" && payload && "detail" in payload
-          ? String((payload as { detail?: unknown }).detail)
-          : typeof payload === "object" && payload && "error" in payload
-            ? String((payload as { error?: { message?: unknown } }).error?.message ?? "Request failed")
-            : "Request failed";
+      const message = (() => {
+        if (typeof payload === "object" && payload && "detail" in payload) {
+          const detail = (payload as { detail?: unknown }).detail;
+          if (typeof detail === "string") return detail;
+          if (detail && typeof detail === "object" && "message" in detail) {
+            return String((detail as { message?: unknown }).message ?? "Request failed");
+          }
+          return "Request failed";
+        }
+        if (typeof payload === "object" && payload && "error" in payload) {
+          return String((payload as { error?: { message?: unknown } }).error?.message ?? "Request failed");
+        }
+        return "Request failed";
+      })();
       throw new ApiClientError(message, response.status, payload);
     }
 

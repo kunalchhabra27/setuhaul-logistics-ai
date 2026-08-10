@@ -169,5 +169,10 @@ export interface DriverProfileCompleteRequest {
   phone: string;
   licence_number: string;
   home_base_city: string;
-  carrier_name: string;
+  carrier_id: string;
+}
+
+export interface DriverOnboardingOptions {
+  carrier_ids: string[];
+  home_base_cities: string[];
 }

@@ -101,6 +101,15 @@ def update_driver(
     return service.update_driver(driver_id, request)
 
 
+@router.delete("/drivers/{driver_id}", response_model=DriverResponse)
+def delete_driver(
+    driver_id: str,
+    _: Principal = Depends(require_admin),
+    service: TMSService = Depends(get_service),
+) -> DriverResponse:
+    return service.delete_driver(driver_id)
+
+
 @router.get("/vehicles", response_model=list[VehicleResponse])
 def list_vehicles(
     limit: int = Query(default=200, ge=1, le=500),
