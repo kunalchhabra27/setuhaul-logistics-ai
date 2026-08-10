@@ -8,6 +8,7 @@ import type {
   DriverFacilityCheckinSummary,
   DriverProfile,
   DriverProfileCompleteRequest,
+  DriverOnboardingOptions,
   DriverSnapshot,
 } from "../types/driverChat";
 
@@ -20,6 +21,10 @@ export function driverChatHealth() {
 
 export function getMyDriverProfile() {
   return api.request<DriverProfile>(`${base}/me`);
+}
+
+export function getDriverOnboardingOptions() {
+  return api.request<DriverOnboardingOptions>(`${base}/profile/options`);
 }
 
 export function completeDriverProfile(body: DriverProfileCompleteRequest) {

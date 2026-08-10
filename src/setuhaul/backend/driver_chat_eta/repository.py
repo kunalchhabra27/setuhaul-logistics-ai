@@ -53,6 +53,15 @@ class DriverChatRepository:
             self._raise_persistence(exc)
         return rows[0] if rows else None
 
+    def get_driver_by_auth_user_id(self, auth_user_id: str) -> dict[str, Any] | None:
+        try:
+            rows = self._rows(
+                self.client.table("drivers").select("*").eq("auth_user_id", auth_user_id).limit(1).execute()
+            )
+        except APIError as exc:
+            self._raise_persistence(exc)
+        return rows[0] if rows else None
+
     def upsert_driver(self, driver_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         payload = {**payload, "driver_id": driver_id}
         try:
@@ -62,6 +71,35 @@ class DriverChatRepository:
         if not rows:
             raise PersistenceError("The driver profile upsert returned no record.")
         return rows[0]
+
+    def list_driver_ids(self) -> list[str]:
+        try:
+            rows = self._rows(self.client.table("drivers").select("driver_id").order("driver_id", desc=False).execute())
+        except APIError as exc:
+            self._raise_persistence(exc)
+        return [str(row["driver_id"]) for row in rows if row.get("driver_id")]
+
+    def get_driver_by_exact_id(self, driver_id: str) -> dict[str, Any] | None:
+        return self.get_driver(driver_id)
+
+    def list_carrier_ids(self) -> list[str]:
+        try:
+            rows = self._rows(
+                self.client.table("carriers").select("carrier_id").order("carrier_id", desc=False).execute()
+            )
+        except APIError as exc:
+            self._raise_persistence(exc)
+        return [str(row["carrier_id"]) for row in rows if row.get("carrier_id")]
+
+    def list_home_base_cities(self) -> list[str]:
+        try:
+            rows = self._rows(
+                self.client.table("drivers").select("home_base_city").not_.is_("home_base_city", "null").execute()
+            )
+        except APIError as exc:
+            self._raise_persistence(exc)
+        cities = sorted({str(row["home_base_city"]) for row in rows if row.get("home_base_city")})
+        return cities
 
     # -- carriers -------------------------------------------------------
 

@@ -43,6 +43,7 @@ from uuid import uuid4
 from setuhaul.backend.driver_chat_eta.auth import DriverPrincipal
 from setuhaul.backend.driver_chat_eta.exceptions import (
     BusinessValidationError,
+    ConflictError,
     DriverProfileNotFoundError,
     ShipmentNotFoundError,
     SlotConflictError,
@@ -60,6 +61,7 @@ from setuhaul.backend.driver_chat_eta.models import (
     DriverExceptionSummary,
     DriverProfile,
     DriverSnapshot,
+    OnboardingOptions,
     EscalateResponse,
     FacilityCheckinSummary,
     FacilitySummary,
@@ -106,25 +108,45 @@ class DriverChatService:
     # -- profile ----------------------------------------------------------
 
     def complete_profile(self, principal: DriverPrincipal, request: ProfileCompleteRequest) -> DriverProfile:
-        carrier_id = self.repository.find_or_create_carrier(request.carrier_name)
+        if not request.carrier_id.startswith("CAR") or not request.carrier_id[3:].isdigit() or len(request.carrier_id) != 6:
+            raise BusinessValidationError("carrier_id must match the CAR001 format.")
+        if request.carrier_id not in self.repository.list_carrier_ids():
+            raise BusinessValidationError(f"Carrier {request.carrier_id} is not available.")
+        if request.home_base_city not in self.repository.list_home_base_cities():
+            raise BusinessValidationError(f"Home base city {request.home_base_city} is not available.")
+        driver_id = self._next_driver_id()
         payload = {
-            "carrier_id": carrier_id,
+            "carrier_id": request.carrier_id,
             "driver_name": request.driver_name,
             "phone": request.phone,
             "licence_number": request.licence_number,
             "home_base_city": request.home_base_city,
             "driver_status": "ACTIVE",
         }
-        row = self.repository.upsert_driver(principal.user_id, payload)
+        row = self.repository.upsert_driver(driver_id, payload)
         return DriverProfile.model_validate(row)
 
     def get_my_profile(self, principal: DriverPrincipal) -> DriverProfile:
-        row = self.repository.get_driver(principal.user_id)
+        row = self.repository.get_driver_by_auth_user_id(principal.user_id)
         if row is None:
             raise DriverProfileNotFoundError(
                 "No driver profile exists yet for this account. Complete your profile to continue."
             )
         return DriverProfile.model_validate(row)
+
+    def onboarding_options(self) -> OnboardingOptions:
+        return OnboardingOptions(
+            carrier_ids=self.repository.list_carrier_ids(),
+            home_base_cities=self.repository.list_home_base_cities(),
+        )
+
+    def _next_driver_id(self) -> str:
+        max_num = 0
+        for driver_id in self.repository.list_driver_ids():
+            match = re.fullmatch(r"DRV(\d{3})", driver_id)
+            if match:
+                max_num = max(max_num, int(match.group(1)))
+        return f"DRV{max_num + 1:03d}"
 
     # -- snapshot -----------------------------------------------------------
 

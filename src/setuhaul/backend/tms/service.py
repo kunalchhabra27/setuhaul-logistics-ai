@@ -73,6 +73,14 @@ class TMSService:
             raise DriverNotFoundError(f"Driver {driver_id} was not found.")
         return DriverResponse.model_validate(row)
 
+    def delete_driver(self, driver_id: str) -> DriverResponse:
+        current = self.get_driver(driver_id)
+        row = self.repository.update_driver(driver_id, {"driver_status": DriverStatus.INACTIVE.value})
+        if row is None:
+            raise DriverNotFoundError(f"Driver {driver_id} was not found.")
+        # Preserve the historical row so driver_id is never reused.
+        return DriverResponse.model_validate(row if row else current.model_dump())
+
     # -- vehicles ---------------------------------------------------------
 
     def get_vehicle(self, vehicle_id: str) -> VehicleResponse:
