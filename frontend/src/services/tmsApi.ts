@@ -1,5 +1,5 @@
 import { createApiClient } from "./api";
-import type { ShipmentCreateInput, ShipmentSummary, TmsDriver, TmsFacility, TmsVehicle } from "../types/api";
+import type { NextShipmentIds, ShipmentCreateInput, ShipmentSummary, TmsDriver, TmsFacility, TmsVehicle } from "../types/api";
 
 const api = createApiClient("tms");
 
@@ -17,6 +17,10 @@ export function listVehicles() {
 
 export function listFacilities() {
   return api.request<TmsFacility[]>("/tms/facilities");
+}
+
+export function getNextShipmentIds() {
+  return api.request<NextShipmentIds>("/tms/shipments/next-ids");
 }
 
 export function assignShipmentDriver(shipmentId: string, driverId: string, vehicleId?: string | null) {

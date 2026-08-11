@@ -1,4 +1,4 @@
-import { getAccessToken } from "../auth/authService";
+import { getSession } from "../auth/authService";
 
 const baseUrl = (import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "") ?? "") + "/api/v1";
 
@@ -20,9 +20,10 @@ export class ApiClientError extends Error {
 // recently. This is what lets the four portals be used in parallel in one
 // browser without one login clobbering another's outgoing requests.
 export function createApiClient(serviceId: string) {
-  async function request<T>(path: string, init?: RequestInit): Promise<T> {
-    const token = getAccessToken(serviceId);
-    const response = await fetch(`${baseUrl}${path}`, {
+  async function performRequest(path: string, init?: RequestInit, forceRefresh = false) {
+    const session = await getSession(serviceId, forceRefresh ? { forceRefresh: true } : undefined);
+    const token = session?.access_token ?? null;
+    return fetch(`${baseUrl}${path}`, {
       headers: {
         "Content-Type": "application/json",
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -30,11 +31,22 @@ export function createApiClient(serviceId: string) {
       },
       ...init,
     });
+  }
 
+  async function parsePayload(response: Response) {
     const contentType = response.headers.get("content-type") ?? "";
-    const payload = contentType.includes("application/json")
+    return contentType.includes("application/json")
       ? await response.json()
       : await response.text();
+  }
+
+  async function request<T>(path: string, init?: RequestInit): Promise<T> {
+    let response = await performRequest(path, init);
+    if (response.status === 401) {
+      response = await performRequest(path, init, true);
+    }
+
+    const payload = await parsePayload(response);
 
     if (!response.ok) {
       const message = (() => {

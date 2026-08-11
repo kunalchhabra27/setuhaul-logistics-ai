@@ -157,23 +157,25 @@ class VehicleResponse(DBModel):
 
 class ShipmentCreate(APIModel):
     shipment_id: str | None = Field(default=None, min_length=1)
-    order_reference: str = Field(min_length=1)
+    order_reference: str | None = None
     carrier_id: str = Field(min_length=1)
     driver_id: str = Field(min_length=1)
     vehicle_id: str = Field(min_length=1)
     origin_name: str = Field(min_length=1)
-    origin_city: str | None = None
+    origin_city: str = Field(min_length=1)
     destination_facility_id: str = Field(min_length=1)
-    customer_name: str | None = None
-    product_category: str | None = None
-    load_weight_kg: int | None = Field(default=None, gt=0)
-    required_dock_type: str = Field(default="STANDARD", min_length=1)
+    customer_name: str = Field(min_length=1)
+    product_category: str = Field(min_length=1)
+    load_weight_kg: int = Field(gt=0)
+    pallet_count: int | None = None
+    required_dock_type: str = Field(default="ANY", min_length=1)
     temperature_control_required: bool = False
     priority_code: str | None = None
-    planned_departure_ts: str | None = None
-    original_eta_ts: str | None = None
+    planned_departure_ts: str = Field(min_length=1)
+    actual_departure_ts: str | None = None
+    original_eta_ts: str = Field(min_length=1)
     latest_eta_ts: str | None = None
-    expected_unload_min: int | None = Field(default=None, gt=0)
+    expected_unload_min: int = Field(gt=0)
     current_status: ShipmentStatus = ShipmentStatus.PLANNED
     # Note: no archived_flag here -- a shipment is never created pre-archived,
     # that only happens later via archive_shipment(). Keeping it off this model
@@ -214,10 +216,12 @@ class ShipmentResponse(DBModel):
     customer_name: str | None = None
     product_category: str | None = None
     load_weight_kg: int | None = None
+    pallet_count: int | None = None
     required_dock_type: str | None = None
     temperature_control_required: bool | None = None
     priority_code: str | None = None
     planned_departure_ts: str | None = None
+    actual_departure_ts: str | None = None
     original_eta_ts: str | None = None
     latest_eta_ts: str | None = None
     expected_unload_min: int | None = None
@@ -225,6 +229,11 @@ class ShipmentResponse(DBModel):
     archived_flag: bool | None = None
     created_at: str | None = None
     updated_at: str | None = None
+
+
+class NextShipmentIdsResponse(DBModel):
+    shipment_id: str
+    order_reference: str
 
 
 class FacilityResponse(DBModel):

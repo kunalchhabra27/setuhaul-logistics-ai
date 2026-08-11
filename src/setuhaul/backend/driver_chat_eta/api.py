@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from setuhaul.backend.driver_chat_eta.auth import DriverPrincipal, get_current_driver
+from setuhaul.backend.driver_chat_eta.auth import (
+    DriverPrincipal,
+    get_current_driver,
+    link_driver_to_auth_account,
+)
 from setuhaul.backend.driver_chat_eta.exceptions import DriverChatError
 from setuhaul.backend.driver_chat_eta.models import (
     ChatRequest,
@@ -69,9 +73,11 @@ def complete_profile(
     service: DriverChatService = Depends(get_service),
 ) -> DriverProfile:
     try:
-        return service.complete_profile(principal, request)
+        profile = service.complete_profile(principal, request)
     except DriverChatError as exc:
         _raise_http(exc)
+    link_driver_to_auth_account(principal.access_token, profile.driver_id)
+    return profile
 
 
 @router.get("/profile/options", response_model=OnboardingOptions)

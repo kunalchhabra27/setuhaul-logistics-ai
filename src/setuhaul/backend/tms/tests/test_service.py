@@ -47,9 +47,12 @@ def test_unknown_driver_raises_404_domain_error(service):
 def test_maintenance_vehicle_cannot_receive_active_shipment(service):
     request = ShipmentCreate(
         order_reference="ORD-1", carrier_id="CAR001", origin_name="Depot",
+        origin_city="Depot City", customer_name="Test Customer",
         driver_id=DRIVER_ONE, vehicle_id=VEHICLE_MAINTENANCE,
         destination_facility_id=FACILITY, product_category="dry",
-        expected_unload_min=40, current_status=ShipmentStatus.PLANNED,
+        load_weight_kg=1000, planned_departure_ts="2026-08-10T09:00:00+00:00",
+        original_eta_ts="2026-08-10T12:00:00+00:00", expected_unload_min=40,
+        current_status=ShipmentStatus.PLANNED,
     )
     with pytest.raises(BusinessValidationError, match="inactive"):
         service.create_shipment(request)
@@ -59,9 +62,12 @@ def test_mismatched_carriers_are_rejected(service, repository):
     repository.vehicles[VEHICLE_ONE]["carrier_id"] = CARRIER_B
     request = ShipmentCreate(
         order_reference="ORD-1", carrier_id="CAR001", origin_name="Depot",
+        origin_city="Depot City", customer_name="Test Customer",
         driver_id=DRIVER_ONE, vehicle_id=VEHICLE_ONE,
         destination_facility_id=FACILITY, product_category="dry",
-        expected_unload_min=40, current_status=ShipmentStatus.IN_TRANSIT,
+        load_weight_kg=1000, planned_departure_ts="2026-08-10T09:00:00+00:00",
+        original_eta_ts="2026-08-10T12:00:00+00:00", expected_unload_min=40,
+        current_status=ShipmentStatus.IN_TRANSIT,
     )
     with pytest.raises(BusinessValidationError, match="same carrier"):
         service.create_shipment(request)
@@ -149,9 +155,12 @@ def test_create_shipment_with_driver_sends_sms(service, monkeypatch):
 
     request = ShipmentCreate(
         order_reference="ORD-99", carrier_id=CARRIER_A, origin_name="Depot",
+        origin_city="Depot City", customer_name="Test Customer",
         driver_id=DRIVER_ONE, vehicle_id=VEHICLE_ONE,
         destination_facility_id=FACILITY, product_category="dry",
-        expected_unload_min=40, current_status=ShipmentStatus.PLANNED,
+        load_weight_kg=1000, planned_departure_ts="2026-08-10T09:00:00+00:00",
+        original_eta_ts="2026-08-10T12:00:00+00:00", expected_unload_min=40,
+        current_status=ShipmentStatus.PLANNED,
     )
     service.create_shipment(request)
 

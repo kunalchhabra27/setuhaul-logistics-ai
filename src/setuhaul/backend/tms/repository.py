@@ -18,8 +18,8 @@ DRIVER_COLUMNS = "driver_id,carrier_id,driver_name,phone,licence_number,home_bas
 VEHICLE_COLUMNS = "vehicle_id,carrier_id,registration_number,vehicle_type_code,capacity_kg,refrigeration_capable,active_flag"
 SHIPMENT_COLUMNS = (
     "shipment_id,order_reference,carrier_id,driver_id,vehicle_id,origin_name,origin_city,"
-    "destination_facility_id,customer_name,product_category,load_weight_kg,"
-    "required_dock_type,temperature_control_required,priority_code,planned_departure_ts,"
+    "destination_facility_id,customer_name,product_category,load_weight_kg,pallet_count,"
+    "required_dock_type,temperature_control_required,priority_code,planned_departure_ts,actual_departure_ts,"
     "original_eta_ts,latest_eta_ts,expected_unload_min,current_status,"
     "created_at,updated_at"
 )
@@ -129,16 +129,18 @@ class TMSRepository:
     # -- shipments ------------------------------------------------------------
 
     def get_shipment(self, shipment_id: str) -> dict[str, Any] | None:
+        def build_query(include_archive_column: bool) -> Any:
+            columns = f"{SHIPMENT_COLUMNS},{ARCHIVE_COLUMN}" if include_archive_column else SHIPMENT_COLUMNS
+            return self.backend.table("shipments").select(columns).eq("shipment_id", shipment_id).limit(1)
+
         try:
-            rows = self._data(
-                self.backend.table("shipments")
-                .select(f"{SHIPMENT_COLUMNS},{ARCHIVE_COLUMN}")
-                .eq("shipment_id", shipment_id)
-                .limit(1)
-                .execute()
-            )
+            rows = self._data(build_query(include_archive_column=True).execute())
         except APIError as exc:
-            self._raise_persistence(exc)
+            message = str(getattr(exc, "message", "")) or str(exc)
+            if "archived_flag" in message and "does not exist" in message:
+                rows = self._data(build_query(include_archive_column=False).execute())
+            else:
+                self._raise_persistence(exc)
         return rows[0] if rows else None
 
     def list_shipments(
@@ -153,31 +155,43 @@ class TMSRepository:
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
-        query = self.backend.table("shipments").select(f"{SHIPMENT_COLUMNS},{ARCHIVE_COLUMN}")
-        if driver_id is not None:
-            query = query.eq("driver_id", driver_id)
-        if destination_facility_id is not None:
-            query = query.eq("destination_facility_id", destination_facility_id)
-        if status is not None:
-            query = query.eq("current_status", status.value)
-        if active_only:
-            query = query.in_("current_status", sorted(item.value for item in ACTIVE_CONTEXT_STATUSES))
-        if unassigned_only:
-            query = query.is_("driver_id", "null")
-        if not include_archived:
-            # archived_flag is an integer column (0/1), not native boolean -- passing
-            # Python False here gets str()'d by postgrest-py into the filter as
-            # "eq.False", which Postgres rejects ("invalid input syntax for type
-            # integer"). Use 0 explicitly.
-            query = query.eq(ARCHIVE_COLUMN, 0)
-        query = query.order("original_eta_ts", desc=False, nullsfirst=False).range(offset, offset + limit - 1)
+        def build_query(include_archived: bool, include_archive_column: bool) -> Any:
+            columns = f"{SHIPMENT_COLUMNS},{ARCHIVE_COLUMN}" if include_archive_column else SHIPMENT_COLUMNS
+            query = self.backend.table("shipments").select(columns)
+            if driver_id is not None:
+                query = query.eq("driver_id", driver_id)
+            if destination_facility_id is not None:
+                query = query.eq("destination_facility_id", destination_facility_id)
+            if status is not None:
+                query = query.eq("current_status", status.value)
+            if active_only:
+                query = query.in_("current_status", sorted(item.value for item in ACTIVE_CONTEXT_STATUSES))
+            if unassigned_only:
+                query = query.is_("driver_id", "null")
+            if not include_archived and include_archive_column:
+                # archived_flag is an integer column (0/1), not native boolean -- passing
+                # Python False here gets str()'d by postgrest-py into the filter as
+                # "eq.False", which Postgres rejects ("invalid input syntax for type
+                # integer"). Use 0 explicitly.
+                query = query.eq(ARCHIVE_COLUMN, 0)
+            return query.order("original_eta_ts", desc=False, nullsfirst=False).range(offset, offset + limit - 1)
+
         try:
-            return self._data(query.execute())
+            return self._data(build_query(include_archived=include_archived, include_archive_column=True).execute())
         except APIError as exc:
+            message = str(getattr(exc, "message", "")) or str(exc)
+            if not include_archived and "archived_flag" in message and "does not exist" in message:
+                return self._data(build_query(include_archived=True, include_archive_column=False).execute())
             self._raise_persistence(exc)
 
     def create_shipment(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._create("shipments", payload)
+
+    def list_shipment_identifiers(self) -> list[dict[str, Any]]:
+        try:
+            return self._data(self.backend.table("shipments").select("shipment_id,order_reference").execute())
+        except APIError as exc:
+            self._raise_persistence(exc)
 
     def update_shipment(self, shipment_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         return self._update("shipments", "shipment_id", shipment_id, payload)

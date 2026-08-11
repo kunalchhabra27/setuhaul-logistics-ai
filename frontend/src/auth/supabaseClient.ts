@@ -9,6 +9,7 @@ type SupabaseSession = {
   access_token: string;
   refresh_token: string;
   expires_in: number;
+  expires_at?: number;
   token_type: string;
   user: SupabaseUser;
 };
@@ -31,7 +32,8 @@ function storageKey(serviceId: string) {
 function loadSession(serviceId: string): SupabaseSession | null {
   try {
     const raw = localStorage.getItem(storageKey(serviceId));
-    return raw ? (JSON.parse(raw) as SupabaseSession) : null;
+    const parsed = raw ? (JSON.parse(raw) as SupabaseSession) : null;
+    return parsed ? normalizeSession(parsed) : null;
   } catch {
     return null;
   }
@@ -44,6 +46,34 @@ function saveSession(serviceId: string, session: SupabaseSession | null) {
   } catch {
     /* ignore */
   }
+}
+
+function decodeJwtExpiry(accessToken: string): number | null {
+  try {
+    const [, payload] = accessToken.split(".");
+    if (!payload) return null;
+    const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+    const decoded = JSON.parse(atob(padded)) as { exp?: unknown };
+    return typeof decoded.exp === "number" ? decoded.exp : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeSession(session: SupabaseSession): SupabaseSession {
+  const expiresAt =
+    typeof session.expires_at === "number"
+      ? session.expires_at
+      : decodeJwtExpiry(session.access_token) ?? Math.floor(Date.now() / 1000) + session.expires_in;
+  return { ...session, expires_at: expiresAt };
+}
+
+function isSessionStale(session: SupabaseSession | null, leewaySeconds = 30) {
+  if (!session?.access_token) return false;
+  const expiresAt = session.expires_at ?? decodeJwtExpiry(session.access_token);
+  if (!expiresAt) return false;
+  return expiresAt <= Math.floor(Date.now() / 1000) + leewaySeconds;
 }
 
 async function request<T>(path: string, init: RequestInit = {}) {
@@ -70,6 +100,7 @@ async function request<T>(path: string, init: RequestInit = {}) {
 // (e.g. TMS signing in) never notifies a subscriber listening for a different
 // portal (e.g. Drivers), and therefore never overwrites that portal's state.
 const listenersByService = new Map<string, Set<AuthListener>>();
+const refreshPromises = new Map<string, Promise<SupabaseSession | null>>();
 
 function listenersFor(serviceId: string) {
   let set = listenersByService.get(serviceId);
@@ -85,6 +116,39 @@ function emit(serviceId: string, event: "SIGNED_IN" | "SIGNED_OUT" | "TOKEN_REFR
   listenersFor(serviceId).forEach((listener) => listener(event, session));
 }
 
+async function refreshSession(serviceId: string): Promise<SupabaseSession | null> {
+  const existing = refreshPromises.get(serviceId);
+  if (existing) return existing;
+
+  const refresh = (async () => {
+    const session = loadSession(serviceId);
+    if (!session?.refresh_token) return session;
+    try {
+      const data = await request<{
+        access_token: string;
+        refresh_token: string;
+        expires_in: number;
+        token_type: string;
+        user: SupabaseUser;
+      }>("/auth/v1/token?grant_type=refresh_token", {
+        method: "POST",
+        body: JSON.stringify({ refresh_token: session.refresh_token }),
+      });
+      const refreshed = normalizeSession({ ...data });
+      emit(serviceId, "TOKEN_REFRESHED", refreshed);
+      return refreshed;
+    } catch {
+      emit(serviceId, "SIGNED_OUT", null);
+      return null;
+    } finally {
+      refreshPromises.delete(serviceId);
+    }
+  })();
+
+  refreshPromises.set(serviceId, refresh);
+  return refresh;
+}
+
 export const supabase = {
   isConfigured,
   auth: {
@@ -96,7 +160,7 @@ export const supabase = {
         method: "POST",
         body: JSON.stringify({ email, password, data: options?.data ?? {} }),
       });
-      if (data.session) emit(serviceId, "SIGNED_IN", data.session);
+      if (data.session) emit(serviceId, "SIGNED_IN", normalizeSession(data.session));
       return { data, error: null };
     },
     async signInWithPassword(serviceId: string, { email, password }: { email: string; password: string }) {
@@ -104,7 +168,7 @@ export const supabase = {
         method: "POST",
         body: JSON.stringify({ email, password }),
       });
-      const session: SupabaseSession = { ...data };
+      const session: SupabaseSession = normalizeSession({ ...data });
       emit(serviceId, "SIGNED_IN", session);
       return { data: { session, user: data.user }, error: null };
     },
@@ -122,8 +186,14 @@ export const supabase = {
       emit(serviceId, "SIGNED_OUT", null);
       return { error: null };
     },
-    async getSession(serviceId: string) {
-      return { data: { session: loadSession(serviceId) }, error: null };
+    async getSession(serviceId: string, options?: { forceRefresh?: boolean }) {
+      const current = loadSession(serviceId);
+      if (!current) return { data: { session: null }, error: null };
+      if ((options?.forceRefresh || isSessionStale(current)) && current.refresh_token) {
+        const refreshed = await refreshSession(serviceId);
+        return { data: { session: refreshed }, error: null };
+      }
+      return { data: { session: current }, error: null };
     },
     onAuthStateChange(serviceId: string, listener: AuthListener) {
       const set = listenersFor(serviceId);

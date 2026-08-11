@@ -106,12 +106,12 @@ def run_chat_turn(service: "DriverChatService", principal: "DriverPrincipal", te
     if snapshot.shipment is None:
         return _no_shipment_reply(driver, snapshot, text)
 
-    thread_row = service.repository.get_open_thread_for_driver(principal.user_id)
+    thread_row = service.repository.get_open_thread_for_driver(driver.driver_id)
     if thread_row is None:
         thread_row = service.repository.create_thread(
             {
                 "thread_id": _new_id("TH"),
-                "driver_id": principal.user_id,
+                "driver_id": driver.driver_id,
                 "shipment_id": snapshot.shipment.shipment_id,
                 "opened_at": _now_iso(),
                 "thread_status": "OPEN",
@@ -130,7 +130,7 @@ def run_chat_turn(service: "DriverChatService", principal: "DriverPrincipal", te
             "chat_message_id": _new_id("MSG"),
             "thread_id": thread_id,
             "sender_type": "DRIVER",
-            "sender_reference": principal.user_id,
+            "sender_reference": driver.driver_id,
             "message_text": text,
             "message_ts": _now_iso(),
         }
@@ -197,7 +197,7 @@ def run_chat_turn(service: "DriverChatService", principal: "DriverPrincipal", te
     )
 
     fresh_snapshot = service._build_snapshot(principal, driver)
-    exception_row = service.repository.get_active_exception_for_driver(principal.user_id)
+    exception_row = service.repository.get_active_exception_for_driver(driver.driver_id)
     from setuhaul.backend.driver_chat_eta.models import DriverExceptionSummary
 
     return ChatResponse(

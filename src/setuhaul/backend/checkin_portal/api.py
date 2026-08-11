@@ -6,6 +6,8 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from setuhaul.backend.checkin_portal.exceptions import InvalidCheckInTransition
 from setuhaul.backend.checkin_portal.models import (
+    CheckInFacilityOption,
+    CheckInShipmentSummary,
     CompleteRequest,
     DockInRequest,
     GateCheckInRequest,
@@ -15,7 +17,7 @@ from setuhaul.backend.checkin_portal.repository import CheckInRepository
 from setuhaul.backend.checkin_portal.service import CheckInService
 from setuhaul.infrastructure.auth import Principal, require_admin, require_reader
 from setuhaul.infrastructure.settings import get_settings
-from setuhaul.infrastructure.supabase_client import create_caller_client
+from setuhaul.infrastructure.supabase_client import create_caller_client, create_public_client
 
 router = APIRouter(prefix="/checkins", tags=["checkin-portal"])
 
@@ -26,9 +28,29 @@ def get_service(principal: Principal = Depends(require_reader)) -> CheckInServic
     return CheckInService(CheckInRepository(client))
 
 
+def get_public_service() -> CheckInService:
+    client = create_public_client(get_settings())
+    return CheckInService(CheckInRepository(client))
+
+
 def _handle_transition_error(exc: InvalidCheckInTransition) -> HTTPException:
     """Map domain validation errors to an HTTP response."""
     return HTTPException(status_code=400, detail=str(exc))
+
+
+@router.get("/facilities/options", response_model=list[CheckInFacilityOption])
+def list_facility_options() -> list[CheckInFacilityOption]:
+    """Return active facilities for Check-in registration."""
+    return get_public_service().list_active_facilities()
+
+
+@router.get("/shipments", response_model=list[CheckInShipmentSummary])
+def list_shipments(
+    principal: Principal = Depends(require_reader),
+    service: CheckInService = Depends(get_service),
+) -> list[CheckInShipmentSummary]:
+    """Return the backend-owned Check-in shipment picker/read model."""
+    return service.list_operational_shipments(principal.facility_id)
 
 
 @router.get("/{shipment_id}")

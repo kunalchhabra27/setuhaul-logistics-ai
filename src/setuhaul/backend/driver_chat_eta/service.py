@@ -89,6 +89,13 @@ def _now_iso() -> str:
     return datetime.utcnow().replace(microsecond=0).isoformat()
 
 
+def _normalize_phone(phone: str) -> str:
+    """Last 10 digits of a phone number, ignoring country-code/formatting
+    differences (``+91-9000010001`` vs ``9000010001`` are the same person)."""
+    digits = re.sub(r"\D", "", phone or "")
+    return digits[-10:] if len(digits) >= 10 else digits
+
+
 def _parse_dt(value: str | datetime | None) -> datetime | None:
     if value is None:
         return None
@@ -114,8 +121,17 @@ class DriverChatService:
             raise BusinessValidationError(f"Carrier {request.carrier_id} is not available.")
         if request.home_base_city not in self.repository.list_home_base_cities():
             raise BusinessValidationError(f"Home base city {request.home_base_city} is not available.")
-        driver_id = self._next_driver_id()
+
+        # Reuse an existing, not-yet-claimed driver row for this same person
+        # (e.g. dispatch already created them via TMS and assigned a
+        # shipment) instead of minting a duplicate -- see
+        # _find_claimable_driver_by_phone.
+        driver_id = principal.driver_id or self._find_claimable_driver_by_phone(principal, request.phone)
+        if driver_id is None:
+            driver_id = self._next_driver_id()
+
         payload = {
+            "auth_user_id": principal.user_id,
             "carrier_id": request.carrier_id,
             "driver_name": request.driver_name,
             "phone": request.phone,
@@ -126,8 +142,36 @@ class DriverChatService:
         row = self.repository.upsert_driver(driver_id, payload)
         return DriverProfile.model_validate(row)
 
+    def _find_claimable_driver_by_phone(self, principal: DriverPrincipal, phone: str) -> str | None:
+        """Find an existing driver row matching ``phone`` that no other auth
+        account has already claimed, so onboarding links to it instead of
+        creating a duplicate. ``auth_user_id`` may not exist yet (pending
+        migration) -- the repository degrades to matching on phone alone.
+        """
+        target = _normalize_phone(phone)
+        if not target:
+            return None
+        for row in self.repository.list_drivers_for_phone_lookup():
+            if _normalize_phone(str(row.get("phone") or "")) != target:
+                continue
+            claimed_by = row.get("auth_user_id")
+            if claimed_by and claimed_by != principal.user_id:
+                continue
+            driver_id = row.get("driver_id")
+            if driver_id:
+                return str(driver_id)
+        return None
+
     def get_my_profile(self, principal: DriverPrincipal) -> DriverProfile:
-        row = self.repository.get_driver_by_auth_user_id(principal.user_id)
+        row = None
+        if principal.driver_id:
+            row = self.repository.get_driver(principal.driver_id)
+        if row is None:
+            # Forward-compatible fallback for the drivers.auth_user_id
+            # migration, once applied -- see driver_chat_eta/auth.py for why
+            # principal.driver_id (from Supabase user_metadata) is the
+            # primary resolution path.
+            row = self.repository.get_driver_by_auth_user_id(principal.user_id)
         if row is None:
             raise DriverProfileNotFoundError(
                 "No driver profile exists yet for this account. Complete your profile to continue."
@@ -155,7 +199,7 @@ class DriverChatService:
         return self._build_snapshot(principal, driver)
 
     def _build_snapshot(self, principal: DriverPrincipal, driver: DriverProfile) -> DriverSnapshot:
-        shipment_row = self.repository.get_active_shipment_for_driver(principal.user_id)
+        shipment_row = self.repository.get_active_shipment_for_driver(driver.driver_id)
         shipment = ShipmentSummary.model_validate(shipment_row) if shipment_row else None
 
         vehicle_row = None
@@ -178,7 +222,7 @@ class DriverChatService:
             checkin_row = self.repository.get_checkin_for_shipment(shipment_row["shipment_id"])
             checkin = FacilityCheckinSummary.model_validate(checkin_row) if checkin_row else None
 
-        exception_row = self.repository.get_active_exception_for_driver(principal.user_id)
+        exception_row = self.repository.get_active_exception_for_driver(driver.driver_id)
         exception = DriverExceptionSummary.model_validate(exception_row) if exception_row else None
 
         chat_messages: list[ChatMessageSummary] = []
@@ -265,7 +309,7 @@ class DriverChatService:
 
     def _handle_chat_message_regex(self, principal: DriverPrincipal, text: str) -> ChatResponse:
         driver = self.get_my_profile(principal)
-        shipment_row = self.repository.get_active_shipment_for_driver(principal.user_id)
+        shipment_row = self.repository.get_active_shipment_for_driver(driver.driver_id)
         if shipment_row is None:
             # Chat is always available in the UI, with or without a shipment,
             # so this must be a normal reply rather than a raised error --
@@ -281,7 +325,7 @@ class DriverChatService:
                 chat_message_id=_new_id("MSG"),
                 thread_id=None,
                 sender_type="DRIVER",
-                sender_reference=principal.user_id,
+                sender_reference=driver.driver_id,
                 message_text=text,
                 message_ts=_now_iso(),
             )
@@ -312,7 +356,7 @@ class DriverChatService:
                 "eta_update_id": _new_id("ETA"),
                 "shipment_id": shipment_row["shipment_id"],
                 "source_type": "DRIVER_DECLARED",
-                "reported_by_driver_id": principal.user_id,
+                "reported_by_driver_id": driver.driver_id,
                 "declared_eta_ts": declared_eta.isoformat(),
                 "confidence_code": "MEDIUM",
                 "note": text,
@@ -321,12 +365,12 @@ class DriverChatService:
         )
         self.repository.update_shipment(shipment_row["shipment_id"], {"latest_eta_ts": declared_eta.isoformat()})
 
-        thread_row = self.repository.get_open_thread_for_driver(principal.user_id)
+        thread_row = self.repository.get_open_thread_for_driver(driver.driver_id)
         if thread_row is None:
             thread_row = self.repository.create_thread(
                 {
                     "thread_id": _new_id("TH"),
-                    "driver_id": principal.user_id,
+                    "driver_id": driver.driver_id,
                     "shipment_id": shipment_row["shipment_id"],
                     "opened_at": _now_iso(),
                     "thread_status": "OPEN",
@@ -334,14 +378,14 @@ class DriverChatService:
                 }
             )
 
-        exception_row = self.repository.get_active_exception_for_driver(principal.user_id)
+        exception_row = self.repository.get_active_exception_for_driver(driver.driver_id)
         severity = "HIGH" if delay_minutes >= 60 else "MEDIUM" if delay_minutes else "LOW"
         if exception_row is None:
             exception_row = self.repository.create_exception(
                 {
                     "exception_id": _new_id("EXC"),
                     "shipment_id": shipment_row["shipment_id"],
-                    "driver_id": principal.user_id,
+                    "driver_id": driver.driver_id,
                     "thread_id": thread_row["thread_id"],
                     "exception_type": "DELAY",
                     "reported_at": _now_iso(),
@@ -367,7 +411,7 @@ class DriverChatService:
                 "chat_message_id": _new_id("MSG"),
                 "thread_id": thread_row["thread_id"],
                 "sender_type": "DRIVER",
-                "sender_reference": principal.user_id,
+                "sender_reference": driver.driver_id,
                 "message_text": text,
                 "message_ts": _now_iso(),
             }
@@ -552,7 +596,8 @@ class DriverChatService:
 
     def get_current_feasible_slots(self, principal: DriverPrincipal) -> list[SlotOption]:
         """Return the currently compatible open dock slots for the driver's active shipment."""
-        shipment_row = self.repository.get_active_shipment_for_driver(principal.user_id)
+        driver = self.get_my_profile(principal)
+        shipment_row = self.repository.get_active_shipment_for_driver(driver.driver_id)
         if shipment_row is None:
             raise ShipmentNotFoundError("No active shipment is assigned to you.")
         if not shipment_row.get("destination_facility_id"):
@@ -561,7 +606,7 @@ class DriverChatService:
         vehicle_row = (
             self.repository.get_vehicle(shipment_row["vehicle_id"]) if shipment_row.get("vehicle_id") else None
         )
-        exception_row = self.repository.get_active_exception_for_driver(principal.user_id)
+        exception_row = self.repository.get_active_exception_for_driver(driver.driver_id)
         after = (exception_row or {}).get("declared_eta_ts") or shipment_row.get("latest_eta_ts")
         max_leave_at = (exception_row or {}).get("latest_acceptable_ts")
 
@@ -593,8 +638,8 @@ class DriverChatService:
         exception SLOT_OPTIONS_SHARED or ESCALATED depending on whether any
         compatible slot was found.
         """
-        self.get_my_profile(principal)  # raises DriverProfileNotFoundError if missing
-        shipment_row = self.repository.get_active_shipment_for_driver(principal.user_id)
+        driver = self.get_my_profile(principal)  # raises DriverProfileNotFoundError if missing
+        shipment_row = self.repository.get_active_shipment_for_driver(driver.driver_id)
         if shipment_row is None:
             raise ShipmentNotFoundError(
                 "No active shipment is assigned to you yet. Dispatch will assign a load before you can "
@@ -613,7 +658,7 @@ class DriverChatService:
                 "eta_update_id": _new_id("ETA"),
                 "shipment_id": shipment_row["shipment_id"],
                 "source_type": "DRIVER_DECLARED",
-                "reported_by_driver_id": principal.user_id,
+                "reported_by_driver_id": driver.driver_id,
                 "declared_eta_ts": declared_eta.isoformat(),
                 "confidence_code": "MEDIUM",
                 "note": note or "Reported via chat",
@@ -622,12 +667,12 @@ class DriverChatService:
         )
         self.repository.update_shipment(shipment_row["shipment_id"], {"latest_eta_ts": declared_eta.isoformat()})
 
-        thread_row = self.repository.get_open_thread_for_driver(principal.user_id)
+        thread_row = self.repository.get_open_thread_for_driver(driver.driver_id)
         if thread_row is None:
             thread_row = self.repository.create_thread(
                 {
                     "thread_id": _new_id("TH"),
-                    "driver_id": principal.user_id,
+                    "driver_id": driver.driver_id,
                     "shipment_id": shipment_row["shipment_id"],
                     "opened_at": _now_iso(),
                     "thread_status": "OPEN",
@@ -635,14 +680,14 @@ class DriverChatService:
                 }
             )
 
-        exception_row = self.repository.get_active_exception_for_driver(principal.user_id)
+        exception_row = self.repository.get_active_exception_for_driver(driver.driver_id)
         severity = "HIGH" if delay_minutes >= 60 else "MEDIUM" if delay_minutes else "LOW"
         if exception_row is None:
             exception_row = self.repository.create_exception(
                 {
                     "exception_id": _new_id("EXC"),
                     "shipment_id": shipment_row["shipment_id"],
-                    "driver_id": principal.user_id,
+                    "driver_id": driver.driver_id,
                     "thread_id": thread_row["thread_id"],
                     "exception_type": "DELAY",
                     "reported_at": _now_iso(),
@@ -745,7 +790,7 @@ class DriverChatService:
 
     def hold_slot(self, principal: DriverPrincipal, slot_id: str) -> SlotActionResponse:
         driver = self.get_my_profile(principal)
-        shipment_row = self.repository.get_active_shipment_for_driver(principal.user_id)
+        shipment_row = self.repository.get_active_shipment_for_driver(driver.driver_id)
         if shipment_row is None:
             raise ShipmentNotFoundError("No active shipment is assigned to you.")
 
@@ -780,7 +825,7 @@ class DriverChatService:
                 }
             )
 
-        exception_row = self.repository.get_active_exception_for_driver(principal.user_id)
+        exception_row = self.repository.get_active_exception_for_driver(driver.driver_id)
         if exception_row:
             self.repository.update_exception(exception_row["exception_id"], {"exception_status": "WAITING_CONFIRMATION"})
 
@@ -793,7 +838,7 @@ class DriverChatService:
 
     def confirm_slot(self, principal: DriverPrincipal, slot_id: str) -> ConfirmSlotResponse:
         driver = self.get_my_profile(principal)
-        shipment_row = self.repository.get_active_shipment_for_driver(principal.user_id)
+        shipment_row = self.repository.get_active_shipment_for_driver(driver.driver_id)
         if shipment_row is None:
             raise ShipmentNotFoundError("No active shipment is assigned to you.")
 
@@ -831,7 +876,7 @@ class DriverChatService:
             }
         )
 
-        exception_row = self.repository.get_active_exception_for_driver(principal.user_id)
+        exception_row = self.repository.get_active_exception_for_driver(driver.driver_id)
         if exception_row:
             self.repository.update_exception(exception_row["exception_id"], {"exception_status": "RESOLVED"})
             if exception_row.get("thread_id"):
@@ -859,7 +904,7 @@ class DriverChatService:
 
     def update_checkin(self, principal: DriverPrincipal, request: CheckinUpdateRequest) -> CheckinResponse:
         driver = self.get_my_profile(principal)
-        shipment_row = self.repository.get_active_shipment_for_driver(principal.user_id)
+        shipment_row = self.repository.get_active_shipment_for_driver(driver.driver_id)
         if shipment_row is None:
             raise ShipmentNotFoundError("No active shipment is assigned to you.")
 
@@ -913,7 +958,7 @@ class DriverChatService:
 
     def escalate(self, principal: DriverPrincipal, reason: str) -> EscalateResponse:
         driver = self.get_my_profile(principal)
-        exception_row = self.repository.get_active_exception_for_driver(principal.user_id)
+        exception_row = self.repository.get_active_exception_for_driver(driver.driver_id)
         if exception_row:
             exception_row = self.repository.update_exception(
                 exception_row["exception_id"], {"exception_status": "ESCALATED"}
