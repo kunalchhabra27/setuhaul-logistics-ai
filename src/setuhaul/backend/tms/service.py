@@ -152,12 +152,44 @@ class TMSService:
             raise ShipmentNotFoundError(f"Shipment {shipment_id} was not found.")
         return ShipmentResponse.model_validate(row)
 
+    def _next_business_identifier(self, values: list[str], default_prefix: str, default_start: int = 1) -> str:
+        max_number = 0
+        prefix = default_prefix
+        for value in values:
+            if not isinstance(value, str) or not value:
+                continue
+            head = ""
+            tail = ""
+            for idx, ch in enumerate(value):
+                if ch.isdigit():
+                    head = value[:idx]
+                    tail = value[idx:]
+                    break
+            if not tail or not tail.isdigit():
+                continue
+            if head and value.startswith(head):
+                prefix = head
+            number = int(tail)
+            if number > max_number:
+                max_number = number
+        return f"{prefix}{max_number + 1}"
+
+    def get_next_shipment_ids(self) -> dict[str, str]:
+        rows = self.repository.list_shipment_identifiers()
+        shipment_ids = [row.get("shipment_id") for row in rows if row.get("shipment_id")]
+        order_refs = [row.get("order_reference") for row in rows if row.get("order_reference")]
+        next_shipment_id = self._next_business_identifier(shipment_ids, "SHP")
+        next_order_reference = self._next_business_identifier(order_refs, "ORD")
+        return {"shipment_id": next_shipment_id, "order_reference": next_order_reference}
+
     def create_shipment(self, request: ShipmentCreate) -> ShipmentResponse:
         if request.driver_id and request.vehicle_id:
             self._validate_active_assignment(request.driver_id, request.vehicle_id, request.current_status)
         payload = request.model_dump(mode="json")
-        payload["shipment_id"] = payload.get("shipment_id") or f"SHP-{uuid.uuid4().hex[:8].upper()}"
         now = datetime.now(timezone.utc).isoformat()
+        next_ids = self.get_next_shipment_ids()
+        payload["shipment_id"] = payload.get("shipment_id") or next_ids["shipment_id"]
+        payload["order_reference"] = payload.get("order_reference") or next_ids["order_reference"]
         payload["created_at"] = now
         payload["updated_at"] = now
         row = self.repository.create_shipment(payload)

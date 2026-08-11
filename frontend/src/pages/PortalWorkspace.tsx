@@ -9,6 +9,7 @@ import {
   completeUnload,
   fetchCheckInStatus,
   gateCheckIn,
+  listCheckinFacilityOptions,
   listShipmentsForCheckin,
   markDocked,
   updateQueue,
@@ -17,6 +18,7 @@ import {
   archiveShipment,
   assignShipmentDriver,
   createShipment,
+  getNextShipmentIds,
   listDrivers,
   listFacilities,
   listShipments,
@@ -25,6 +27,7 @@ import {
 import { confirmBooking, getDockBoard, holdSlot, listShipmentsForScheduling } from "../services/dockSchedulerApi";
 import type {
   CheckInRecord,
+  CheckInShipmentSummary,
   DockSlot,
   ShipmentCreateInput,
   ShipmentSummary,
@@ -50,25 +53,20 @@ export default function PortalWorkspace() {
   const [message, setMessage] = useState<string>("");
   const [error, setError] = useState<string>("");
   const [wmsShipments, setWmsShipments] = useState<ShipmentSummary[]>([]);
-  const [checkinShipments, setCheckinShipments] = useState<ShipmentSummary[]>([]);
+  const [checkinShipments, setCheckinShipments] = useState<CheckInShipmentSummary[]>([]);
+  const [checkinFacilities, setCheckinFacilities] = useState<TmsFacility[]>([]);
   const [activeShipmentId, setActiveShipmentId] = useState<string>("");
 
   if (!service) return <Navigate to="/" replace />;
   if (!isAuthed(service.id)) return <Navigate to={`/auth/${service.id}`} replace />;
 
   const name = sessions[service.id]?.name ?? "there";
+  const assignedCheckinFacilityId = sessions.checkin?.facilityId;
 
   useEffect(() => {
     if (service.id !== "checkin") return;
     void (async () => {
-      try {
-        const items = await listShipmentsForCheckin();
-        const relevant = items.filter((s) => s.current_status !== "CANCELLED" && s.current_status !== "COMPLETED");
-        setCheckinShipments(relevant);
-        if (relevant.length > 0) setActiveShipmentId(relevant[0].shipment_id);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Unable to load shipments.");
-      }
+      await Promise.all([refreshCheckinShipments(), refreshCheckinFacilities()]);
     })();
   }, [service.id]);
 
@@ -76,6 +74,33 @@ export default function PortalWorkspace() {
     if (service.id !== "checkin" || !activeShipmentId) return;
     void refreshCheckin();
   }, [service.id, activeShipmentId]);
+
+  async function refreshCheckinShipments(preferredShipmentId?: string) {
+    try {
+      const items = await listShipmentsForCheckin();
+      setCheckinShipments(items);
+      const preferred = preferredShipmentId ?? activeShipmentId;
+      if (preferred && items.some((item) => item.shipment_id === preferred)) {
+        setActiveShipmentId(preferred);
+      } else if (items.length > 0) {
+        setActiveShipmentId(items[0].shipment_id);
+      } else {
+        setActiveShipmentId("");
+        setCheckin(null);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to load shipments.");
+    }
+  }
+
+  async function refreshCheckinFacilities() {
+    try {
+      const items = await listCheckinFacilityOptions();
+      setCheckinFacilities(items);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to load facilities.");
+    }
+  }
 
   useEffect(() => {
     if (service.id !== "tms") return;
@@ -213,6 +238,7 @@ export default function PortalWorkspace() {
       const record = await action();
       setCheckin(record);
       setMessage(successText);
+      await refreshCheckinShipments(record.shipment_id);
       await refreshCheckin();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Check-in action failed.");
@@ -230,6 +256,15 @@ export default function PortalWorkspace() {
       { label: "Complete", value: checkin.completed_at ?? "Pending", status: checkin.arrival_status },
     ];
   }, [checkin]);
+
+  const selectedCheckinShipment = useMemo(
+    () => checkinShipments.find((shipment) => shipment.shipment_id === activeShipmentId) ?? null,
+    [checkinShipments, activeShipmentId]
+  );
+  const assignedCheckinFacility = useMemo(
+    () => checkinFacilities.find((facility) => facility.facility_id === assignedCheckinFacilityId) ?? null,
+    [checkinFacilities, assignedCheckinFacilityId]
+  );
 
   // Real TMS stats derived from the shipments already fetched via GET /tms/shipments.
   // Note: the backend model has no actual-arrival timestamp and TMS doesn't expose an
@@ -370,6 +405,9 @@ export default function PortalWorkspace() {
             timeline={checkinTimeline}
             busy={busy}
             shipments={checkinShipments}
+            selectedShipment={selectedCheckinShipment}
+            assignedFacility={assignedCheckinFacility}
+            hasAssignedFacility={Boolean(assignedCheckinFacilityId)}
             selectedShipmentId={activeShipmentId}
             onSelectShipment={setActiveShipmentId}
             onGateIn={() =>
@@ -377,9 +415,7 @@ export default function PortalWorkspace() {
                 () =>
                   gateCheckIn({
                     shipment_id: activeShipmentId,
-                    facility_id:
-                      checkinShipments.find((s) => s.shipment_id === activeShipmentId)?.destination_facility_id ??
-                      "",
+                    facility_id: selectedCheckinShipment?.destination_facility_id ?? "",
                     gate_in_at: new Date().toISOString(),
                   }),
                 "Gate check-in saved"
@@ -572,21 +608,85 @@ function CreateShipmentModal({
   onClose: () => void;
   onCreate: (input: ShipmentCreateInput) => void;
 }) {
+  const [shipmentId, setShipmentId] = useState("");
   const [orderReference, setOrderReference] = useState("");
+  const [idsError, setIdsError] = useState("");
   const [destinationFacilityId, setDestinationFacilityId] = useState("");
   const [originName, setOriginName] = useState("");
   const [originCity, setOriginCity] = useState("");
+  const [customerName, setCustomerName] = useState("");
   const [productCategory, setProductCategory] = useState("");
-  const [priorityCode, setPriorityCode] = useState("NORMAL");
+  const [loadWeightKg, setLoadWeightKg] = useState("1000");
+  const [palletCount, setPalletCount] = useState("");
+  const [requiredDockType, setRequiredDockType] = useState("ANY");
+  const [temperatureControlRequired, setTemperatureControlRequired] = useState("0");
+  const [priorityCode, setPriorityCode] = useState<"LOW" | "NORMAL" | "HIGH" | "CRITICAL">("NORMAL");
+  const [currentStatus, setCurrentStatus] = useState<
+    | "PLANNED"
+    | "ASSIGNED"
+    | "IN_TRANSIT"
+    | "AT_GATE"
+    | "WAITING"
+    | "IN_DOCK"
+    | "COMPLETED"
+    | "CANCELLED"
+  >("PLANNED");
   const [driverId, setDriverId] = useState("");
   const [vehicleId, setVehicleId] = useState("");
+  const [plannedDepartureTs, setPlannedDepartureTs] = useState("");
   const [originalEtaTs, setOriginalEtaTs] = useState("");
+  const [actualDepartureTs, setActualDepartureTs] = useState("");
+  const [latestEtaTs, setLatestEtaTs] = useState("");
   const [expectedUnloadMin, setExpectedUnloadMin] = useState("45");
   const [formError, setFormError] = useState("");
+
+  const ORIGIN_NAMES = [
+    "Jaipur Depot",
+    "Manesar Plant",
+    "Bhiwadi Packaging Works",
+    "Kota Engineering Supplies",
+    "Delhi Cold Storage",
+  ];
+  const ORIGIN_CITIES = ["Jaipur", "Manesar", "Bhiwadi", "Kota", "Delhi"];
+  const CUSTOMER_NAMES = [
+    "RajRetail Distribution",
+    "IndustrialHub Jaipur",
+    "CareSupply Rajasthan",
+    "FreshBasket Jaipur",
+    "BuildPro Rajasthan",
+  ];
+  const PRODUCT_CATEGORIES = [
+    "General cargo",
+    "FMCG",
+    "Medical devices",
+    "Textiles",
+    "Dairy products",
+    "Consumer electronics",
+  ];
 
   // Only offer drivers/vehicles that are actually available to take a new load.
   const availableDrivers = drivers.filter((d) => d.driver_status === "ACTIVE");
   const availableVehicles = vehicles.filter((v) => v.active_flag);
+
+  useEffect(() => {
+    let mounted = true;
+    setIdsError("");
+
+    void getNextShipmentIds()
+      .then((ids) => {
+        if (!mounted) return;
+        setShipmentId(ids.shipment_id);
+        setOrderReference(ids.order_reference);
+      })
+      .catch(() => {
+        if (!mounted) return;
+        setIdsError("Shipment identifiers are unavailable right now. They will be assigned by the backend when the shipment is created.");
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   const selectedDriver = availableDrivers.find((d) => d.driver_id === driverId);
   // Prefer vehicles that share the driver's carrier, but never leave the
@@ -600,8 +700,28 @@ function CreateShipmentModal({
   const eligibleVehicles = carrierMatchedVehicles.length > 0 ? carrierMatchedVehicles : availableVehicles;
 
   function submit() {
-    if (!orderReference || !destinationFacilityId || !originName || !driverId || !vehicleId) {
-      setFormError("Order reference, destination, origin, driver, and vehicle are required.");
+    if (!destinationFacilityId || !originName || !originCity || !customerName || !driverId || !vehicleId) {
+      setFormError("Destination, origin, customer, driver, and vehicle are required.");
+      return;
+    }
+    if (!productCategory) {
+      setFormError("Product category is required.");
+      return;
+    }
+    if (!loadWeightKg || Number(loadWeightKg) <= 0) {
+      setFormError("Load weight must be a positive number.");
+      return;
+    }
+    if (!plannedDepartureTs) {
+      setFormError("Planned departure is required.");
+      return;
+    }
+    if (!originalEtaTs) {
+      setFormError("Original ETA is required.");
+      return;
+    }
+    if (!expectedUnloadMin || Number(expectedUnloadMin) <= 0) {
+      setFormError("Expected unload must be a positive number.");
       return;
     }
     const driver = availableDrivers.find((d) => d.driver_id === driverId);
@@ -611,17 +731,27 @@ function CreateShipmentModal({
     }
     setFormError("");
     onCreate({
-      order_reference: orderReference,
+      ...(shipmentId ? { shipment_id: shipmentId } : {}),
+      ...(orderReference ? { order_reference: orderReference } : {}),
       carrier_id: driver.carrier_id,
       driver_id: driverId,
       vehicle_id: vehicleId,
       origin_name: originName,
-      origin_city: originCity || undefined,
+      origin_city: originCity,
       destination_facility_id: destinationFacilityId,
-      product_category: productCategory || undefined,
-      priority_code: priorityCode || undefined,
-      original_eta_ts: originalEtaTs ? new Date(originalEtaTs).toISOString() : undefined,
-      expected_unload_min: expectedUnloadMin ? Number(expectedUnloadMin) : undefined,
+      customer_name: customerName,
+      product_category: productCategory,
+      load_weight_kg: Number(loadWeightKg),
+      ...(palletCount ? { pallet_count: Number(palletCount) } : {}),
+      required_dock_type: requiredDockType,
+      temperature_control_required: Boolean(Number(temperatureControlRequired)),
+      priority_code: priorityCode,
+      planned_departure_ts: new Date(plannedDepartureTs).toISOString(),
+      actual_departure_ts: actualDepartureTs ? new Date(actualDepartureTs).toISOString() : undefined,
+      original_eta_ts: new Date(originalEtaTs).toISOString(),
+      latest_eta_ts: latestEtaTs ? new Date(latestEtaTs).toISOString() : undefined,
+      expected_unload_min: Number(expectedUnloadMin),
+      current_status: currentStatus,
     });
   }
 
@@ -638,8 +768,21 @@ function CreateShipmentModal({
           <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{formError}</div>
         )}
         <div className="mt-4 grid gap-3 sm:grid-cols-2">
+          <Field label="Shipment ID">
+            <input
+              value={shipmentId}
+              readOnly
+              className="w-full rounded-xl border border-line bg-cloud/30 px-3 py-2 text-sm text-ink outline-none"
+              placeholder={shipmentId ? "" : idsError ? "Assigned on submit" : "Loading…"}
+            />
+          </Field>
           <Field label="Order reference">
-            <input value={orderReference} onChange={(e) => setOrderReference(e.target.value)} className="w-full rounded-xl border border-line px-3 py-2 text-sm text-ink outline-none focus:border-ink" placeholder="ORD-1042" />
+            <input
+              value={orderReference}
+              readOnly
+              className="w-full rounded-xl border border-line bg-cloud/30 px-3 py-2 text-sm text-ink outline-none"
+              placeholder={orderReference ? "" : idsError ? "Assigned on submit" : "Loading…"}
+            />
           </Field>
           <Field label="Destination facility">
             <select value={destinationFacilityId} onChange={(e) => setDestinationFacilityId(e.target.value)} className="w-full rounded-xl border border-line px-3 py-2 text-sm text-ink outline-none focus:border-ink">
@@ -653,19 +796,83 @@ function CreateShipmentModal({
             </select>
           </Field>
           <Field label="Origin name">
-            <input value={originName} onChange={(e) => setOriginName(e.target.value)} className="w-full rounded-xl border border-line px-3 py-2 text-sm text-ink outline-none focus:border-ink" placeholder="Jaipur Depot" />
+            <select value={originName} onChange={(e) => setOriginName(e.target.value)} className="w-full rounded-xl border border-line px-3 py-2 text-sm text-ink outline-none focus:border-ink">
+              <option value="">Select origin…</option>
+              {ORIGIN_NAMES.map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
           </Field>
           <Field label="Origin city">
-            <input value={originCity} onChange={(e) => setOriginCity(e.target.value)} className="w-full rounded-xl border border-line px-3 py-2 text-sm text-ink outline-none focus:border-ink" placeholder="Jaipur" />
+            <select value={originCity} onChange={(e) => setOriginCity(e.target.value)} className="w-full rounded-xl border border-line px-3 py-2 text-sm text-ink outline-none focus:border-ink">
+              <option value="">Select city…</option>
+              {ORIGIN_CITIES.map((city) => (
+                <option key={city} value={city}>
+                  {city}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Customer name">
+            <select value={customerName} onChange={(e) => setCustomerName(e.target.value)} className="w-full rounded-xl border border-line px-3 py-2 text-sm text-ink outline-none focus:border-ink">
+              <option value="">Select customer…</option>
+              {CUSTOMER_NAMES.map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
           </Field>
           <Field label="Product category">
-            <input value={productCategory} onChange={(e) => setProductCategory(e.target.value)} className="w-full rounded-xl border border-line px-3 py-2 text-sm text-ink outline-none focus:border-ink" placeholder="General cargo" />
+            <select value={productCategory} onChange={(e) => setProductCategory(e.target.value)} className="w-full rounded-xl border border-line px-3 py-2 text-sm text-ink outline-none focus:border-ink">
+              <option value="">Select category…</option>
+              {PRODUCT_CATEGORIES.map((category) => (
+                <option key={category} value={category}>
+                  {category}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Load weight (kg)">
+            <input type="number" min={1} value={loadWeightKg} onChange={(e) => setLoadWeightKg(e.target.value)} className="w-full rounded-xl border border-line px-3 py-2 text-sm text-ink outline-none focus:border-ink" placeholder="12000" />
+          </Field>
+          <Field label="Pallet count">
+            <input type="number" min={0} value={palletCount} onChange={(e) => setPalletCount(e.target.value)} className="w-full rounded-xl border border-line px-3 py-2 text-sm text-ink outline-none focus:border-ink" placeholder="0" />
+          </Field>
+          <Field label="Required dock type">
+            <select value={requiredDockType} onChange={(e) => setRequiredDockType(e.target.value)} className="w-full rounded-xl border border-line px-3 py-2 text-sm text-ink outline-none focus:border-ink">
+              <option value="ANY">Any</option>
+              <option value="STANDARD">Standard</option>
+              <option value="REEFER">Reefer</option>
+              <option value="HEAVY">Heavy</option>
+            </select>
+          </Field>
+          <Field label="Temperature control">
+            <select value={temperatureControlRequired} onChange={(e) => setTemperatureControlRequired(e.target.value)} className="w-full rounded-xl border border-line px-3 py-2 text-sm text-ink outline-none focus:border-ink">
+              <option value="0">No</option>
+              <option value="1">Yes</option>
+            </select>
           </Field>
           <Field label="Priority">
-            <select value={priorityCode} onChange={(e) => setPriorityCode(e.target.value)} className="w-full rounded-xl border border-line px-3 py-2 text-sm text-ink outline-none focus:border-ink">
+            <select value={priorityCode} onChange={(e) => setPriorityCode(e.target.value as "LOW" | "NORMAL" | "HIGH" | "CRITICAL")} className="w-full rounded-xl border border-line px-3 py-2 text-sm text-ink outline-none focus:border-ink">
+              <option value="LOW">Low</option>
               <option value="NORMAL">Normal</option>
               <option value="HIGH">High</option>
-              <option value="URGENT">Urgent</option>
+              <option value="CRITICAL">Critical</option>
+            </select>
+          </Field>
+          <Field label="Current status">
+            <select value={currentStatus} onChange={(e) => setCurrentStatus(e.target.value as "PLANNED" | "ASSIGNED" | "IN_TRANSIT" | "AT_GATE" | "WAITING" | "IN_DOCK" | "COMPLETED" | "CANCELLED")} className="w-full rounded-xl border border-line px-3 py-2 text-sm text-ink outline-none focus:border-ink">
+              <option value="PLANNED">Planned</option>
+              <option value="ASSIGNED">Assigned</option>
+              <option value="IN_TRANSIT">In transit</option>
+              <option value="AT_GATE">At gate</option>
+              <option value="WAITING">Waiting</option>
+              <option value="IN_DOCK">In dock</option>
+              <option value="COMPLETED">Completed</option>
+              <option value="CANCELLED">Cancelled</option>
             </select>
           </Field>
           <Field label="Driver">
@@ -683,13 +890,22 @@ function CreateShipmentModal({
               <option value="">Select vehicle…</option>
               {eligibleVehicles.map((v) => (
                 <option key={v.vehicle_id} value={v.vehicle_id}>
-                  {v.registration_number ?? v.vehicle_id}
+                  {v.vehicle_id} · {v.registration_number ?? "—"} · {v.vehicle_type_code ?? "—"}
                 </option>
               ))}
             </select>
           </Field>
-          <Field label="Planned ETA">
+          <Field label="Planned departure">
+            <input type="datetime-local" value={plannedDepartureTs} onChange={(e) => setPlannedDepartureTs(e.target.value)} className="w-full rounded-xl border border-line px-3 py-2 text-sm text-ink outline-none focus:border-ink" />
+          </Field>
+          <Field label="Original ETA">
             <input type="datetime-local" value={originalEtaTs} onChange={(e) => setOriginalEtaTs(e.target.value)} className="w-full rounded-xl border border-line px-3 py-2 text-sm text-ink outline-none focus:border-ink" />
+          </Field>
+          <Field label="Actual departure">
+            <input type="datetime-local" value={actualDepartureTs} onChange={(e) => setActualDepartureTs(e.target.value)} className="w-full rounded-xl border border-line px-3 py-2 text-sm text-ink outline-none focus:border-ink" />
+          </Field>
+          <Field label="Latest ETA">
+            <input type="datetime-local" value={latestEtaTs} onChange={(e) => setLatestEtaTs(e.target.value)} className="w-full rounded-xl border border-line px-3 py-2 text-sm text-ink outline-none focus:border-ink" />
           </Field>
           <Field label="Expected unload (min)">
             <input type="number" min={1} value={expectedUnloadMin} onChange={(e) => setExpectedUnloadMin(e.target.value)} className="w-full rounded-xl border border-line px-3 py-2 text-sm text-ink outline-none focus:border-ink" />
@@ -773,6 +989,15 @@ function dockSlotStyle(status: string) {
 
 function formatTime(ts: string) {
   return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function formatCheckinShipmentLabel(shipment: CheckInShipmentSummary) {
+  const route = `${shipment.origin_city ?? shipment.origin_name ?? "Origin"} -> ${shipment.destination_facility_id ?? "Facility"}`;
+  const assignment = `${shipment.driver_id ?? "No driver"} | ${shipment.registration_number ?? shipment.vehicle_id ?? "No vehicle"}`;
+  const status = shipment.checkin?.arrival_status
+    ? `${shipment.current_status ?? "UNKNOWN"} / ${shipment.checkin.arrival_status}`
+    : (shipment.current_status ?? "UNKNOWN");
+  return `${shipment.shipment_id} | ${shipment.order_reference ?? "—"} | ${route} | ${assignment} | Status: ${status}`;
 }
 
 function WmsPanel({
@@ -915,6 +1140,9 @@ function CheckinPanel({
   timeline,
   busy,
   shipments,
+  selectedShipment,
+  assignedFacility,
+  hasAssignedFacility,
   selectedShipmentId,
   onSelectShipment,
   onGateIn,
@@ -926,7 +1154,10 @@ function CheckinPanel({
   record: CheckInRecord | null;
   timeline: Array<{ label: string; value: string; status: string }>;
   busy: string | null;
-  shipments: ShipmentSummary[];
+  shipments: CheckInShipmentSummary[];
+  selectedShipment: CheckInShipmentSummary | null;
+  assignedFacility: TmsFacility | null;
+  hasAssignedFacility: boolean;
   selectedShipmentId: string;
   onSelectShipment: (shipmentId: string) => void;
   onGateIn: () => void;
@@ -934,11 +1165,26 @@ function CheckinPanel({
   onDock: () => void;
   onComplete: () => void;
 }) {
+  const canGateIn = Boolean(selectedShipmentId) && Boolean(selectedShipment?.can_gate_in);
+  const canQueue = Boolean(selectedShipmentId) && Boolean(selectedShipment?.can_queue);
+  const canDock = Boolean(selectedShipmentId) && Boolean(selectedShipment?.can_dock);
+  const canComplete = Boolean(selectedShipmentId) && Boolean(selectedShipment?.can_complete);
+
   return (
     <div>
       <h2 className="text-lg font-extrabold text-ink">Gate & yard activity</h2>
       <p className="text-sm text-ink-soft">Real-time arrivals and yard movement.</p>
-      <div className="mt-4 max-w-xs">
+      <div className="mt-3 rounded-xl bg-cloud/60 px-3 py-3 text-xs text-ink-soft">
+        Assigned warehouse:{" "}
+        <span className="font-semibold text-ink">
+          {assignedFacility
+            ? `${assignedFacility.facility_name ?? assignedFacility.facility_id}${assignedFacility.city ? ` · ${assignedFacility.city}` : ""}`
+            : hasAssignedFacility
+            ? selectedShipment?.destination_facility_id ?? "Assigned facility"
+            : "No warehouse assigned to this account"}
+        </span>
+      </div>
+      <div className="mt-4 max-w-2xl">
         <Field label="Shipment">
           <select
             value={selectedShipmentId}
@@ -948,7 +1194,7 @@ function CheckinPanel({
             {shipments.length === 0 && <option value="">No active shipments</option>}
             {shipments.map((s) => (
               <option key={s.shipment_id} value={s.shipment_id}>
-                {s.shipment_id} · {s.order_reference ?? "—"}
+                {formatCheckinShipmentLabel(s)}
               </option>
             ))}
           </select>
@@ -958,6 +1204,21 @@ function CheckinPanel({
         <div className="rounded-2xl border border-line p-4">
           <p className="text-sm font-bold text-ink">Shipment {record?.shipment_id ?? selectedShipmentId ?? "—"}</p>
           <p className="mt-1 text-xs text-ink-soft">Backend validated status only. React never reimplements the state machine.</p>
+          {selectedShipment && (
+            <div className="mt-3 rounded-xl bg-cloud/60 px-3 py-3 text-xs text-ink-soft">
+              <p>
+                {selectedShipment.origin_city ?? selectedShipment.origin_name ?? "Origin"} {"->"} {selectedShipment.destination_facility_id ?? "Facility"}
+              </p>
+              <p className="mt-1">
+                Driver: {selectedShipment.driver_id ?? "—"}
+                {selectedShipment.driver_name ? ` (${selectedShipment.driver_name})` : ""}
+              </p>
+              <p className="mt-1">
+                Vehicle: {selectedShipment.registration_number ?? selectedShipment.vehicle_id ?? "—"}
+              </p>
+              <p className="mt-1">Shipment status: {selectedShipment.current_status ?? "UNKNOWN"}</p>
+            </div>
+          )}
           <div className="mt-4 grid gap-2">
             {timeline.length === 0 && <p className="text-sm text-ink-soft">Not checked in yet.</p>}
             {timeline.map((item) => (
@@ -970,17 +1231,17 @@ function CheckinPanel({
         </div>
         <div className="rounded-2xl border border-line p-4">
           <div className="flex flex-col gap-2">
-            <button onClick={onGateIn} disabled={Boolean(busy) || !selectedShipmentId} className="rounded-xl px-4 py-2.5 text-sm font-bold text-white disabled:opacity-50" style={{ background: color }}>
+            <button onClick={onGateIn} disabled={Boolean(busy) || !canGateIn} className="rounded-xl px-4 py-2.5 text-sm font-bold text-white disabled:opacity-50" style={{ background: color }}>
               {busy ? <Loader2 className="mr-2 inline h-4 w-4 animate-spin" /> : null}
               Gate check-in
             </button>
-            <button onClick={onQueue} disabled={Boolean(busy) || !selectedShipmentId} className="rounded-xl border border-line px-4 py-2.5 text-sm font-bold text-ink disabled:opacity-50">
+            <button onClick={onQueue} disabled={Boolean(busy) || !canQueue} className="rounded-xl border border-line px-4 py-2.5 text-sm font-bold text-ink disabled:opacity-50">
               Queue update
             </button>
-            <button onClick={onDock} disabled={Boolean(busy) || !selectedShipmentId} className="rounded-xl border border-line px-4 py-2.5 text-sm font-bold text-ink disabled:opacity-50">
+            <button onClick={onDock} disabled={Boolean(busy) || !canDock} className="rounded-xl border border-line px-4 py-2.5 text-sm font-bold text-ink disabled:opacity-50">
               Mark docked
             </button>
-            <button onClick={onComplete} disabled={Boolean(busy) || !selectedShipmentId} className="rounded-xl border border-line px-4 py-2.5 text-sm font-bold text-ink disabled:opacity-50">
+            <button onClick={onComplete} disabled={Boolean(busy) || !canComplete} className="rounded-xl border border-line px-4 py-2.5 text-sm font-bold text-ink disabled:opacity-50">
               Complete unload
             </button>
           </div>
@@ -989,4 +1250,3 @@ function CheckinPanel({
     </div>
   );
 }
-

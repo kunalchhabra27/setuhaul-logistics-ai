@@ -18,6 +18,39 @@ export type CheckInRecord = {
   completed_at: string | null;
 };
 
+export type CheckInShipmentSummary = {
+  shipment_id: string;
+  order_reference?: string | null;
+  carrier_id?: string | null;
+  driver_id?: string | null;
+  driver_name?: string | null;
+  vehicle_id?: string | null;
+  registration_number?: string | null;
+  origin_name?: string | null;
+  origin_city?: string | null;
+  destination_facility_id?: string | null;
+  destination_facility_name?: string | null;
+  destination_facility_city?: string | null;
+  customer_name?: string | null;
+  product_category?: string | null;
+  load_weight_kg?: number | null;
+  required_dock_type?: string | null;
+  temperature_control_required?: boolean | null;
+  priority_code?: string | null;
+  planned_departure_ts?: string | null;
+  original_eta_ts?: string | null;
+  latest_eta_ts?: string | null;
+  expected_unload_min?: number | null;
+  current_status?: ShipmentStatus | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  checkin?: CheckInRecord | null;
+  can_gate_in: boolean;
+  can_queue: boolean;
+  can_dock: boolean;
+  can_complete: boolean;
+};
+
 export type ShipmentStatus =
   | "PLANNED"
   | "ASSIGNED"
@@ -53,24 +86,33 @@ export type ShipmentSummary = {
   updated_at?: string | null;
 };
 
-export type ShipmentCreateInput = {
+export type NextShipmentIds = {
+  shipment_id: string;
   order_reference: string;
+};
+
+export type ShipmentCreateInput = {
+  shipment_id?: string;
+  order_reference?: string;
   carrier_id: string;
   driver_id: string;
   vehicle_id: string;
   origin_name: string;
-  origin_city?: string;
+  origin_city: string;
   destination_facility_id: string;
-  customer_name?: string;
-  product_category?: string;
-  load_weight_kg?: number;
+  customer_name: string;
+  product_category: string;
+  load_weight_kg: number;
+  pallet_count?: number;
   required_dock_type?: string;
   temperature_control_required?: boolean;
   priority_code?: string;
-  planned_departure_ts?: string;
-  original_eta_ts?: string;
+  planned_departure_ts: string;
+  actual_departure_ts?: string;
+  original_eta_ts: string;
   latest_eta_ts?: string;
-  expected_unload_min?: number;
+  expected_unload_min: number;
+  current_status?: ShipmentStatus;
 };
 
 export type TmsDriver = {
@@ -98,6 +140,7 @@ export type TmsFacility = {
   facility_name?: string | null;
   city?: string | null;
   state?: string | null;
+  active_flag?: boolean | null;
 };
 
 export type DockSlot = {

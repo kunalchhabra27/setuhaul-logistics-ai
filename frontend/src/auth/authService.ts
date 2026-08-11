@@ -40,7 +40,14 @@ export function subscribeAuthState(serviceId: string, listener: AuthStateListene
   return () => listenersFor(serviceId).delete(listener);
 }
 
-export async function signUpWithEmail(serviceId: string, email: string, password: string, name: string, serviceRole: string) {
+export async function signUpWithEmail(
+  serviceId: string,
+  email: string,
+  password: string,
+  name: string,
+  serviceRole: string,
+  extraProfileData?: Record<string, unknown>
+) {
   const { data, error } = await supabase.auth.signUp(serviceId, {
     email,
     password,
@@ -48,6 +55,7 @@ export async function signUpWithEmail(serviceId: string, email: string, password
       data: {
         full_name: name,
         service_role: serviceRole,
+        ...(extraProfileData ?? {}),
       },
     },
   });
@@ -67,6 +75,13 @@ export async function signOut(serviceId: string) {
   const { error } = await supabase.auth.signOut(serviceId);
   if (error) throw error;
   emit(serviceId, null);
+}
+
+export async function getSession(serviceId: string, options?: { forceRefresh?: boolean }) {
+  const { data, error } = await supabase.auth.getSession(serviceId, options);
+  if (error) throw error;
+  emit(serviceId, data.session ?? null);
+  return data.session ?? null;
 }
 
 export function getCurrentSession(serviceId: string) {

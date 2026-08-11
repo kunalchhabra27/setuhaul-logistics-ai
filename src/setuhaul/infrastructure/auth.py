@@ -22,6 +22,7 @@ class Principal:
     user_id: str
     role: TMSRole
     access_token: str
+    facility_id: str | None = None
 
 
 def get_current_principal(
@@ -52,7 +53,15 @@ def get_current_principal(
         # development. Reinstate real role checks before production use.
         role = TMSRole.ADMIN_1
 
-    return Principal(user_id=str(user.id), role=role, access_token=credentials.credentials)
+    facility_id = (user.user_metadata or {}).get("facility_id")
+    if facility_id is None:
+        facility_id = (user.app_metadata or {}).get("facility_id")
+    return Principal(
+        user_id=str(user.id),
+        role=role,
+        access_token=credentials.credentials,
+        facility_id=str(facility_id) if facility_id else None,
+    )
 
 
 def require_reader(principal: Principal = Depends(get_current_principal)) -> Principal:

@@ -11,6 +11,7 @@ enum-ish column is UPPER_SNAKE_CASE ``text``, and boolean-ish columns are
 
 from __future__ import annotations
 
+import logging
 from typing import Any, TYPE_CHECKING
 
 from postgrest.exceptions import APIError
@@ -22,11 +23,27 @@ if TYPE_CHECKING:
 else:
     Client = Any
 
+logger = logging.getLogger(__name__)
+
 
 def to_int_flag(value: bool | None) -> int | None:
     if value is None:
         return None
     return 1 if value else 0
+
+
+def _is_missing_column_error(exc: APIError, column: str) -> bool:
+    """True if ``exc`` is PostgREST reporting that ``column`` doesn't exist yet.
+
+    PostgREST returns this (code ``PGRST204`` for writes/selects, or a bare
+    Postgres ``42703`` for filters) whenever the schema cache doesn't know
+    about a column -- which is exactly what happens if a migration has been
+    added to this repo but not yet applied to the live database. Detecting
+    it by message text (rather than trusting only ``code``) keeps this
+    working across both shapes of error the client library surfaces.
+    """
+    message = str(getattr(exc, "message", "")) or str(exc)
+    return column in message and ("schema cache" in message or "does not exist" in message)
 
 
 class DriverChatRepository:
@@ -59,6 +76,19 @@ class DriverChatRepository:
                 self.client.table("drivers").select("*").eq("auth_user_id", auth_user_id).limit(1).execute()
             )
         except APIError as exc:
+            if _is_missing_column_error(exc, "auth_user_id"):
+                # The 20260810123000_driver_auth_user_id.sql migration hasn't
+                # been applied to this database yet -- there is no way to
+                # resolve a driver by auth user id until it is. Log loudly
+                # (this means every driver will be asked to re-onboard) but
+                # degrade to "not found" instead of a 500, so the rest of the
+                # portal keeps working.
+                logger.error(
+                    "drivers.auth_user_id column is missing -- apply "
+                    "supabase/migrations/20260810123000_driver_auth_user_id.sql "
+                    "to this database. Falling back to 'no profile found'."
+                )
+                return None
             self._raise_persistence(exc)
         return rows[0] if rows else None
 
@@ -67,7 +97,25 @@ class DriverChatRepository:
         try:
             rows = self._rows(self.client.table("drivers").upsert(payload, on_conflict="driver_id").execute())
         except APIError as exc:
-            self._raise_persistence(exc)
+            if "auth_user_id" in payload and _is_missing_column_error(exc, "auth_user_id"):
+                # Same missing-migration situation as above: persist the
+                # profile without the link rather than failing registration
+                # outright. Once the migration is applied, new/updated
+                # profiles will start linking correctly with no code change.
+                logger.error(
+                    "drivers.auth_user_id column is missing -- apply "
+                    "supabase/migrations/20260810123000_driver_auth_user_id.sql "
+                    "to this database. Saving the profile without the auth link."
+                )
+                fallback_payload = {k: v for k, v in payload.items() if k != "auth_user_id"}
+                try:
+                    rows = self._rows(
+                        self.client.table("drivers").upsert(fallback_payload, on_conflict="driver_id").execute()
+                    )
+                except APIError as retry_exc:
+                    self._raise_persistence(retry_exc)
+            else:
+                self._raise_persistence(exc)
         if not rows:
             raise PersistenceError("The driver profile upsert returned no record.")
         return rows[0]
@@ -78,6 +126,23 @@ class DriverChatRepository:
         except APIError as exc:
             self._raise_persistence(exc)
         return [str(row["driver_id"]) for row in rows if row.get("driver_id")]
+
+    def list_drivers_for_phone_lookup(self) -> list[dict[str, Any]]:
+        """Minimal driver rows used to reconcile onboarding against a driver
+        that already exists (e.g. pre-created by dispatch via TMS) but isn't
+        linked to any Supabase Auth account yet. Selecting ``auth_user_id``
+        too lets the caller avoid reusing a profile someone else already
+        claimed; the column may not exist yet (pending migration), so that
+        failure is retried without it, same as elsewhere in this file.
+        """
+        try:
+            return self._rows(
+                self.client.table("drivers").select("driver_id,phone,auth_user_id").execute()
+            )
+        except APIError as exc:
+            if _is_missing_column_error(exc, "auth_user_id"):
+                return self._rows(self.client.table("drivers").select("driver_id,phone").execute())
+            self._raise_persistence(exc)
 
     def get_driver_by_exact_id(self, driver_id: str) -> dict[str, Any] | None:
         return self.get_driver(driver_id)

@@ -29,6 +29,12 @@ CHECKIN_COLUMNS = (
     "unload_start_ts,unload_end_ts,gate_out_ts,arrival_state,queue_state,"
     "queue_position,actual_dock_id,notes,updated_at"
 )
+SHIPMENT_COLUMNS = (
+    "shipment_id,order_reference,carrier_id,driver_id,vehicle_id,origin_name,origin_city,"
+    "destination_facility_id,customer_name,product_category,load_weight_kg,required_dock_type,"
+    "temperature_control_required,priority_code,planned_departure_ts,original_eta_ts,"
+    "latest_eta_ts,expected_unload_min,current_status,created_at,updated_at"
+)
 
 
 class PersistenceError(Exception):
@@ -89,6 +95,102 @@ class CheckInRepository:
             "phone": driver_rows[0]["phone"],
             "order_reference": shipment_rows[0].get("order_reference"),
         }
+
+    def get_shipment(self, shipment_id: str) -> dict[str, Any] | None:
+        try:
+            rows = self._data(
+                self.backend.table("shipments")
+                .select(SHIPMENT_COLUMNS)
+                .eq("shipment_id", shipment_id)
+                .limit(1)
+                .execute()
+            )
+        except APIError as exc:
+            self._raise_persistence(exc)
+        return rows[0] if rows else None
+
+    def list_shipments(self, facility_id: str | None = None) -> list[dict[str, Any]]:
+        try:
+            query = self.backend.table("shipments").select(SHIPMENT_COLUMNS)
+            if facility_id is not None:
+                query = query.eq("destination_facility_id", facility_id)
+            return self._data(query.order("original_eta_ts", desc=False).execute())
+        except APIError as exc:
+            self._raise_persistence(exc)
+
+    def get_drivers(self, driver_ids: list[str]) -> dict[str, dict[str, Any]]:
+        values = [value for value in driver_ids if value]
+        if not values:
+            return {}
+        try:
+            rows = self._data(
+                self.backend.table("drivers")
+                .select("driver_id,driver_name,phone")
+                .in_("driver_id", values)
+                .execute()
+            )
+        except APIError as exc:
+            self._raise_persistence(exc)
+        return {row["driver_id"]: row for row in rows}
+
+    def get_vehicles(self, vehicle_ids: list[str]) -> dict[str, dict[str, Any]]:
+        values = [value for value in vehicle_ids if value]
+        if not values:
+            return {}
+        try:
+            rows = self._data(
+                self.backend.table("vehicles")
+                .select("vehicle_id,registration_number,vehicle_type_code")
+                .in_("vehicle_id", values)
+                .execute()
+            )
+        except APIError as exc:
+            self._raise_persistence(exc)
+        return {row["vehicle_id"]: row for row in rows}
+
+    def get_facilities(self, facility_ids: list[str]) -> dict[str, dict[str, Any]]:
+        values = [value for value in facility_ids if value]
+        if not values:
+            return {}
+        try:
+            rows = self._data(
+                self.backend.table("facilities")
+                .select("facility_id,facility_name,city,state,active_flag")
+                .in_("facility_id", values)
+                .execute()
+            )
+        except APIError as exc:
+            self._raise_persistence(exc)
+        return {row["facility_id"]: row for row in rows}
+
+    def list_active_facilities(self) -> list[dict[str, Any]]:
+        try:
+            return self._data(
+                self.backend.table("facilities")
+                .select("facility_id,facility_name,city,state,active_flag")
+                .eq("active_flag", 1)
+                .order("facility_name", desc=False)
+                .execute()
+            )
+        except APIError as exc:
+            self._raise_persistence(exc)
+
+    def list_checkins(self) -> dict[str, dict[str, Any]]:
+        try:
+            rows = self._data(self.backend.table("facility_checkins").select(CHECKIN_COLUMNS).execute())
+        except APIError as exc:
+            self._raise_persistence(exc)
+        result: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            result[row["shipment_id"]] = {
+                **row,
+                "arrival_status": self._to_domain_arrival_status(row.get("arrival_state")),
+                "queue_status": self._to_domain_queue_status(row.get("queue_state")),
+                "gate_in_at": row.get("gate_in_ts"),
+                "dock_in_at": row.get("dock_in_ts"),
+                "completed_at": row.get("unload_end_ts"),
+            }
+        return result
 
     def get_by_shipment(self, shipment_id: str) -> dict[str, Any] | None:
         try:
@@ -161,6 +263,17 @@ class CheckInRepository:
                     "arrival_state": self._to_db_arrival_status("COMPLETED"),
                     "queue_state": self._to_db_queue_status("NONE"),
                     "unload_end_ts": str(completed_at),
+                    "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                }
+            ).eq("shipment_id", shipment_id).execute()
+        except APIError as exc:
+            self._raise_persistence(exc)
+
+    def update_shipment_status(self, shipment_id: str, status: str) -> None:
+        try:
+            self.backend.table("shipments").update(
+                {
+                    "current_status": status,
                     "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
                 }
             ).eq("shipment_id", shipment_id).execute()

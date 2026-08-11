@@ -15,6 +15,7 @@ from setuhaul.backend.tms.models import (
     DriverResponse,
     DriverUpdate,
     FacilityResponse,
+    NextShipmentIdsResponse,
     ShipmentContextResponse,
     ShipmentCreate,
     ShipmentResponse,
@@ -179,6 +180,14 @@ def create_shipment(
     service: TMSService = Depends(get_service),
 ) -> ShipmentResponse:
     return service.create_shipment(request)
+
+
+@router.get("/shipments/next-ids", response_model=NextShipmentIdsResponse)
+def next_shipment_ids(
+    _: Principal = Depends(require_reader),
+    service: TMSService = Depends(get_service),
+) -> NextShipmentIdsResponse:
+    return service.get_next_shipment_ids()
 
 
 @router.patch("/shipments/{shipment_id}", response_model=ShipmentResponse)
