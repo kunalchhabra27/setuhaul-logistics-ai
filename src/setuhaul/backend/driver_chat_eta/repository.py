@@ -65,26 +65,57 @@ class DriverChatRepository:
 
     # -- carriers -------------------------------------------------------
 
-    def find_or_create_carrier(self, carrier_name: str) -> str:
-        try:
-            existing = self._rows(
-                self.client.table("carriers").select("carrier_id").ilike("carrier_name", carrier_name).limit(1).execute()
-            )
-            if existing:
-                return str(existing[0]["carrier_id"])
-            from uuid import uuid4
+    def list_carriers(self) -> list[dict[str, Any]]:
+        """Existing carriers for the profile-completion dropdown.
 
-            new_id = f"CAR-{uuid4().hex[:8].upper()}"
-            created = self._rows(
+        Read-only on purpose -- drivers pick from what's already in Supabase
+        rather than typing a name that used to silently create a new carrier
+        record with a random id (see git history for the old
+        find_or_create_carrier behaviour this replaced).
+        """
+        try:
+            return self._rows(
                 self.client.table("carriers")
-                .insert({"carrier_id": new_id, "carrier_name": carrier_name, "active_flag": 1})
+                .select("carrier_id,carrier_name")
+                .order("carrier_name", desc=False)
                 .execute()
             )
         except APIError as exc:
             self._raise_persistence(exc)
-        if not created:
-            raise PersistenceError("Creating the carrier record returned no result.")
-        return str(created[0]["carrier_id"])
+
+    def get_carrier(self, carrier_id: str) -> dict[str, Any] | None:
+        try:
+            rows = self._rows(
+                self.client.table("carriers").select("carrier_id,carrier_name").eq("carrier_id", carrier_id).limit(1).execute()
+            )
+        except APIError as exc:
+            self._raise_persistence(exc)
+        return rows[0] if rows else None
+
+    def list_active_vehicle_carrier_ids(self) -> set[str]:
+        """carrier_ids that currently have at least one active vehicle on
+        file -- used to flag, at carrier-selection time, a carrier a driver
+        is about to register under that has no active vehicle yet (rather
+        than only surfacing that gap later when TMS tries to create a
+        shipment for them)."""
+        try:
+            rows = self._rows(
+                self.client.table("vehicles").select("carrier_id").eq("active_flag", 1).execute()
+            )
+        except APIError as exc:
+            self._raise_persistence(exc)
+        return {row["carrier_id"] for row in rows if row.get("carrier_id")}
+
+    def list_home_base_cities(self) -> list[str]:
+        """Distinct, already-used driver home_base_city values -- there's no
+        lookup table for this column, so "real data from Supabase" means
+        whatever cities existing driver rows already have on file."""
+        try:
+            rows = self._rows(self.client.table("drivers").select("home_base_city").execute())
+        except APIError as exc:
+            self._raise_persistence(exc)
+        cities = {row["home_base_city"] for row in rows if row.get("home_base_city")}
+        return sorted(cities)
 
     # -- vehicles / facilities / docks ---------------------------------
 

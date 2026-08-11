@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import logging
-import uuid
 from datetime import datetime, timezone
 
 from setuhaul.backend.tms.exceptions import (
     BusinessValidationError,
     DriverNotFoundError,
+    FacilityAssignmentNotFoundError,
     ShipmentNotFoundError,
     VehicleNotFoundError,
 )
 from setuhaul.backend.tms.models import (
     ACTIVE_CONTEXT_STATUSES,
+    CheckinTraceSummary,
     ContextResolution,
+    DockTraceSummary,
     DriverContextResponse,
     DriverCreate,
     DriverResponse,
@@ -22,9 +24,11 @@ from setuhaul.backend.tms.models import (
     DriverSummary,
     DriverUpdate,
     FacilityResponse,
+    FacilityStaffResponse,
     ShipmentCandidate,
     ShipmentContextResponse,
     ShipmentCreate,
+    ShipmentReferenceData,
     ShipmentResponse,
     ShipmentStatus,
     ShipmentUpdate,
@@ -148,7 +152,7 @@ class TMSService:
         if request.driver_id and request.vehicle_id:
             self._validate_active_assignment(request.driver_id, request.vehicle_id, request.current_status)
         payload = request.model_dump(mode="json")
-        payload["shipment_id"] = payload.get("shipment_id") or f"SHP-{uuid.uuid4().hex[:8].upper()}"
+        payload["shipment_id"] = payload.get("shipment_id") or self.repository.generate_shipment_id()
         now = datetime.now(timezone.utc).isoformat()
         payload["created_at"] = now
         payload["updated_at"] = now
@@ -218,6 +222,70 @@ class TMSService:
             for row in self.repository.list_facilities(limit=limit, offset=offset)
         ]
 
+    def shipment_reference_data(self) -> ShipmentReferenceData:
+        return ShipmentReferenceData.model_validate(self.repository.list_shipment_reference_data())
+
+    # -- staff facility assignments (WMS/Check-in facility scoping) -----
+
+    def register_staff_facility(self, staff_user_id: str, facility_id: str) -> FacilityStaffResponse:
+        facility = self.repository.get_facility(facility_id)
+        if facility is None:
+            raise BusinessValidationError(f"Facility {facility_id} was not found.")
+        row = self.repository.register_staff_facility(staff_user_id, facility_id)
+        return FacilityStaffResponse(
+            staff_user_id=row["staff_user_id"],
+            facility_id=row["facility_id"],
+            facility_name=facility.get("facility_name"),
+        )
+
+    def get_staff_facility(self, staff_user_id: str) -> FacilityStaffResponse | None:
+        row = self.repository.get_staff_facility(staff_user_id)
+        if row is None:
+            return None
+        facility = self.repository.get_facility(row["facility_id"])
+        return FacilityStaffResponse(
+            staff_user_id=row["staff_user_id"],
+            facility_id=row["facility_id"],
+            facility_name=facility.get("facility_name") if facility else None,
+        )
+
+    def require_staff_facility(self, staff_user_id: str) -> FacilityStaffResponse:
+        assignment = self.get_staff_facility(staff_user_id)
+        if assignment is None:
+            raise FacilityAssignmentNotFoundError(
+                "No warehouse facility is registered for this account yet. Complete facility setup to continue."
+            )
+        return assignment
+
+    def list_shipments_for_staff_facility(
+        self,
+        staff_user_id: str,
+        *,
+        status: ShipmentStatus | None = None,
+        active_only: bool = False,
+        unassigned_only: bool = False,
+        include_archived: bool = False,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[ShipmentResponse]:
+        """Shipments scoped to ONLY the caller's own registered facility.
+
+        facility_id is always resolved server-side from staff_facility_assignments
+        via the caller's own verified user id -- never accepted as a
+        client-supplied query parameter -- so one facility's staff cannot see
+        shipments allotted to another facility by passing a different id.
+        """
+        assignment = self.require_staff_facility(staff_user_id)
+        return self.list_shipments(
+            destination_facility_id=assignment.facility_id,
+            status=status,
+            active_only=active_only,
+            unassigned_only=unassigned_only,
+            include_archived=include_archived,
+            limit=limit,
+            offset=offset,
+        )
+
     def driver_shipments(self, driver_id: str, *, active_only: bool = False) -> list[ShipmentResponse]:
         self.get_driver(driver_id)
         return self.list_shipments(driver_id=driver_id, active_only=active_only)
@@ -271,10 +339,18 @@ class TMSService:
             raise BusinessValidationError(f"Shipment {shipment_id} has no driver/vehicle assigned yet.")
         driver = self.get_driver(shipment.driver_id)
         vehicle = self.get_vehicle(shipment.vehicle_id)
+
+        appointment_row = self.repository.current_appointment_for_shipment(shipment_id)
+        dock = DockTraceSummary.model_validate(appointment_row) if appointment_row else None
+        checkin_row = self.repository.checkin_for_shipment(shipment_id)
+        checkin = CheckinTraceSummary.model_validate(checkin_row) if checkin_row else None
+
         return ShipmentContextResponse(
             driver=self._driver_summary(driver),
             vehicle=self._vehicle_context(vehicle),
             shipment=shipment,
+            dock=dock,
+            checkin=checkin,
         )
 
     @staticmethod

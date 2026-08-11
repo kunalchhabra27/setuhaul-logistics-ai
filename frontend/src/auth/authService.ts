@@ -81,6 +81,16 @@ export function getAccessToken(serviceId: string) {
   return currentSessions.get(serviceId)?.access_token ?? null;
 }
 
+// Fallback for when the proactive refresh timer in supabaseClient.ts missed
+// its window (e.g. a background tab whose timers were throttled by the
+// browser while asleep). api.ts calls this once on a 401 before giving up,
+// so a request made right after a laptop wakes from sleep self-heals
+// instead of surfacing as "the chatbot isn't responding".
+export async function refreshAccessToken(serviceId: string): Promise<boolean> {
+  const { data, error } = await supabase.auth.refreshSession(serviceId);
+  return !error && Boolean(data.session);
+}
+
 export const isAuthConfigured = supabase.isConfigured;
 
 export type { SupabaseSession, SupabaseUser };

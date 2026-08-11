@@ -3,6 +3,7 @@ import type {
   ArrivalUpdateChoice,
   DriverAppointmentSlotSummary,
   DriverAppointmentSummary,
+  DriverCarrierSummary,
   DriverChatResponse,
   DriverExceptionSummary,
   DriverFacilityCheckinSummary,
@@ -20,6 +21,14 @@ export function driverChatHealth() {
 
 export function getMyDriverProfile() {
   return api.request<DriverProfile>(`${base}/me`);
+}
+
+export function listDriverCarriers() {
+  return api.request<DriverCarrierSummary[]>(`${base}/carriers`);
+}
+
+export function listDriverHomeBaseCities() {
+  return api.request<string[]>(`${base}/reference/home-base-cities`);
 }
 
 export function completeDriverProfile(body: DriverProfileCompleteRequest) {

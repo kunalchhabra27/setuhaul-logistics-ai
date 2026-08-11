@@ -22,14 +22,47 @@ class FakeResponse:
         self.data = data
 
 
+class _FakeNotProxy:
+    """Backs the `.not_.in_(...)` chain postgrest-py exposes for negated
+    filters -- e.g. `.not_.in_("status", ["DONE"])` for "status NOT IN
+    (...)". Appends a negated filter onto the same underlying query and
+    returns it, so chaining (.order(), .limit(), ...) continues normally."""
+
+    def __init__(self, query: "FakeQuery"):
+        self._query = query
+
+    def in_(self, column: str, values: Any) -> "FakeQuery":
+        self._query._filters.append(("not_in", column, list(values)))
+        return self._query
+
+    def eq(self, column: str, value: Any) -> "FakeQuery":
+        self._query._filters.append(("not_eq", column, value))
+        return self._query
+
+    def is_(self, column: str, value: Any) -> "FakeQuery":
+        self._query._filters.append(("not_is", column, None if value in ("null", None) else value))
+        return self._query
+
+
 class FakeQuery:
-    def __init__(self, table: "FakeTable", op: str, payload: dict[str, Any] | None = None):
+    def __init__(
+        self,
+        table: "FakeTable",
+        op: str,
+        payload: dict[str, Any] | None = None,
+        on_conflict: str | None = None,
+    ):
         self._table = table
         self._op = op
         self._payload = payload
+        self._on_conflict = on_conflict
         self._filters: list[tuple[str, str, Any]] = []
         self._order_by: list[tuple[str, bool]] = []
         self._limit_n: int | None = None
+
+    @property
+    def not_(self) -> "_FakeNotProxy":
+        return _FakeNotProxy(self)
 
     def eq(self, column: str, value: Any) -> "FakeQuery":
         self._filters.append(("eq", column, value))
@@ -76,6 +109,12 @@ class FakeQuery:
                 return False
             if kind == "gte" and not (actual is not None and actual >= value):
                 return False
+            if kind == "not_in" and actual in value:
+                return False
+            if kind == "not_eq" and actual == value:
+                return False
+            if kind == "not_is" and actual == value:
+                return False
         return True
 
     def execute(self) -> FakeResponse:
@@ -95,6 +134,15 @@ class FakeQuery:
             for row in matched:
                 row.update(self._payload or {})
             return FakeResponse([dict(row) for row in matched])
+        if self._op == "upsert":
+            payload = dict(self._payload or {})
+            key = self._on_conflict or "id"
+            existing = next((row for row in self._table.data if row.get(key) == payload.get(key)), None)
+            if existing is not None:
+                existing.update(payload)
+                return FakeResponse([dict(existing)])
+            self._table.data.append(payload)
+            return FakeResponse([dict(payload)])
         raise AssertionError(f"Unsupported fake query op: {self._op}")
 
 
@@ -110,6 +158,9 @@ class FakeTable:
 
     def update(self, payload: dict[str, Any]) -> FakeQuery:
         return FakeQuery(self, "update", payload)
+
+    def upsert(self, payload: dict[str, Any], on_conflict: str | None = None, **_kwargs: Any) -> FakeQuery:
+        return FakeQuery(self, "upsert", payload, on_conflict=on_conflict)
 
 
 class FakeSupabaseClient:

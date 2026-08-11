@@ -63,7 +63,9 @@ export default function DockSlotBoard({
                       key={opt.slot_id}
                       className="rounded-xl border p-3 text-xs transition-all"
                       style={
-                        opt.is_held
+                        opt.is_booked_by_me
+                          ? { borderColor: "#059669", background: "#ecfdf5" }
+                          : opt.is_held
                           ? { borderColor: color, background: `${color}0D` }
                           : !opt.is_compatible
                           ? { opacity: 0.6, borderColor: "var(--color-line)", background: "var(--color-cloud)" }
@@ -77,14 +79,31 @@ export default function DockSlotBoard({
                         </span>
                         <span
                           className="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase"
-                          style={opt.is_held ? { background: `${color}1A`, color } : opt.is_compatible ? { background: "#ecfdf5", color: "#047857" } : { background: "var(--color-line)", color: "var(--color-mist)" }}
+                          style={
+                            opt.is_booked_by_me
+                              ? { background: "#d1fae5", color: "#047857" }
+                              : opt.is_held
+                              ? { background: `${color}1A`, color }
+                              : opt.is_compatible
+                              ? { background: "#ecfdf5", color: "#047857" }
+                              : { background: "var(--color-line)", color: "var(--color-mist)" }
+                          }
                         >
-                          {opt.is_held ? "held" : opt.is_compatible ? "open" : "incompatible"}
+                          {opt.is_booked_by_me ? "your booking" : opt.is_held ? "held" : opt.is_compatible ? "open" : "unavailable"}
                         </span>
                       </div>
 
+                      {!opt.is_compatible && !opt.is_booked_by_me && (
+                        <p className="text-[11px] text-mist">{opt.compatibility_reason}</p>
+                      )}
+
                       <div className="mt-2.5 flex gap-1.5">
-                        {!opt.is_held && opt.is_compatible && (
+                        {opt.is_booked_by_me && (
+                          <span className="flex min-h-[40px] w-full items-center justify-center gap-1.5 rounded-xl bg-emerald-600/10 px-3 py-2 text-xs font-black text-emerald-700">
+                            <CheckCircle2 className="h-4 w-4" /> Confirmed -- your dock appointment
+                          </span>
+                        )}
+                        {!opt.is_booked_by_me && !opt.is_held && opt.is_compatible && (
                           <button
                             onClick={() => void onHoldSlot(opt.slot_id)}
                             className="flex min-h-[40px] w-full items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-bold transition active:scale-95"
@@ -93,7 +112,7 @@ export default function DockSlotBoard({
                             <Lock className="h-3.5 w-3.5" /> Hold slot (5m)
                           </button>
                         )}
-                        {opt.is_held && (
+                        {!opt.is_booked_by_me && opt.is_held && (
                           <button
                             onClick={() => void onConfirmSlot(opt.slot_id)}
                             className="flex min-h-[40px] w-full items-center justify-center gap-1.5 rounded-xl bg-emerald-600 px-3 py-2 text-xs font-black text-white shadow-soft transition hover:bg-emerald-500 active:scale-95"

@@ -90,6 +90,58 @@ class CheckInRepository:
             "order_reference": shipment_rows[0].get("order_reference"),
         }
 
+    def shipment_exists(self, shipment_id: str) -> bool:
+        try:
+            rows = self._data(
+                self.backend.table("shipments").select("shipment_id").eq("shipment_id", shipment_id).limit(1).execute()
+            )
+        except APIError as exc:
+            self._raise_persistence(exc)
+        return bool(rows)
+
+    def get_confirmed_dock_for_shipment(self, shipment_id: str) -> dict[str, Any] | None:
+        """The CONFIRMED WMS appointment's dock for a shipment, if any --
+        used to require a real dock booking before staff can mark a truck
+        docked, and to auto-fill actual_dock_id from it (same rule
+        driver_chat_eta's own check-in flow already applies). Reads
+        dock_scheduler-owned tables directly through the same caller-scoped
+        client, not a second implementation of appointment lookup."""
+        try:
+            appt_rows = self._data(
+                self.backend.table("appointments")
+                .select("appointment_id,slot_id")
+                .eq("shipment_id", shipment_id)
+                .eq("is_current", 1)
+                .eq("appointment_status", "CONFIRMED")
+                .limit(1)
+                .execute()
+            )
+        except APIError as exc:
+            self._raise_persistence(exc)
+        if not appt_rows or not appt_rows[0].get("slot_id"):
+            return None
+        try:
+            slot_rows = self._data(
+                self.backend.table("appointment_slots")
+                .select("slot_id,dock_id")
+                .eq("slot_id", appt_rows[0]["slot_id"])
+                .limit(1)
+                .execute()
+            )
+        except APIError as exc:
+            self._raise_persistence(exc)
+        if not slot_rows or not slot_rows[0].get("dock_id"):
+            return None
+        try:
+            dock_rows = self._data(
+                self.backend.table("docks").select("dock_id,dock_code").eq("dock_id", slot_rows[0]["dock_id"]).limit(1).execute()
+            )
+        except APIError as exc:
+            self._raise_persistence(exc)
+        if not dock_rows:
+            return None
+        return {"dock_id": dock_rows[0]["dock_id"], "dock_code": dock_rows[0].get("dock_code")}
+
     def get_by_shipment(self, shipment_id: str) -> dict[str, Any] | None:
         try:
             rows = self._data(
@@ -141,16 +193,17 @@ class CheckInRepository:
         except APIError as exc:
             self._raise_persistence(exc)
 
-    def mark_docked(self, shipment_id: str, dock_in_at: str | datetime) -> None:
+    def mark_docked(self, shipment_id: str, dock_in_at: str | datetime, actual_dock_id: str | None = None) -> None:
+        payload: dict[str, Any] = {
+            "arrival_state": self._to_db_arrival_status("DOCKED"),
+            "queue_state": self._to_db_queue_status("NONE"),
+            "dock_in_ts": str(dock_in_at),
+            "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        }
+        if actual_dock_id:
+            payload["actual_dock_id"] = actual_dock_id
         try:
-            self.backend.table("facility_checkins").update(
-                {
-                    "arrival_state": self._to_db_arrival_status("DOCKED"),
-                    "queue_state": self._to_db_queue_status("NONE"),
-                    "dock_in_ts": str(dock_in_at),
-                    "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-                }
-            ).eq("shipment_id", shipment_id).execute()
+            self.backend.table("facility_checkins").update(payload).eq("shipment_id", shipment_id).execute()
         except APIError as exc:
             self._raise_persistence(exc)
 

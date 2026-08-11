@@ -15,6 +15,7 @@ import {
 import type { ArrivalUpdateChoice, DriverProfile, DriverSnapshot } from "../../types/driverChat";
 import ProfileSetupForm from "./ProfileSetupForm";
 import ContextBar from "./ContextBar";
+import AppointmentBanner from "./AppointmentBanner";
 import GateTimeline from "./GateTimeline";
 import ChatPanel from "./ChatPanel";
 import DockSlotBoard from "./DockSlotBoard";
@@ -259,6 +260,7 @@ export default function DriversPortal({ color }: { color: string }) {
       {snapshot?.shipment ? (
         <>
           <ContextBar snapshot={snapshot} color={color} onQuickUpdateEta={handleQuickUpdateEta} />
+          <AppointmentBanner appointment={snapshot.appointment} color={color} />
           <GateTimeline snapshot={snapshot} color={color} onUpdateCheckin={handleUpdateCheckin} />
         </>
       ) : (

@@ -165,13 +165,25 @@ class ExceptionStatus(str, Enum):
 
 
 class ProfileCompleteRequest(BaseModel):
-    """Payload submitted once a driver's email is verified via Supabase Auth."""
+    """Payload submitted once a driver's email is verified via Supabase Auth.
+
+    carrier_id is picked from a dropdown of existing carriers (see
+    CarrierSummary / GET /driver-chat-eta/carriers) rather than typed as free
+    text -- a driver can no longer silently create a brand-new carrier record
+    with a random id just by mistyping a name.
+    """
 
     driver_name: str = Field(min_length=1)
     phone: str = Field(min_length=1)
     licence_number: str = Field(min_length=1)
     home_base_city: str = Field(min_length=1)
-    carrier_name: str = Field(min_length=1)
+    carrier_id: str = Field(min_length=1)
+
+
+class CarrierSummary(APIModel):
+    carrier_id: str
+    carrier_name: str | None = None
+    has_active_vehicle: bool = True
 
 
 class DriverProfile(APIModel):
@@ -259,6 +271,13 @@ class AppointmentSummary(APIModel):
     booked_at: str | None = None
     confirmed_at: str | None = None
     cancelled_at: str | None = None
+    # Sourced from DockSchedulerRepository.current_appointment()'s slot/dock
+    # join (not present on the raw appointments row) so the driver UI can
+    # show a real "confirmed at Dock D1, 11:00-12:00" banner instead of just
+    # an opaque slot id.
+    dock_code: str | None = None
+    slot_start_ts: str | None = None
+    slot_end_ts: str | None = None
 
 
 class FacilityCheckinSummary(APIModel):
@@ -313,6 +332,7 @@ class SlotOption(BaseModel):
     compatibility_reason: str
     estimated_wait_minutes: int
     is_held: bool = False
+    is_booked_by_me: bool = False
 
 
 # --------------------------------------------------------------------------

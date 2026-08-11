@@ -45,6 +45,7 @@ def _serialize_slot(opt: Any) -> dict:
         "reason": opt.compatibility_reason,
         "estimated_wait_minutes": opt.estimated_wait_minutes,
         "is_held": opt.is_held,
+        "is_booked_by_me": opt.is_booked_by_me,
     }
 
 
@@ -83,7 +84,13 @@ def build_tools(service: "DriverChatService", principal: "DriverPrincipal") -> l
         availability without reporting a new delay."""
         try:
             options = service.get_current_feasible_slots(principal)
-            return {"feasible_slots": [_serialize_slot(opt) for opt in options]}
+            # Capped here at the LLM boundary, not in the service method
+            # itself -- get_current_feasible_slots also backs the driver-facing
+            # DockSlotBoard (via DriverSnapshot.slot_options), which wants the
+            # full list. options is already sorted compatible-first.
+            from setuhaul.backend.driver_chat_eta.service import LLM_SLOT_SUMMARY_LIMIT
+
+            return {"feasible_slots": [_serialize_slot(opt) for opt in options[:LLM_SLOT_SUMMARY_LIMIT]]}
         except DriverChatError as exc:
             return {"error": exc.code, "message": exc.message}
 

@@ -1,5 +1,13 @@
 import { createApiClient } from "./api";
-import type { ShipmentCreateInput, ShipmentSummary, TmsDriver, TmsFacility, TmsVehicle } from "../types/api";
+import type {
+  ShipmentContext,
+  ShipmentCreateInput,
+  ShipmentReferenceData,
+  ShipmentSummary,
+  TmsDriver,
+  TmsFacility,
+  TmsVehicle,
+} from "../types/api";
 
 const api = createApiClient("tms");
 
@@ -19,6 +27,10 @@ export function listFacilities() {
   return api.request<TmsFacility[]>("/tms/facilities");
 }
 
+export function getShipmentReferenceData() {
+  return api.request<ShipmentReferenceData>("/tms/reference/shipment-options");
+}
+
 export function assignShipmentDriver(shipmentId: string, driverId: string, vehicleId?: string | null) {
   return api.request<ShipmentSummary>(`/tms/shipments/${encodeURIComponent(shipmentId)}/assign`, {
     method: "POST",
@@ -31,6 +43,10 @@ export function createShipment(input: ShipmentCreateInput) {
     method: "POST",
     body: JSON.stringify(input),
   });
+}
+
+export function getShipmentContext(shipmentId: string) {
+  return api.request<ShipmentContext>(`/tms/context/shipments/${encodeURIComponent(shipmentId)}`);
 }
 
 export function archiveShipment(shipmentId: string) {

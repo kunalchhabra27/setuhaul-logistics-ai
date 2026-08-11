@@ -73,6 +73,14 @@ class FakeRepository:
             SHIPMENT_TWO: self._shipment(SHIPMENT_TWO, DRIVER_AMBIGUOUS, VEHICLE_ONE, "PLANNED"),
             SHIPMENT_THREE: self._shipment(SHIPMENT_THREE, DRIVER_AMBIGUOUS, VEHICLE_TWO, "WAITING"),
         }
+        # WMS/check-in trace data, keyed by shipment_id -- empty by default,
+        # tests that care about tracing populate these directly.
+        self.appointments: dict[str, dict[str, Any]] = {}
+        self.checkins: dict[str, dict[str, Any]] = {}
+        self.facilities: dict[str, dict[str, Any]] = {
+            FACILITY: {"facility_id": FACILITY, "facility_name": "Jaipur DC", "city": "Jaipur", "state": "Rajasthan"},
+        }
+        self.staff_facility_assignments: dict[str, dict[str, Any]] = {}
 
     @staticmethod
     def _shipment(shipment_id: str, driver_id: str, vehicle_id: str, status: str) -> dict[str, Any]:
@@ -152,8 +160,11 @@ class FakeRepository:
             rows = [row for row in rows if not row.get("archived_flag")]
         return deepcopy(rows[offset:offset + limit])
 
+    def generate_shipment_id(self) -> str:
+        return "SHP099"
+
     def create_shipment(self, payload):
-        shipment_id = "SHP099"
+        shipment_id = payload.get("shipment_id") or "SHP099"
         row = {"shipment_id": shipment_id, **payload}
         self.shipments[shipment_id] = row
         return deepcopy(row)
@@ -163,6 +174,37 @@ class FakeRepository:
             return None
         self.shipments[shipment_id].update(payload)
         return deepcopy(self.shipments[shipment_id])
+
+    def current_appointment_for_shipment(self, shipment_id: str):
+        return deepcopy(self.appointments.get(shipment_id))
+
+    def checkin_for_shipment(self, shipment_id: str):
+        return deepcopy(self.checkins.get(shipment_id))
+
+    def list_shipment_reference_data(self):
+        seen = set()
+        origins = []
+        categories = set()
+        for row in self.shipments.values():
+            name, city = row.get("origin_name"), row.get("origin_city")
+            if name and (name, city) not in seen:
+                seen.add((name, city))
+                origins.append({"origin_name": name, "origin_city": city})
+            category = row.get("product_category")
+            if category:
+                categories.add(category)
+        return {"origins": origins, "product_categories": sorted(categories)}
+
+    def get_facility(self, facility_id: str):
+        return deepcopy(self.facilities.get(facility_id))
+
+    def get_staff_facility(self, staff_user_id: str):
+        return deepcopy(self.staff_facility_assignments.get(staff_user_id))
+
+    def register_staff_facility(self, staff_user_id: str, facility_id: str):
+        row = {"staff_user_id": staff_user_id, "facility_id": facility_id}
+        self.staff_facility_assignments[staff_user_id] = row
+        return deepcopy(row)
 
 
 @pytest.fixture()

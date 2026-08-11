@@ -161,7 +161,11 @@ def tables() -> dict[str, list[dict]]:
                 temperature_control_required=1,
                 priority_code="HIGH",
             ),
-            _shipment(SHP_OCCUPANT, priority_code="LOW"),
+            _shipment(SHP_OCCUPANT, priority_code="LOW", driver_id="DRV003"),
+        ],
+        "drivers": [
+            {"driver_id": "DRV001", "driver_name": "Rajesh Kumar"},
+            {"driver_id": "DRV003", "driver_name": "Mukesh Yadav"},
         ],
         "eta_updates": [],
     }

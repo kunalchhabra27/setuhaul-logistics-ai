@@ -68,3 +68,39 @@ def test_get_driver_contact_for_shipment_returns_none_without_driver() -> None:
 def test_get_driver_contact_for_shipment_returns_none_when_shipment_missing() -> None:
     repo = _repository()
     assert repo.get_driver_contact_for_shipment("SHP-NOPE") is None
+
+
+def test_shipment_exists() -> None:
+    repo = CheckInRepository(
+        FakeSupabaseClient({"facility_checkins": [], "shipments": [{"shipment_id": "SHP1006"}]})
+    )
+    assert repo.shipment_exists("SHP1006") is True
+    assert repo.shipment_exists("SHP-NOPE") is False
+
+
+def test_get_confirmed_dock_for_shipment() -> None:
+    repo = CheckInRepository(
+        FakeSupabaseClient(
+            {
+                "facility_checkins": [],
+                "appointments": [
+                    {
+                        "appointment_id": "APT-1",
+                        "shipment_id": "SHP1006",
+                        "slot_id": "SLOT-1",
+                        "is_current": 1,
+                        "appointment_status": "CONFIRMED",
+                    }
+                ],
+                "appointment_slots": [{"slot_id": "SLOT-1", "dock_id": "DOCK-1"}],
+                "docks": [{"dock_id": "DOCK-1", "dock_code": "D1"}],
+            }
+        )
+    )
+    dock = repo.get_confirmed_dock_for_shipment("SHP1006")
+    assert dock == {"dock_id": "DOCK-1", "dock_code": "D1"}
+
+
+def test_get_confirmed_dock_for_shipment_returns_none_without_confirmed_appointment() -> None:
+    repo = _repository()
+    assert repo.get_confirmed_dock_for_shipment("SHP1006") is None

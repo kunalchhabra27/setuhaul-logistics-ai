@@ -228,6 +228,7 @@ class DockSchedulerRepository:
                     "appointment_status": occ_appointment["appointment_status"] if occ_appointment else None,
                     "occupied_priority": occ_shipment["priority_code"] if occ_shipment else None,
                     "occupied_unload_min": occ_shipment["expected_unload_min"] if occ_shipment else None,
+                    "occupied_driver_id": occ_shipment.get("driver_id") if occ_shipment else None,
                     "hold_id": hold["hold_id"] if hold else None,
                     "held_shipment_id": hold["shipment_id"] if hold else None,
                 }
@@ -260,6 +261,18 @@ class DockSchedulerRepository:
         ]
         compatible.sort(key=lambda row: (row["slot_start_ts"], row["dock_code"]))
         return compatible
+
+    def driver_names(self, driver_ids: list[str]) -> dict[str, str]:
+        """Resolve driver_id -> driver_name for a batch of drivers, so the
+        visual dock board can show WMS staff whose shipment holds/occupies
+        each slot. dock_scheduler otherwise never needs driver identity --
+        this is a narrow, read-only cross-context lookup (same pattern
+        driver_chat_eta already uses to read across bounded contexts)."""
+        ids = [value for value in {*driver_ids} if value]
+        if not ids:
+            return {}
+        rows = self._select("drivers", driver_id=ids)
+        return {row["driver_id"]: row.get("driver_name") for row in rows if row.get("driver_name")}
 
     def current_appointment(self, shipment_id: str) -> dict[str, Any] | None:
         rows = self._select(

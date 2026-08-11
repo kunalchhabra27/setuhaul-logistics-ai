@@ -63,11 +63,14 @@ def test_admin_can_assign_shipment(service):
     app.dependency_overrides[get_service] = lambda: service
     app.dependency_overrides[require_admin] = lambda: _principal(TMSRole.ADMIN_1)
     try:
+        # DRV001/VEH001 share CARRIER_A in the fixture -- DRV004 (DRIVER_EMPTY)
+        # is CARRIER_B, which would (correctly) trip the same-carrier
+        # validation against VEH001 and isn't what this test is checking.
         response = TestClient(app).post(
             "/api/v1/tms/shipments/SHP002/assign",
-            json={"driver_id": "DRV004", "vehicle_id": "VEH001"},
+            json={"driver_id": "DRV001", "vehicle_id": "VEH001"},
         )
     finally:
         app.dependency_overrides.clear()
     assert response.status_code == 200
-    assert response.json()["driver_id"] == "DRV004"
+    assert response.json()["driver_id"] == "DRV001"

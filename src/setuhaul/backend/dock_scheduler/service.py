@@ -37,6 +37,9 @@ class DockSchedulerService:
         capacity across every dock the shipment could use.
         """
         slots = self.repository.compatible_slots(shipment_id)
+        driver_names = self.repository.driver_names(
+            [row["occupied_driver_id"] for row in slots if row.get("occupied_driver_id")]
+        )
         return [
             DockSlot(
                 slot_id=row["slot_id"],
@@ -46,6 +49,7 @@ class DockSchedulerService:
                 end=parse_ts(row["slot_end_ts"]),
                 availability_status=row["availability_status"],
                 occupant_shipment_id=row.get("shipment_id"),
+                occupant_driver_name=driver_names.get(row.get("occupied_driver_id")),
             )
             for row in slots
         ]

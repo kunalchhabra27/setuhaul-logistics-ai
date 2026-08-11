@@ -141,3 +141,4 @@ class DockSlot(BaseModel):
     end: datetime
     availability_status: str
     occupant_shipment_id: str | None = None
+    occupant_driver_name: str | None = None

@@ -138,6 +138,35 @@ def test_hold_slot_accepts_any_compatible_slot_not_just_top_ranked(service):
     assert hold.slot_id == target.slot_id
 
 
+def test_dock_board_shows_occupant_driver_name(service, tables):
+    tables["appointments"].append(
+        {
+            "appointment_id": "APT-OCC2",
+            "shipment_id": SHP_OCCUPANT,
+            "slot_id": "SLOT-D2-0800",
+            "appointment_status": "CONFIRMED",
+            "booking_source": "PLANNER",
+            "is_current": 1,
+            "booked_at": "2026-08-01T12:00:00+05:30",
+            "confirmed_at": "2026-08-01T12:05:00+05:30",
+            "cancelled_at": None,
+            "cancellation_reason": None,
+            "replaced_appointment_id": None,
+            "warehouse_confirmation_ref": None,
+            "updated_at": "2026-08-01T12:05:00+05:30",
+        }
+    )
+    board = service.dock_board(SHP_NORMAL)
+    occupied = next(slot for slot in board if slot.slot_id == "SLOT-D2-0800")
+    assert occupied.availability_status == "OCCUPIED"
+    assert occupied.occupant_shipment_id == SHP_OCCUPANT
+    assert occupied.occupant_driver_name == "Mukesh Yadav"
+
+    # Untouched slots have no occupant, so no driver name either.
+    open_slot = next(slot for slot in board if slot.slot_id == "SLOT-D1-0800")
+    assert open_slot.occupant_driver_name is None
+
+
 def test_facility_and_docks_lookup(service):
     facility = service.repository.facility(FACILITY)
     assert facility["facility_id"] == FACILITY

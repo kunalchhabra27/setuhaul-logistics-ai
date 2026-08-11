@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 
 from setuhaul.backend.driver_chat_eta.auth import DriverPrincipal, get_current_driver
 from setuhaul.backend.driver_chat_eta.exceptions import DriverChatError
 from setuhaul.backend.driver_chat_eta.models import (
+    CarrierSummary,
     ChatRequest,
     ChatResponse,
     CheckinResponse,
@@ -57,6 +59,28 @@ def get_my_profile(
 ) -> DriverProfile:
     try:
         return service.get_my_profile(principal)
+    except DriverChatError as exc:
+        _raise_http(exc)
+
+
+@router.get("/carriers", response_model=list[CarrierSummary])
+def list_carriers(
+    principal: DriverPrincipal = Depends(get_current_driver),
+    service: DriverChatService = Depends(get_service),
+) -> list[CarrierSummary]:
+    try:
+        return service.list_carriers()
+    except DriverChatError as exc:
+        _raise_http(exc)
+
+
+@router.get("/reference/home-base-cities", response_model=list[str])
+def list_home_base_cities(
+    principal: DriverPrincipal = Depends(get_current_driver),
+    service: DriverChatService = Depends(get_service),
+) -> list[str]:
+    try:
+        return service.list_home_base_cities()
     except DriverChatError as exc:
         _raise_http(exc)
 
@@ -154,3 +178,26 @@ def escalate(
         return service.escalate(principal, request.reason)
     except DriverChatError as exc:
         _raise_http(exc)
+
+
+def install_exception_handlers(app: FastAPI) -> None:
+    """Install a stable error envelope for DriverChatError.
+
+    Route bodies already convert DriverChatError -> HTTPException via
+    _raise_http, but that only runs for exceptions raised *inside* a route
+    function. get_current_driver (used as a Depends() on nearly every route
+    here) raises AuthenticationError during dependency resolution, before
+    the route body -- and therefore its try/except -- ever runs. Without an
+    app-level handler, an expired/invalid bearer token propagates unhandled
+    to Starlette's default handler and surfaces as a generic 500 instead of
+    a 401. Mirrors tms.api.install_exception_handlers's TMSError handler.
+    """
+
+    @app.exception_handler(DriverChatError)
+    async def handle_driver_chat_error(_: Request, exc: DriverChatError) -> JSONResponse:
+        headers = {"WWW-Authenticate": "Bearer"} if exc.status_code == 401 else None
+        return JSONResponse(
+            status_code=exc.status_code,
+            headers=headers,
+            content={"error": {"code": exc.code, "message": exc.message}},
+        )

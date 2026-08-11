@@ -90,6 +90,9 @@ export interface DriverAppointmentSummary {
   booked_at?: string | null;
   confirmed_at?: string | null;
   cancelled_at?: string | null;
+  dock_code?: string | null;
+  slot_start_ts?: string | null;
+  slot_end_ts?: string | null;
 }
 
 export interface DriverFacilityCheckinSummary {
@@ -142,6 +145,7 @@ export interface DriverSlotOption {
   compatibility_reason: string;
   estimated_wait_minutes: number;
   is_held: boolean;
+  is_booked_by_me: boolean;
 }
 
 export interface DriverSnapshot {
@@ -169,5 +173,11 @@ export interface DriverProfileCompleteRequest {
   phone: string;
   licence_number: string;
   home_base_city: string;
-  carrier_name: string;
+  carrier_id: string;
+}
+
+export interface DriverCarrierSummary {
+  carrier_id: string;
+  carrier_name?: string | null;
+  has_active_vehicle: boolean;
 }

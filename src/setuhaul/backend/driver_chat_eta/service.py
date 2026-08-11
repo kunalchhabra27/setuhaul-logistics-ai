@@ -40,10 +40,19 @@ import re
 from datetime import datetime, timedelta
 from uuid import uuid4
 
+from setuhaul.backend.dock_scheduler.exceptions import (
+    DockSchedulerError,
+    InvalidBookingError as DockInvalidBookingError,
+    SlotUnavailableError as DockSlotUnavailableError,
+    UnknownShipmentError as DockUnknownShipmentError,
+)
+from setuhaul.backend.dock_scheduler.repository import DockSchedulerRepository
+from setuhaul.backend.dock_scheduler.service import DockSchedulerService
 from setuhaul.backend.driver_chat_eta.auth import DriverPrincipal
 from setuhaul.backend.driver_chat_eta.exceptions import (
     BusinessValidationError,
     DriverProfileNotFoundError,
+    PersistenceError,
     ShipmentNotFoundError,
     SlotConflictError,
     SlotNotFoundError,
@@ -52,6 +61,7 @@ from setuhaul.backend.driver_chat_eta.models import (
     AppointmentSlotSummary,
     AppointmentSummary,
     ChatMessageSummary,
+    CarrierSummary,
     ChatResponse,
     CheckinResponse,
     CheckinUpdateRequest,
@@ -72,6 +82,12 @@ from setuhaul.backend.driver_chat_eta.models import (
 from setuhaul.backend.driver_chat_eta.repository import DriverChatRepository
 
 HOLD_MINUTES = 5
+# Cap on how many feasible slots get surfaced to the LLM per tool call (see
+# report_exception below and llm/tools.py's list_feasible_dock_slots) -- kept
+# short to avoid bloating the model's context/cost. The driver-facing
+# snapshot/DockSlotBoard is unaffected; it always gets the full list from
+# _feasible_slots().
+LLM_SLOT_SUMMARY_LIMIT = 8
 _DELAY_PATTERN = re.compile(r"(\d{1,3})\s*(?:min(?:ute)?s?)", re.IGNORECASE)
 _HOUR_DELAY_PATTERN = re.compile(r"(\d{1,2})\s*(?:hour|hr)s?", re.IGNORECASE)
 _LEAVE_BEFORE_PATTERN = re.compile(
@@ -102,13 +118,36 @@ def _parse_dt(value: str | datetime | None) -> datetime | None:
 class DriverChatService:
     def __init__(self, repository: DriverChatRepository):
         self.repository = repository
+        # Dock booking (feasibility, hold, confirm) goes through the same
+        # validated WMS scheduling engine WMS staff use -- built from the
+        # same caller-scoped Supabase client, so RLS is unchanged. This
+        # removes what used to be a second, independently-drifting
+        # implementation of dock_scheduler-owned mutations living only in
+        # this chatbot; there is now one source of truth for
+        # appointment_slots/slot_holds/appointments.
+        self.dock_scheduler = DockSchedulerService(DockSchedulerRepository(repository.client))
 
     # -- profile ----------------------------------------------------------
 
+    def list_carriers(self) -> list[CarrierSummary]:
+        carriers_with_vehicles = self.repository.list_active_vehicle_carrier_ids()
+        return [
+            CarrierSummary(
+                carrier_id=row["carrier_id"],
+                carrier_name=row.get("carrier_name"),
+                has_active_vehicle=row["carrier_id"] in carriers_with_vehicles,
+            )
+            for row in self.repository.list_carriers()
+        ]
+
+    def list_home_base_cities(self) -> list[str]:
+        return self.repository.list_home_base_cities()
+
     def complete_profile(self, principal: DriverPrincipal, request: ProfileCompleteRequest) -> DriverProfile:
-        carrier_id = self.repository.find_or_create_carrier(request.carrier_name)
+        if self.repository.get_carrier(request.carrier_id) is None:
+            raise BusinessValidationError(f"Carrier {request.carrier_id} was not found. Choose one from the list.")
         payload = {
-            "carrier_id": carrier_id,
+            "carrier_id": request.carrier_id,
             "driver_name": request.driver_name,
             "phone": request.phone,
             "licence_number": request.licence_number,
@@ -151,7 +190,23 @@ class DriverChatService:
                     DockSummary.model_validate(row)
                     for row in self.repository.list_docks(shipment_row["destination_facility_id"])
                 ]
-            appt_row = self.repository.get_current_appointment_for_shipment(shipment_row["shipment_id"])
+            # dock_scheduler.repository.current_appointment() joins in
+            # dock_code/slot_start_ts/slot_end_ts (the raw appointments row
+            # only has slot_id) -- lets the driver UI show a real "confirmed
+            # at Dock D1, 11:00-12:00" banner instead of nothing. Same
+            # defensive fallback as the slot_options block above: a failure
+            # here must degrade to "no appointment shown", not break the
+            # whole snapshot/chat turn.
+            try:
+                appt_row = self.dock_scheduler.repository.current_appointment(shipment_row["shipment_id"])
+            except Exception:  # noqa: BLE001 - deliberate broad fallback, see slot_options above
+                import logging
+
+                logging.getLogger(__name__).exception(
+                    "driver_chat_eta: failed to read current appointment for shipment %s.",
+                    shipment_row.get("shipment_id"),
+                )
+                appt_row = None
             appointment = AppointmentSummary.model_validate(appt_row) if appt_row else None
             checkin_row = self.repository.get_checkin_for_shipment(shipment_row["shipment_id"])
             checkin = FacilityCheckinSummary.model_validate(checkin_row) if checkin_row else None
@@ -160,19 +215,50 @@ class DriverChatService:
         exception = DriverExceptionSummary.model_validate(exception_row) if exception_row else None
 
         chat_messages: list[ChatMessageSummary] = []
-        slot_options: list[SlotOption] = []
         if exception_row and exception_row.get("thread_id"):
             chat_messages = [
                 ChatMessageSummary.model_validate(row)
                 for row in self.repository.list_chat_messages(exception_row["thread_id"])
             ]
-            if shipment_row and shipment_row.get("destination_facility_id"):
+
+        # Dock slot booking must be available as soon as a shipment is
+        # assigned, not only after the driver reports a delay -- this used
+        # to live inside the exception-only branch above, so a driver with
+        # no active exception always saw an empty slot board on the WMS-fed
+        # dock cards regardless of what was actually open. Falls back
+        # through declared ETA -> driver-updated ETA -> the shipment's
+        # original planned ETA, so a freshly assigned shipment (no exception,
+        # no driver-declared update yet) still gets a sensible window instead
+        # of defaulting to "now".
+        slot_options: list[SlotOption] = []
+        if shipment_row and shipment_row.get("destination_facility_id"):
+            try:
                 slot_options = self._feasible_slots(
-                    facility_id=shipment_row["destination_facility_id"],
-                    vehicle_row=vehicle_row,
                     shipment_row=shipment_row,
-                    after=exception_row.get("declared_eta_ts") or shipment_row.get("latest_eta_ts"),
-                    max_leave_at=exception_row.get("latest_acceptable_ts"),
+                    after=(
+                        (exception_row or {}).get("declared_eta_ts")
+                        or shipment_row.get("latest_eta_ts")
+                        or shipment_row.get("original_eta_ts")
+                    ),
+                    max_leave_at=(exception_row or {}).get("latest_acceptable_ts"),
+                )
+            except Exception:  # noqa: BLE001 - deliberate broad fallback, see comment below
+                # _build_snapshot is on the critical path for the /snapshot
+                # endpoint, every chat turn (including the LLM path's
+                # broad-except fallback to the regex handler below), and
+                # hold/confirm -- a dock-feasibility failure (bad slot data,
+                # a transient Supabase hiccup, an unexpected data shape,
+                # etc.) must degrade to "no slots shown" rather than take
+                # down chat/snapshot/check-in entirely. Deliberately catches
+                # Exception, not just DriverChatError -- a raw KeyError/
+                # TypeError from malformed row data would otherwise still
+                # propagate and break the whole snapshot. Logged so it's
+                # never silently swallowed.
+                import logging
+
+                logging.getLogger(__name__).exception(
+                    "driver_chat_eta: failed to compute feasible slots for shipment %s; showing none.",
+                    shipment_row.get("shipment_id"),
                 )
 
         return DriverSnapshot(
@@ -351,7 +437,6 @@ class DriverChatService:
             }
         )
 
-        vehicle_row = self.repository.get_vehicle(shipment_row["vehicle_id"]) if shipment_row.get("vehicle_id") else None
         facility_row = (
             self.repository.get_facility(shipment_row["destination_facility_id"])
             if shipment_row.get("destination_facility_id")
@@ -361,8 +446,6 @@ class DriverChatService:
         options: list[SlotOption] = []
         if shipment_row.get("destination_facility_id"):
             options = self._feasible_slots(
-                facility_id=shipment_row["destination_facility_id"],
-                vehicle_row=vehicle_row,
                 shipment_row=shipment_row,
                 after=declared_eta.isoformat(),
                 max_leave_at=max_leave_dt.isoformat() if max_leave_dt else None,
@@ -433,67 +516,52 @@ class DriverChatService:
     def _feasible_slots(
         self,
         *,
-        facility_id: str,
-        vehicle_row: dict | None,
         shipment_row: dict,
         after: str | datetime | None,
         max_leave_at: str | datetime | None = None,
     ) -> list[SlotOption]:
+        """Feasible dock slots for a driver-chat turn.
+
+        Base compatibility -- dock type, refrigeration, weight capacity, and
+        current availability_status (AVAILABLE/HELD/OCCUPIED/BLOCKED/CLOSED)
+        -- comes from DockSchedulerRepository.compatible_slots(), the exact
+        same computation WMS staff see on the WMS dock board. This method
+        only layers the driver-chat-specific ETA window and must-leave-by
+        constraints on top -- those aren't WMS concerns, so they stay here
+        rather than in dock_scheduler.
+        """
         after_dt = _parse_dt(after) or datetime.utcnow()
         max_leave_dt = _parse_dt(max_leave_at)
+        shipment_id = shipment_row["shipment_id"]
 
-        docks = {row["dock_id"]: row for row in self.repository.list_docks(facility_id)}
-        slots = self.repository.list_open_slots(facility_id)
-        holds = self.repository.list_active_holds_for_facility_slots([s["slot_id"] for s in slots])
-        now = datetime.utcnow()
-        active_holds_by_slot: dict[str, dict] = {}
-        for hold in holds:
-            expires_at = _parse_dt(hold.get("expires_at"))
-            if expires_at is not None and expires_at < now:
-                continue  # expired hold -- treat the slot as free
-            active_holds_by_slot[hold["slot_id"]] = hold
-
-        required_dock_type = shipment_row.get("required_dock_type") or "ANY"
-        needs_refrigeration = bool(shipment_row.get("temperature_control_required"))
-        vehicle_capacity = (vehicle_row or {}).get("capacity_kg")
+        try:
+            rows = self.dock_scheduler.repository.compatible_slots(shipment_id)
+        except DockSchedulerError as exc:
+            raise PersistenceError(str(exc)) from exc
 
         options: list[SlotOption] = []
-        for slot in slots:
-            dock = docks.get(slot.get("dock_id"))
-            if dock is None:
-                continue
-
-            dock_type_ok = required_dock_type == "ANY" or dock.get("dock_type") == required_dock_type
-            temp_ok = not needs_refrigeration or bool(dock.get("supports_refrigerated"))
-            weight_ok = (
-                vehicle_capacity is None
-                or dock.get("max_vehicle_weight_kg") is None
-                or dock["max_vehicle_weight_kg"] >= vehicle_capacity
-            )
-
-            start = _parse_dt(slot.get("slot_start_ts"))
-            end = _parse_dt(slot.get("slot_end_ts"))
+        for row in rows:
+            start = _parse_dt(row.get("slot_start_ts"))
+            end = _parse_dt(row.get("slot_end_ts"))
             if start is None or end is None:
                 continue
 
             is_after_eta = start >= after_dt - timedelta(minutes=15)
             within_leave_constraint = max_leave_dt is None or end <= max_leave_dt
+            availability = row.get("availability_status")
+            held_by_me = availability == "HELD" and row.get("held_shipment_id") == shipment_id
+            booked_by_me = availability == "OCCUPIED" and row.get("shipment_id") == shipment_id
+            bookable = availability == "AVAILABLE" or held_by_me
 
-            hold = active_holds_by_slot.get(slot["slot_id"])
-            held_by_me = hold is not None and hold.get("shipment_id") == shipment_row.get("shipment_id")
-            held_by_other = hold is not None and not held_by_me
-
-            is_compatible = bool(
-                dock_type_ok and temp_ok and weight_ok and is_after_eta and within_leave_constraint and not held_by_other
-            )
-            if held_by_other:
+            is_compatible = bool(bookable and is_after_eta and within_leave_constraint)
+            if booked_by_me:
+                reason = "Your confirmed dock appointment"
+            elif availability == "OCCUPIED":
+                reason = "Already booked by another shipment"
+            elif availability == "HELD" and not held_by_me:
                 reason = "Currently held by another shipment"
-            elif not dock_type_ok:
-                reason = "Dock type does not match this shipment's requirement"
-            elif not temp_ok:
-                reason = "Dock does not support temperature-controlled freight"
-            elif not weight_ok:
-                reason = "Dock weight limit is below this vehicle's capacity"
+            elif availability in {"BLOCKED", "CLOSED"}:
+                reason = "Slot is not open for booking"
             elif not is_after_eta:
                 reason = "Starts before the declared ETA"
             elif not within_leave_constraint:
@@ -503,20 +571,29 @@ class DriverChatService:
 
             options.append(
                 SlotOption(
-                    slot_id=slot["slot_id"],
-                    dock_id=slot["dock_id"],
-                    dock_code=dock.get("dock_code"),
+                    slot_id=row["slot_id"],
+                    dock_id=row["dock_id"],
+                    dock_code=row.get("dock_code"),
                     start_time=start,
                     end_time=end,
                     is_compatible=is_compatible,
                     compatibility_reason=reason,
                     estimated_wait_minutes=max(0, int((start - after_dt).total_seconds() // 60)),
                     is_held=held_by_me,
+                    is_booked_by_me=booked_by_me,
                 )
             )
 
+        # No cap here -- this list backs DriverSnapshot.slot_options, which
+        # the DockSlotBoard UI renders grouped per-dock (mirroring the WMS
+        # dock board, which also shows every slot). A global top-N cap used
+        # to live here and silently truncated the combined list across ALL
+        # docks to 5 total, which is why some docks appeared to have no
+        # slots at all even though real ones existed. LLM-facing call sites
+        # that actually want a short list (report_exception's tool result,
+        # list_feasible_dock_slots) slice this themselves.
         options.sort(key=lambda opt: (not opt.is_compatible, opt.start_time))
-        return options[:5]
+        return options
 
     # -- structured entry points for the LLM tool-calling agent -------------
     #
@@ -536,16 +613,11 @@ class DriverChatService:
         if not shipment_row.get("destination_facility_id"):
             return []
 
-        vehicle_row = (
-            self.repository.get_vehicle(shipment_row["vehicle_id"]) if shipment_row.get("vehicle_id") else None
-        )
         exception_row = self.repository.get_active_exception_for_driver(principal.user_id)
         after = (exception_row or {}).get("declared_eta_ts") or shipment_row.get("latest_eta_ts")
         max_leave_at = (exception_row or {}).get("latest_acceptable_ts")
 
         return self._feasible_slots(
-            facility_id=shipment_row["destination_facility_id"],
-            vehicle_row=vehicle_row,
             shipment_row=shipment_row,
             after=after,
             max_leave_at=max_leave_at,
@@ -641,9 +713,6 @@ class DriverChatService:
                 update_payload["latest_acceptable_ts"] = max_leave_dt.isoformat()
             exception_row = self.repository.update_exception(exception_row["exception_id"], update_payload) or exception_row
 
-        vehicle_row = (
-            self.repository.get_vehicle(shipment_row["vehicle_id"]) if shipment_row.get("vehicle_id") else None
-        )
         facility_row = (
             self.repository.get_facility(shipment_row["destination_facility_id"])
             if shipment_row.get("destination_facility_id")
@@ -653,8 +722,6 @@ class DriverChatService:
         options: list[SlotOption] = []
         if shipment_row.get("destination_facility_id"):
             options = self._feasible_slots(
-                facility_id=shipment_row["destination_facility_id"],
-                vehicle_row=vehicle_row,
                 shipment_row=shipment_row,
                 after=declared_eta.isoformat(),
                 max_leave_at=max_leave_dt.isoformat() if max_leave_dt else None,
@@ -674,6 +741,11 @@ class DriverChatService:
             "declared_eta": declared_eta.isoformat(),
             "must_leave_by": max_leave_dt.isoformat() if max_leave_dt else None,
             "facility_name": facility_row.get("facility_name") if facility_row else None,
+            # Capped here (not in _feasible_slots itself) -- this dict is fed
+            # straight into the LLM's context as a tool result, so it needs a
+            # short, best-first list; the driver-facing snapshot/DockSlotBoard
+            # wants the full set instead. `options` is already sorted
+            # compatible-first, so slicing keeps the best candidates.
             "feasible_slots": [
                 {
                     "slot_id": opt.slot_id,
@@ -686,7 +758,7 @@ class DriverChatService:
                     "estimated_wait_minutes": opt.estimated_wait_minutes,
                     "is_held": opt.is_held,
                 }
-                for opt in options
+                for opt in options[:LLM_SLOT_SUMMARY_LIMIT]
             ],
         }
 
@@ -722,41 +794,39 @@ class DriverChatService:
     # -- slot hold / confirm ------------------------------------------------
 
     def hold_slot(self, principal: DriverPrincipal, slot_id: str) -> SlotActionResponse:
+        """Place a short hold on a dock slot via the shared WMS scheduling
+        engine (DockSchedulerService) -- the same engine WMS staff use, so
+        the chatbot and the WMS dock board never disagree about what's held
+        or available. As a side effect this now also re-validates dock type/
+        refrigeration/weight compatibility on hold (dock_scheduler.hold_slot
+        checks the slot is still in compatible_slots), which the old
+        chatbot-only implementation never re-checked at hold time.
+        """
         driver = self.get_my_profile(principal)
         shipment_row = self.repository.get_active_shipment_for_driver(principal.user_id)
         if shipment_row is None:
             raise ShipmentNotFoundError("No active shipment is assigned to you.")
+        shipment_id = shipment_row["shipment_id"]
 
         slot_row = self.repository.get_slot(slot_id)
         if slot_row is None:
             raise SlotNotFoundError(f"Slot {slot_id} was not found.")
-        if slot_row.get("slot_status") != "OPEN":
-            raise SlotConflictError("This slot is not open for booking.")
 
-        now = datetime.utcnow()
-        existing_holds = self.repository.list_active_holds_for_facility_slots([slot_id])
-        for hold in existing_holds:
-            expires_at = _parse_dt(hold.get("expires_at"))
-            still_active = expires_at is None or expires_at >= now
-            if still_active and hold.get("shipment_id") != shipment_row["shipment_id"]:
-                raise SlotConflictError("This slot is already held by another driver.")
-
-        # Only one active hold per shipment -- release whatever it held before.
-        previous_hold = self.repository.get_active_hold_for_shipment(shipment_row["shipment_id"])
+        # Only one active hold per shipment -- release whatever it held
+        # elsewhere before placing the new one, same guarantee as before.
+        previous_hold = self.repository.get_active_hold_for_shipment(shipment_id)
         if previous_hold and previous_hold.get("slot_id") != slot_id:
-            self.repository.update_hold(previous_hold["hold_id"], {"hold_status": "RELEASED", "released_at": _now_iso()})
+            self.dock_scheduler.cancel_hold(previous_hold["hold_id"])
 
         if not (previous_hold and previous_hold.get("slot_id") == slot_id):
-            self.repository.create_hold(
-                {
-                    "hold_id": _new_id("HOLD"),
-                    "slot_id": slot_id,
-                    "shipment_id": shipment_row["shipment_id"],
-                    "hold_status": "HELD",
-                    "held_at": _now_iso(),
-                    "expires_at": (now + timedelta(minutes=HOLD_MINUTES)).isoformat(),
-                }
-            )
+            try:
+                self.dock_scheduler.hold_slot(shipment_id, slot_id, ttl_minutes=HOLD_MINUTES)
+            except (DockInvalidBookingError, DockSlotUnavailableError) as exc:
+                raise SlotConflictError(str(exc)) from exc
+            except DockUnknownShipmentError as exc:
+                raise ShipmentNotFoundError(str(exc)) from exc
+            except DockSchedulerError as exc:
+                raise PersistenceError(str(exc)) from exc
 
         exception_row = self.repository.get_active_exception_for_driver(principal.user_id)
         if exception_row:
@@ -770,44 +840,35 @@ class DriverChatService:
         )
 
     def confirm_slot(self, principal: DriverPrincipal, slot_id: str) -> ConfirmSlotResponse:
+        """Confirm a held slot via the shared WMS scheduling engine."""
         driver = self.get_my_profile(principal)
         shipment_row = self.repository.get_active_shipment_for_driver(principal.user_id)
         if shipment_row is None:
             raise ShipmentNotFoundError("No active shipment is assigned to you.")
+        shipment_id = shipment_row["shipment_id"]
 
-        hold = self.repository.get_active_hold_for_shipment(shipment_row["shipment_id"])
+        hold = self.repository.get_active_hold_for_shipment(shipment_id)
         if hold is None or hold.get("slot_id") != slot_id:
             raise SlotConflictError("This slot is not currently held by you, so it cannot be confirmed.")
         expires_at = _parse_dt(hold.get("expires_at"))
         if expires_at is not None and expires_at < datetime.utcnow():
             raise SlotConflictError("Your hold on this slot has expired -- hold it again before confirming.")
 
-        self.repository.update_hold(hold["hold_id"], {"hold_status": "CONVERTED", "released_at": _now_iso()})
+        try:
+            self.dock_scheduler.confirm_booking(shipment_id, slot_id, accepted=True)
+        except (DockInvalidBookingError, DockSlotUnavailableError) as exc:
+            raise SlotConflictError(str(exc)) from exc
+        except DockUnknownShipmentError as exc:
+            raise ShipmentNotFoundError(str(exc)) from exc
+        except DockSchedulerError as exc:
+            raise PersistenceError(str(exc)) from exc
 
-        old_appt = self.repository.get_current_appointment_for_shipment(shipment_row["shipment_id"])
-        if old_appt:
-            self.repository.update_appointment(
-                old_appt["appointment_id"],
-                {
-                    "is_current": 0,
-                    "appointment_status": "CANCELLED",
-                    "cancelled_at": _now_iso(),
-                    "cancellation_reason": "Rebooked via driver chat",
-                },
-            )
-
-        appointment_row = self.repository.create_appointment(
-            {
-                "appointment_id": _new_id("APT"),
-                "shipment_id": shipment_row["shipment_id"],
-                "slot_id": slot_id,
-                "appointment_status": "CONFIRMED",
-                "booking_source": "DRIVER_CHAT",
-                "is_current": 1,
-                "booked_at": _now_iso(),
-                "confirmed_at": _now_iso(),
-            }
-        )
+        # dock_scheduler's version joins in dock_code/slot_start_ts/slot_end_ts
+        # so the immediate confirm response can show a real "confirmed at
+        # Dock D1, 11:00-12:00" message, not just an opaque slot id.
+        appointment_row = self.dock_scheduler.repository.current_appointment(shipment_id)
+        if appointment_row is None:
+            raise PersistenceError("Booking succeeded but the confirmed appointment could not be re-read.")
 
         exception_row = self.repository.get_active_exception_for_driver(principal.user_id)
         if exception_row:

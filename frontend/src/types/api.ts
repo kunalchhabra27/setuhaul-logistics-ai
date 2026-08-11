@@ -54,23 +54,27 @@ export type ShipmentSummary = {
 };
 
 export type ShipmentCreateInput = {
+  // Required fields here mirror the real Supabase shipments table's NOT
+  // NULL columns -- omitting any of these used to reach Postgres and fail
+  // with an opaque "database operation failed" error instead of being
+  // caught by the form itself.
   order_reference: string;
   carrier_id: string;
   driver_id: string;
   vehicle_id: string;
   origin_name: string;
-  origin_city?: string;
+  origin_city: string;
   destination_facility_id: string;
-  customer_name?: string;
-  product_category?: string;
-  load_weight_kg?: number;
+  customer_name: string;
+  product_category: string;
+  load_weight_kg: number;
+  planned_departure_ts: string;
+  original_eta_ts: string;
+  expected_unload_min: number;
   required_dock_type?: string;
   temperature_control_required?: boolean;
   priority_code?: string;
-  planned_departure_ts?: string;
-  original_eta_ts?: string;
   latest_eta_ts?: string;
-  expected_unload_min?: number;
 };
 
 export type TmsDriver = {
@@ -100,6 +104,22 @@ export type TmsFacility = {
   state?: string | null;
 };
 
+export type FacilityStaffAssignment = {
+  staff_user_id: string;
+  facility_id: string;
+  facility_name?: string | null;
+};
+
+export type OriginSummary = {
+  origin_name: string;
+  origin_city?: string | null;
+};
+
+export type ShipmentReferenceData = {
+  origins: OriginSummary[];
+  product_categories: string[];
+};
+
 export type DockSlot = {
   slot_id: string;
   dock_code: string;
@@ -108,6 +128,31 @@ export type DockSlot = {
   end: string;
   availability_status: "AVAILABLE" | "HELD" | "OCCUPIED" | "BLOCKED" | "CLOSED" | string;
   occupant_shipment_id?: string | null;
+  occupant_driver_name?: string | null;
+};
+
+export type DockTraceSummary = {
+  appointment_id?: string | null;
+  appointment_status?: string | null;
+  dock_code?: string | null;
+  slot_start_ts?: string | null;
+  slot_end_ts?: string | null;
+};
+
+export type CheckinTraceSummary = {
+  arrival_state?: string | null;
+  queue_state?: string | null;
+  gate_in_ts?: string | null;
+  dock_in_ts?: string | null;
+  unload_end_ts?: string | null;
+};
+
+export type ShipmentContext = {
+  driver: { driver_id: string; driver_name?: string | null; carrier_id?: string | null; driver_status?: string | null };
+  vehicle: { vehicle_id: string; registration_number?: string | null; vehicle_type_code?: string | null };
+  shipment: ShipmentSummary;
+  dock?: DockTraceSummary | null;
+  checkin?: CheckinTraceSummary | null;
 };
 
 export type DockSuggestion = {

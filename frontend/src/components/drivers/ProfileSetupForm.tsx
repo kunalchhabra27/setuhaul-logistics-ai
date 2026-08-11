@@ -1,20 +1,49 @@
-import { useState, type FormEvent } from "react";
-import { User, Phone, CreditCard, Building2, MapPin, CheckCircle2, AlertCircle } from "lucide-react";
-import { completeDriverProfile } from "../../services/driverChatApi";
-import type { DriverProfile } from "../../types/driverChat";
+import { useEffect, useState, type FormEvent } from "react";
+import { User, Phone, CreditCard, Building2, MapPin, CheckCircle2, AlertCircle, AlertTriangle } from "lucide-react";
+import { completeDriverProfile, listDriverCarriers, listDriverHomeBaseCities } from "../../services/driverChatApi";
+import type { DriverCarrierSummary, DriverProfile } from "../../types/driverChat";
 
 export default function ProfileSetupForm({ color, onComplete }: { color: string; onComplete: (driver: DriverProfile) => void }) {
   const [driverName, setDriverName] = useState("");
   const [phone, setPhone] = useState("");
   const [licenceNumber, setLicenceNumber] = useState("");
-  const [carrierName, setCarrierName] = useState("");
+  const [carrierId, setCarrierId] = useState("");
   const [homeBaseCity, setHomeBaseCity] = useState("");
+  const [carriers, setCarriers] = useState<DriverCarrierSummary[]>([]);
+  const [carriersLoading, setCarriersLoading] = useState(true);
+  const [cities, setCities] = useState<string[]>([]);
+  const [citiesLoading, setCitiesLoading] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
 
+  useEffect(() => {
+    void (async () => {
+      try {
+        const list = await listDriverCarriers();
+        setCarriers(list);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to load carriers from Supabase.");
+      } finally {
+        setCarriersLoading(false);
+      }
+    })();
+    void (async () => {
+      try {
+        const list = await listDriverHomeBaseCities();
+        setCities(list);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to load cities from Supabase.");
+      } finally {
+        setCitiesLoading(false);
+      }
+    })();
+  }, []);
+
+  const selectedCarrier = carriers.find((c) => c.carrier_id === carrierId);
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!driverName.trim() || !phone.trim() || !licenceNumber.trim() || !carrierName.trim() || !homeBaseCity.trim()) {
+    if (!driverName.trim() || !phone.trim() || !licenceNumber.trim() || !carrierId || !homeBaseCity.trim()) {
       setError("All fields are mandatory to register your driver profile.");
       return;
     }
@@ -25,7 +54,7 @@ export default function ProfileSetupForm({ color, onComplete }: { color: string;
         driver_name: driverName.trim(),
         phone: phone.trim(),
         licence_number: licenceNumber.trim(),
-        carrier_name: carrierName.trim(),
+        carrier_id: carrierId,
         home_base_city: homeBaseCity.trim(),
       });
       onComplete(driver);
@@ -63,10 +92,49 @@ export default function ProfileSetupForm({ color, onComplete }: { color: string;
           </Field>
         </div>
         <Field icon={Building2} label="Carrier / fleet">
-          <input value={carrierName} onChange={(e) => setCarrierName(e.target.value)} placeholder="Delhi Express Logistics" className="peer w-full bg-transparent text-sm font-medium text-ink outline-none placeholder:text-mist" />
+          <select
+            value={carrierId}
+            onChange={(e) => setCarrierId(e.target.value)}
+            disabled={carriersLoading}
+            className="peer w-full bg-transparent text-sm font-medium text-ink outline-none disabled:opacity-60"
+          >
+            <option value="" disabled>
+              {carriersLoading ? "Loading carriers..." : "Select your carrier"}
+            </option>
+            {carriers.map((carrier) => (
+              <option key={carrier.carrier_id} value={carrier.carrier_id}>
+                {carrier.carrier_name ?? carrier.carrier_id}
+                {carrier.has_active_vehicle ? "" : " (no active vehicle yet)"}
+              </option>
+            ))}
+          </select>
         </Field>
+        {selectedCarrier && !selectedCarrier.has_active_vehicle && (
+          <div className="flex items-start gap-2 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>
+              {selectedCarrier.carrier_name ?? selectedCarrier.carrier_id} has no active vehicle on file yet. You can
+              still register, but TMS won't be able to assign you a shipment until a vehicle is added for this
+              carrier.
+            </span>
+          </div>
+        )}
         <Field icon={MapPin} label="Home base city">
-          <input value={homeBaseCity} onChange={(e) => setHomeBaseCity(e.target.value)} placeholder="Jaipur" className="peer w-full bg-transparent text-sm font-medium text-ink outline-none placeholder:text-mist" />
+          <select
+            value={homeBaseCity}
+            onChange={(e) => setHomeBaseCity(e.target.value)}
+            disabled={citiesLoading}
+            className="peer w-full bg-transparent text-sm font-medium text-ink outline-none disabled:opacity-60"
+          >
+            <option value="" disabled>
+              {citiesLoading ? "Loading cities..." : cities.length === 0 ? "No cities on file yet" : "Select your home base city"}
+            </option>
+            {cities.map((city) => (
+              <option key={city} value={city}>
+                {city}
+              </option>
+            ))}
+          </select>
         </Field>
 
         <button

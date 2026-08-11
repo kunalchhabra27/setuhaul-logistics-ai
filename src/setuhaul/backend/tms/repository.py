@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Iterable, TYPE_CHECKING
 
 from postgrest.exceptions import APIError
@@ -28,6 +29,7 @@ SHIPMENT_COLUMNS = (
 # of the base column list means shipment listing keeps working before that migration runs.
 ARCHIVE_COLUMN = "archived_flag"
 FACILITY_COLUMNS = "facility_id,facility_name,city,state"
+STAFF_FACILITY_COLUMNS = "staff_user_id,facility_id,created_at,updated_at"
 
 
 class TMSRepository:
@@ -43,7 +45,12 @@ class TMSRepository:
         message = str(getattr(exc, "message", "Database operation failed."))
         if code == "23505":
             raise ConflictError("A record with the same unique identifier already exists.") from exc
-        if code in {"23503", "23514", "22P02"}:
+        if code in {"23502", "23503", "23514", "22P02"}:
+            # 23502 = not_null_violation, 23503 = foreign_key_violation,
+            # 23514 = check_violation, 22P02 = invalid_text_representation --
+            # all of these mean the request itself was malformed/incomplete
+            # rather than a genuine server failure, so surface Postgres's own
+            # message instead of the generic 500-ish PersistenceError below.
             raise BusinessValidationError(message) from exc
         raise PersistenceError("The TMS database operation failed.") from exc
 
@@ -80,6 +87,7 @@ class TMSRepository:
             self._raise_persistence(exc)
 
     def create_driver(self, payload: dict[str, Any]) -> dict[str, Any]:
+        payload = {**payload, "driver_id": payload.get("driver_id") or self._next_sequential_id("drivers", "driver_id", "DRV", 3)}
         return self._create("drivers", payload)
 
     def update_driver(self, driver_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -121,6 +129,7 @@ class TMSRepository:
             self._raise_persistence(exc)
 
     def create_vehicle(self, payload: dict[str, Any]) -> dict[str, Any]:
+        payload = {**payload, "vehicle_id": payload.get("vehicle_id") or self._next_sequential_id("vehicles", "vehicle_id", "VEH", 3)}
         return self._create("vehicles", payload)
 
     def update_vehicle(self, vehicle_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -179,8 +188,83 @@ class TMSRepository:
     def create_shipment(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._create("shipments", payload)
 
+    def generate_shipment_id(self) -> str:
+        """Next sequential shipment id, continuing the seed data's SHP1001-style
+        numbering (e.g. highest existing SHP#### + 1) instead of a random suffix."""
+        return self._next_sequential_id("shipments", "shipment_id", "SHP", 4)
+
     def update_shipment(self, shipment_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         return self._update("shipments", "shipment_id", shipment_id, payload)
+
+    # -- WMS / check-in trace (read-only; dock_scheduler / checkin_portal own
+    #    these tables) -----------------------------------------------------
+    #
+    # TMS has no need to mutate appointments, slots, docks, or check-ins --
+    # it only reads them, through the same caller-scoped client, to let a
+    # dispatcher trace a shipment's dock booking and arrival status without
+    # switching portals. Same pattern driver_chat_eta already uses to read
+    # across bounded contexts: direct table reads, no cross-service HTTP
+    # calls, RLS enforces what the caller is actually allowed to see.
+
+    def current_appointment_for_shipment(self, shipment_id: str) -> dict[str, Any] | None:
+        try:
+            rows = self._data(
+                self.backend.table("appointments")
+                .select("appointment_id,shipment_id,slot_id,appointment_status")
+                .eq("shipment_id", shipment_id)
+                .eq("is_current", 1)
+                .limit(1)
+                .execute()
+            )
+        except APIError as exc:
+            self._raise_persistence(exc)
+        if not rows:
+            return None
+        appointment = rows[0]
+        slot_id = appointment.get("slot_id")
+        if not slot_id:
+            return {**appointment, "slot_start_ts": None, "slot_end_ts": None, "dock_code": None}
+        try:
+            slot_rows = self._data(
+                self.backend.table("appointment_slots")
+                .select("slot_id,dock_id,slot_start_ts,slot_end_ts")
+                .eq("slot_id", slot_id)
+                .limit(1)
+                .execute()
+            )
+        except APIError as exc:
+            self._raise_persistence(exc)
+        if not slot_rows:
+            return {**appointment, "slot_start_ts": None, "slot_end_ts": None, "dock_code": None}
+        slot = slot_rows[0]
+        dock_code = None
+        if slot.get("dock_id"):
+            try:
+                dock_rows = self._data(
+                    self.backend.table("docks").select("dock_code").eq("dock_id", slot["dock_id"]).limit(1).execute()
+                )
+            except APIError as exc:
+                self._raise_persistence(exc)
+            dock_code = dock_rows[0]["dock_code"] if dock_rows else None
+        return {
+            **appointment,
+            "slot_start_ts": slot.get("slot_start_ts"),
+            "slot_end_ts": slot.get("slot_end_ts"),
+            "dock_code": dock_code,
+        }
+
+    def checkin_for_shipment(self, shipment_id: str) -> dict[str, Any] | None:
+        try:
+            rows = self._data(
+                self.backend.table("facility_checkins")
+                .select("shipment_id,arrival_state,queue_state,gate_in_ts,dock_in_ts,unload_end_ts")
+                .eq("shipment_id", shipment_id)
+                .limit(1)
+                .execute()
+            )
+        except APIError as exc:
+            self._raise_persistence(exc)
+        return rows[0] if rows else None
 
     # -- facilities -------------------------------------------------------
 
@@ -196,7 +280,111 @@ class TMSRepository:
         except APIError as exc:
             self._raise_persistence(exc)
 
+    def list_shipment_reference_data(self) -> dict[str, list[Any]]:
+        """Distinct, already-used values for the open-ended (non-enum) text
+        columns on shipments -- origin_name/origin_city/product_category have
+        no lookup table and no CHECK constraint in the schema, so "real data
+        from Supabase" means whatever has actually been typed into existing
+        rows, de-duplicated here (PostgREST has no SELECT DISTINCT). Powers
+        the shipment-creation dropdowns instead of letting a dispatcher type
+        a fresh, unvalidated string for a value that should be one of a
+        small recurring set.
+        """
+        try:
+            rows = self._data(
+                self.backend.table("shipments").select("origin_name,origin_city,product_category").execute()
+            )
+        except APIError as exc:
+            self._raise_persistence(exc)
+        seen_origins: set[tuple[str, str]] = set()
+        origins: list[dict[str, str]] = []
+        categories: set[str] = set()
+        for row in rows:
+            name, city = row.get("origin_name"), row.get("origin_city")
+            if name and (name, city) not in seen_origins:
+                seen_origins.add((name, city))
+                origins.append({"origin_name": name, "origin_city": city})
+            category = row.get("product_category")
+            if category:
+                categories.add(category)
+        origins.sort(key=lambda o: o["origin_name"])
+        return {"origins": origins, "product_categories": sorted(categories)}
+
+    def get_facility(self, facility_id: str) -> dict[str, Any] | None:
+        try:
+            rows = self._data(
+                self.backend.table("facilities").select(FACILITY_COLUMNS).eq("facility_id", facility_id).limit(1).execute()
+            )
+        except APIError as exc:
+            self._raise_persistence(exc)
+        return rows[0] if rows else None
+
+    # -- staff facility assignments (WMS/Check-in facility scoping) -------
+    #
+    # One row per Supabase Auth staff user, tracking which single warehouse
+    # facility they registered for. staff_user_id is always the caller's own
+    # verified auth id (see TMSService.register_staff_facility) -- never a
+    # client-supplied value -- so this table (and the facility filter it
+    # drives on shipment queries) can't be used to read or claim another
+    # facility's data.
+
+    def get_staff_facility(self, staff_user_id: str) -> dict[str, Any] | None:
+        try:
+            rows = self._data(
+                self.backend.table("staff_facility_assignments")
+                .select(STAFF_FACILITY_COLUMNS)
+                .eq("staff_user_id", staff_user_id)
+                .limit(1)
+                .execute()
+            )
+        except APIError as exc:
+            self._raise_persistence(exc)
+        return rows[0] if rows else None
+
+    def register_staff_facility(self, staff_user_id: str, facility_id: str) -> dict[str, Any]:
+        payload = {"staff_user_id": staff_user_id, "facility_id": facility_id}
+        try:
+            rows = self._data(
+                self.backend.table("staff_facility_assignments")
+                .upsert(payload, on_conflict="staff_user_id")
+                .execute()
+            )
+        except APIError as exc:
+            self._raise_persistence(exc)
+        if not rows:
+            raise PersistenceError("The staff facility assignment upsert returned no record.")
+        return rows[0]
+
     # -- shared helpers ---------------------------------------------------
+
+    def _next_sequential_id(self, table: str, id_column: str, prefix: str, default_width: int) -> str:
+        """Generate the next sequential id like "PREFIX0001", continuing from
+        whatever ids already exist in the table (e.g. DRV001, DRV002, ...
+        -> DRV003) rather than a random suffix -- every id column in this
+        schema is plain text with no DB-side default/sequence, so the app
+        must always compute one before insert.
+
+        Read-then-insert with no DB-side lock: a genuine race under
+        concurrent creates could hand out the same id twice, which would
+        then fail on the table's primary-key uniqueness constraint. Same
+        caveat already accepted elsewhere in this codebase (see
+        dock_scheduler's hold creation) -- acceptable for this app's scale.
+        """
+        try:
+            rows = self._data(self.backend.table(table).select(id_column).execute())
+        except APIError as exc:
+            self._raise_persistence(exc)
+        pattern = re.compile(rf"^{re.escape(prefix)}(\d+)$")
+        max_n = 0
+        width = default_width
+        for row in rows:
+            match = pattern.match(str(row.get(id_column) or ""))
+            if not match:
+                continue
+            digits = match.group(1)
+            max_n = max(max_n, int(digits))
+            width = max(width, len(digits))
+        return f"{prefix}{str(max_n + 1).zfill(width)}"
 
     @staticmethod
     def _coerce_booleans(payload: dict[str, Any]) -> dict[str, Any]:

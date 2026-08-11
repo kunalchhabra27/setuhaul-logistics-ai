@@ -1,5 +1,5 @@
 import { createApiClient } from "./api";
-import type { DockSlot, DockSuggestion, ShipmentSummary } from "../types/api";
+import type { DockSlot, DockSuggestion, FacilityStaffAssignment, ShipmentSummary, TmsFacility } from "../types/api";
 
 const api = createApiClient("wms");
 
@@ -36,4 +36,29 @@ export function confirmBooking(input: { shipment_id: string; slot_id: string; ac
 // instead of a hardcoded shipment id, without depending on a TMS login.
 export function listShipmentsForScheduling() {
   return api.request<ShipmentSummary[]>("/tms/shipments");
+}
+
+// -- facility-scoped registration (see PortalWorkspace's WMS facility gate) --
+
+export function listFacilitiesForRegistration() {
+  return api.request<TmsFacility[]>("/tms/facilities");
+}
+
+export function getMyWmsFacility() {
+  return api.request<FacilityStaffAssignment>("/tms/facility-staff/me");
+}
+
+export function registerMyWmsFacility(facilityId: string) {
+  return api.request<FacilityStaffAssignment>("/tms/facility-staff/register", {
+    method: "POST",
+    body: JSON.stringify({ facility_id: facilityId }),
+  });
+}
+
+// Shipments scoped to ONLY the WMS staff member's own registered facility --
+// the facility filter is resolved server-side from staff_facility_assignments,
+// never a client-supplied parameter, so staff at one facility cannot see
+// another facility's shipments here.
+export function listShipmentsForMyFacility() {
+  return api.request<ShipmentSummary[]>("/tms/facility-staff/shipments");
 }

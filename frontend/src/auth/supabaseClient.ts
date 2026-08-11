@@ -80,10 +80,42 @@ function listenersFor(serviceId: string) {
   return set;
 }
 
+// Access tokens are short-lived (Supabase default: 1 hour). Previously
+// nothing ever used the stored refresh_token, so once a token expired every
+// authenticated request -- including chat -- failed until the driver
+// manually signed out and back in ("chatbot not responding" turned out to
+// be an expired session, not a chat bug). scheduleRefresh proactively
+// refreshes shortly before expiry; api.ts additionally retries once on a
+// 401 as a fallback for when a background tab's timer got throttled.
+const refreshTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function scheduleRefresh(serviceId: string, session: SupabaseSession | null) {
+  const existing = refreshTimers.get(serviceId);
+  if (existing) clearTimeout(existing);
+  refreshTimers.delete(serviceId);
+  if (!session) return;
+  const refreshInMs = Math.max((session.expires_in - 60) * 1000, 5_000);
+  const timer = setTimeout(() => {
+    void supabase.auth.refreshSession(serviceId);
+  }, refreshInMs);
+  refreshTimers.set(serviceId, timer);
+}
+
 function emit(serviceId: string, event: "SIGNED_IN" | "SIGNED_OUT" | "TOKEN_REFRESHED" | "USER_UPDATED", session: SupabaseSession | null) {
   saveSession(serviceId, session);
+  if (event === "SIGNED_OUT") {
+    const existing = refreshTimers.get(serviceId);
+    if (existing) clearTimeout(existing);
+    refreshTimers.delete(serviceId);
+  } else if (session) {
+    scheduleRefresh(serviceId, session);
+  }
   listenersFor(serviceId).forEach((listener) => listener(event, session));
 }
+
+// Concurrent 401s (several in-flight requests at once) should share a single
+// refresh call rather than each spending the one-time-use refresh token.
+const refreshInFlight = new Map<string, Promise<{ data: { session: SupabaseSession | null }; error: Error | null }>>();
 
 export const supabase = {
   isConfigured,
@@ -123,7 +155,52 @@ export const supabase = {
       return { error: null };
     },
     async getSession(serviceId: string) {
-      return { data: { session: loadSession(serviceId) }, error: null };
+      const session = loadSession(serviceId);
+      // A page reload restores the session straight from localStorage
+      // without going through signIn/refreshSession, so it must schedule
+      // its own proactive refresh too -- otherwise a session loaded a few
+      // minutes before its natural expiry would never get renewed.
+      scheduleRefresh(serviceId, session);
+      return { data: { session }, error: null };
+    },
+    async refreshSession(serviceId: string) {
+      const inFlight = refreshInFlight.get(serviceId);
+      if (inFlight) return inFlight;
+
+      const promise = (async () => {
+        const current = loadSession(serviceId);
+        if (!current?.refresh_token) {
+          return { data: { session: null }, error: new Error("No refresh token available.") };
+        }
+        try {
+          const data = await request<{
+            access_token: string;
+            refresh_token: string;
+            expires_in: number;
+            token_type: string;
+            user: SupabaseUser;
+          }>("/auth/v1/token?grant_type=refresh_token", {
+            method: "POST",
+            body: JSON.stringify({ refresh_token: current.refresh_token }),
+          });
+          const session: SupabaseSession = { ...data };
+          emit(serviceId, "TOKEN_REFRESHED", session);
+          return { data: { session }, error: null };
+        } catch (err) {
+          // The refresh token itself is invalid/expired/revoked -- there's
+          // no way back without a fresh login, so clear the stale session
+          // rather than leaving a dead token in storage.
+          emit(serviceId, "SIGNED_OUT", null);
+          return { data: { session: null }, error: err instanceof Error ? err : new Error("Failed to refresh session.") };
+        }
+      })();
+
+      refreshInFlight.set(serviceId, promise);
+      try {
+        return await promise;
+      } finally {
+        refreshInFlight.delete(serviceId);
+      }
     },
     onAuthStateChange(serviceId: string, listener: AuthListener) {
       const set = listenersFor(serviceId);

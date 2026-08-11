@@ -18,9 +18,31 @@ from setuhaul.backend.checkin_portal.service import CheckInService
 
 
 def _service(extra_tables: dict | None = None) -> CheckInService:
-    tables = {"facility_checkins": []}
+    # SHP1006 exists (satisfies the shipment_exists check on gate_check_in)
+    # but has no driver_id by default -- tests that need a driver or a
+    # confirmed WMS appointment opt in via extra_tables/_confirmed_dock_tables.
+    tables = {"facility_checkins": [], "shipments": [{"shipment_id": "SHP1006"}]}
     tables.update(extra_tables or {})
     return CheckInService(CheckInRepository(FakeSupabaseClient(tables)))
+
+
+def _confirmed_dock_tables() -> dict:
+    """Gives SHP1006 a CONFIRMED WMS appointment/dock -- mark_docked now
+    requires this to exist before it will let staff dock a truck."""
+    return {
+        "shipments": [{"shipment_id": "SHP1006"}],
+        "appointments": [
+            {
+                "appointment_id": "APT-SHP1006",
+                "shipment_id": "SHP1006",
+                "slot_id": "SLOT-1",
+                "is_current": 1,
+                "appointment_status": "CONFIRMED",
+            }
+        ],
+        "appointment_slots": [{"slot_id": "SLOT-1", "dock_id": "DOCK-1"}],
+        "docks": [{"dock_id": "DOCK-1", "dock_code": "D1"}],
+    }
 
 
 def _gate_request(shipment_id: str = "SHP1006") -> GateCheckInRequest:
@@ -75,7 +97,7 @@ def test_dock_before_checkin() -> None:
 
 
 def test_dock_success() -> None:
-    service = _service()
+    service = _service(_confirmed_dock_tables())
     service.gate_check_in(_gate_request())
     service.update_queue(
         QueueUpdateRequest(shipment_id="SHP1006", queue_status=QueueStatus.YARD_QUEUE)
@@ -88,6 +110,20 @@ def test_dock_success() -> None:
     )
     assert record["arrival_status"] == "DOCKED"
     assert record["dock_in_at"] == "2026-08-08T11:00:00"
+    # actual_dock_id was auto-filled from the confirmed appointment's dock.
+    assert record["actual_dock_id"] == "DOCK-1"
+
+
+def test_dock_blocked_without_confirmed_wms_appointment() -> None:
+    service = _service()  # no appointments/slots/docks -- nothing confirmed
+    service.gate_check_in(_gate_request())
+    with pytest.raises(InvalidCheckInTransition, match="No confirmed WMS appointment"):
+        service.mark_docked(
+            DockInRequest(
+                shipment_id="SHP1006",
+                dock_in_at=datetime.fromisoformat("2026-08-08T11:00:00"),
+            )
+        )
 
 
 def test_complete_before_dock() -> None:
@@ -103,7 +139,7 @@ def test_complete_before_dock() -> None:
 
 
 def test_complete_success() -> None:
-    service = _service()
+    service = _service(_confirmed_dock_tables())
     service.gate_check_in(_gate_request())
     service.mark_docked(
         DockInRequest(
@@ -122,7 +158,7 @@ def test_complete_success() -> None:
 
 
 def test_completed_cannot_return_to_queue() -> None:
-    service = _service()
+    service = _service(_confirmed_dock_tables())
     service.gate_check_in(_gate_request())
     service.mark_docked(
         DockInRequest(
@@ -189,14 +225,20 @@ def test_gate_checkin_without_driver_skips_sms_silently(monkeypatch) -> None:
     calls = []
     monkeypatch.setattr(checkin_service_module, "send_sms", lambda *a, **k: calls.append((a, k)))
 
-    service = _service()  # no shipments/drivers tables -> no driver on file
+    service = _service()  # SHP1006 exists but has no driver_id -> no driver on file
     service.gate_check_in(_gate_request())
 
     assert calls == []
 
 
-def test_locked_for_rescheduling() -> None:
+def test_gate_checkin_rejects_unknown_shipment() -> None:
     service = _service()
+    with pytest.raises(InvalidCheckInTransition, match="Unknown shipment"):
+        service.gate_check_in(_gate_request(shipment_id="SHP-DOES-NOT-EXIST"))
+
+
+def test_locked_for_rescheduling() -> None:
+    service = _service(_confirmed_dock_tables())
     assert service.is_locked_for_rescheduling("SHP1006") is False
     service.gate_check_in(_gate_request())
     assert service.is_locked_for_rescheduling("SHP1006") is False

@@ -41,6 +41,12 @@ class ShipmentNotFoundError(ResourceNotFoundError):
     code = "SHIPMENT_NOT_FOUND"
 
 
+class FacilityAssignmentNotFoundError(ResourceNotFoundError):
+    """Raised when a WMS/Check-in staff account has no registered facility yet."""
+
+    code = "FACILITY_ASSIGNMENT_NOT_FOUND"
+
+
 class ConflictError(TMSError):
     status_code = 409
     code = "RESOURCE_CONFLICT"

@@ -156,24 +156,29 @@ class VehicleResponse(DBModel):
 
 
 class ShipmentCreate(APIModel):
+    # Required fields here mirror the real Supabase table's NOT NULL columns
+    # (verified against data/setuhaul_schema_and_seed.sql) -- these used to
+    # be optional on this model even though Postgres would reject a NULL for
+    # them, which meant a missing field surfaced as an opaque "database
+    # operation failed" error instead of a clear 422 at the API boundary.
     shipment_id: str | None = Field(default=None, min_length=1)
     order_reference: str = Field(min_length=1)
     carrier_id: str = Field(min_length=1)
     driver_id: str = Field(min_length=1)
     vehicle_id: str = Field(min_length=1)
     origin_name: str = Field(min_length=1)
-    origin_city: str | None = None
+    origin_city: str = Field(min_length=1)
     destination_facility_id: str = Field(min_length=1)
-    customer_name: str | None = None
-    product_category: str | None = None
-    load_weight_kg: int | None = Field(default=None, gt=0)
+    customer_name: str = Field(min_length=1)
+    product_category: str = Field(min_length=1)
+    load_weight_kg: int = Field(gt=0)
     required_dock_type: str = Field(default="STANDARD", min_length=1)
     temperature_control_required: bool = False
     priority_code: str | None = None
-    planned_departure_ts: str | None = None
-    original_eta_ts: str | None = None
+    planned_departure_ts: str
+    original_eta_ts: str
     latest_eta_ts: str | None = None
-    expected_unload_min: int | None = Field(default=None, gt=0)
+    expected_unload_min: int = Field(gt=0)
     current_status: ShipmentStatus = ShipmentStatus.PLANNED
     # Note: no archived_flag here -- a shipment is never created pre-archived,
     # that only happens later via archive_shipment(). Keeping it off this model
@@ -273,10 +278,63 @@ class DriverContextResponse(DBModel):
     active_shipments: list[ShipmentCandidate]
 
 
+class DockTraceSummary(DBModel):
+    """Read-only WMS dock/appointment status for a shipment, so a dispatcher
+    can trace a shipment from TMS without switching to the WMS portal.
+    Sourced by directly reading dock_scheduler-owned tables (appointments /
+    appointment_slots / docks) through the same caller-scoped client --
+    consistent with how driver_chat_eta already reads across these same
+    tables, rather than calling another backend's HTTP API."""
+
+    appointment_id: str | None = None
+    appointment_status: str | None = None
+    dock_code: str | None = None
+    slot_start_ts: str | None = None
+    slot_end_ts: str | None = None
+
+
+class CheckinTraceSummary(DBModel):
+    """Read-only check-in portal status for a shipment, for the same tracing
+    purpose as DockTraceSummary."""
+
+    arrival_state: str | None = None
+    queue_state: str | None = None
+    gate_in_ts: str | None = None
+    dock_in_ts: str | None = None
+    unload_end_ts: str | None = None
+
+
 class ShipmentContextResponse(DBModel):
     driver: DriverSummary
     vehicle: VehicleContext
     shipment: ShipmentResponse
+    dock: DockTraceSummary | None = None
+    checkin: CheckinTraceSummary | None = None
+
+
+class OriginSummary(DBModel):
+    origin_name: str
+    origin_city: str | None = None
+
+
+class ShipmentReferenceData(DBModel):
+    """Backs the shipment-creation form's origin/product-category dropdowns
+    with real, already-used values instead of free text -- see
+    TMSRepository.list_shipment_reference_data for why these two specifically
+    have no fixed lookup table to draw from."""
+
+    origins: list[OriginSummary]
+    product_categories: list[str]
+
+
+class FacilityStaffRegisterRequest(APIModel):
+    facility_id: str = Field(min_length=1)
+
+
+class FacilityStaffResponse(DBModel):
+    staff_user_id: str
+    facility_id: str
+    facility_name: str | None = None
 
 
 class ErrorDetail(APIModel):

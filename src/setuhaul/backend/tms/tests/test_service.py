@@ -46,9 +46,11 @@ def test_unknown_driver_raises_404_domain_error(service):
 
 def test_maintenance_vehicle_cannot_receive_active_shipment(service):
     request = ShipmentCreate(
-        order_reference="ORD-1", carrier_id="CAR001", origin_name="Depot",
+        order_reference="ORD-1", carrier_id="CAR001", origin_name="Depot", origin_city="Jaipur",
         driver_id=DRIVER_ONE, vehicle_id=VEHICLE_MAINTENANCE,
-        destination_facility_id=FACILITY, product_category="dry",
+        destination_facility_id=FACILITY, customer_name="Acme Retail", product_category="dry",
+        load_weight_kg=5000, planned_departure_ts="2026-08-08T10:00:00+00:00",
+        original_eta_ts="2026-08-08T12:00:00+00:00",
         expected_unload_min=40, current_status=ShipmentStatus.PLANNED,
     )
     with pytest.raises(BusinessValidationError, match="inactive"):
@@ -58,9 +60,11 @@ def test_maintenance_vehicle_cannot_receive_active_shipment(service):
 def test_mismatched_carriers_are_rejected(service, repository):
     repository.vehicles[VEHICLE_ONE]["carrier_id"] = CARRIER_B
     request = ShipmentCreate(
-        order_reference="ORD-1", carrier_id="CAR001", origin_name="Depot",
+        order_reference="ORD-1", carrier_id="CAR001", origin_name="Depot", origin_city="Jaipur",
         driver_id=DRIVER_ONE, vehicle_id=VEHICLE_ONE,
-        destination_facility_id=FACILITY, product_category="dry",
+        destination_facility_id=FACILITY, customer_name="Acme Retail", product_category="dry",
+        load_weight_kg=5000, planned_departure_ts="2026-08-08T10:00:00+00:00",
+        original_eta_ts="2026-08-08T12:00:00+00:00",
         expected_unload_min=40, current_status=ShipmentStatus.IN_TRANSIT,
     )
     with pytest.raises(BusinessValidationError, match="same carrier"):
@@ -95,6 +99,51 @@ def test_archive_completed_shipment(service, repository):
     repository.shipments["SHP001"]["current_status"] = "COMPLETED"
     result = service.archive_shipment("SHP001")
     assert result.archived_flag is True
+
+
+def test_shipment_context_includes_dock_and_checkin_trace(service, repository):
+    repository.appointments["SHP001"] = {
+        "appointment_id": "APT-1",
+        "shipment_id": "SHP001",
+        "slot_id": "SLOT-1",
+        "appointment_status": "CONFIRMED",
+        "slot_start_ts": "2026-08-08T13:00:00+00:00",
+        "slot_end_ts": "2026-08-08T14:00:00+00:00",
+        "dock_code": "D1",
+    }
+    repository.checkins["SHP001"] = {
+        "arrival_state": "ON_TIME",
+        "queue_state": "WAITING_LATE",
+        "gate_in_ts": "2026-08-08T12:30:00+00:00",
+        "dock_in_ts": None,
+        "unload_end_ts": None,
+    }
+
+    context = service.shipment_context("SHP001")
+
+    assert context.dock is not None
+    assert context.dock.appointment_status == "CONFIRMED"
+    assert context.dock.dock_code == "D1"
+    assert context.checkin is not None
+    assert context.checkin.queue_state == "WAITING_LATE"
+
+
+def test_shipment_reference_data_surfaces_existing_origins_and_categories(service, repository):
+    repository.shipments["SHP001"]["origin_name"] = "Jaipur Depot"
+    repository.shipments["SHP001"]["origin_city"] = "Jaipur"
+    repository.shipments["SHP001"]["product_category"] = "Auto components"
+
+    data = service.shipment_reference_data()
+
+    assert any(o.origin_name == "Jaipur Depot" and o.origin_city == "Jaipur" for o in data.origins)
+    assert "Auto components" in data.product_categories
+
+
+def test_shipment_context_trace_is_none_when_no_wms_data(service):
+    # SHP001 has no appointment/checkin rows in the fixture by default.
+    context = service.shipment_context("SHP001")
+    assert context.dock is None
+    assert context.checkin is None
 
 
 def test_assign_shipment_sends_sms_to_the_assigned_driver(service, monkeypatch):
@@ -148,9 +197,11 @@ def test_create_shipment_with_driver_sends_sms(service, monkeypatch):
     )
 
     request = ShipmentCreate(
-        order_reference="ORD-99", carrier_id=CARRIER_A, origin_name="Depot",
+        order_reference="ORD-99", carrier_id=CARRIER_A, origin_name="Depot", origin_city="Jaipur",
         driver_id=DRIVER_ONE, vehicle_id=VEHICLE_ONE,
-        destination_facility_id=FACILITY, product_category="dry",
+        destination_facility_id=FACILITY, customer_name="Acme Retail", product_category="dry",
+        load_weight_kg=5000, planned_departure_ts="2026-08-08T10:00:00+00:00",
+        original_eta_ts="2026-08-08T12:00:00+00:00",
         expected_unload_min=40, current_status=ShipmentStatus.PLANNED,
     )
     service.create_shipment(request)

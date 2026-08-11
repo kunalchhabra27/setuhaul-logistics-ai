@@ -15,8 +15,11 @@ from setuhaul.backend.tms.models import (
     DriverResponse,
     DriverUpdate,
     FacilityResponse,
+    FacilityStaffRegisterRequest,
+    FacilityStaffResponse,
     ShipmentContextResponse,
     ShipmentCreate,
+    ShipmentReferenceData,
     ShipmentResponse,
     ShipmentStatus,
     ShipmentUpdate,
@@ -222,6 +225,59 @@ def list_facilities(
     service: TMSService = Depends(get_service),
 ) -> list[FacilityResponse]:
     return service.list_facilities(limit=limit, offset=offset)
+
+
+@router.get("/reference/shipment-options", response_model=ShipmentReferenceData)
+def get_shipment_reference_data(service: TMSService = Depends(get_service)) -> ShipmentReferenceData:
+    """Real, already-used origin/product-category values to back the
+    shipment-creation dropdowns -- see ShipmentReferenceData's docstring."""
+    return service.shipment_reference_data()
+
+
+@router.post("/facility-staff/register", response_model=FacilityStaffResponse, status_code=status.HTTP_201_CREATED)
+def register_facility_staff(
+    request: FacilityStaffRegisterRequest,
+    principal: Principal = Depends(require_reader),
+    service: TMSService = Depends(get_service),
+) -> FacilityStaffResponse:
+    """Register (or update) the CALLER's own facility assignment.
+
+    staff_user_id always comes from the verified bearer token
+    (principal.user_id), never from the request body -- a caller can only
+    ever register themselves, not another account.
+    """
+    return service.register_staff_facility(principal.user_id, request.facility_id)
+
+
+@router.get("/facility-staff/me", response_model=FacilityStaffResponse)
+def get_my_facility_staff(
+    principal: Principal = Depends(require_reader),
+    service: TMSService = Depends(get_service),
+) -> FacilityStaffResponse:
+    return service.require_staff_facility(principal.user_id)
+
+
+@router.get("/facility-staff/shipments", response_model=list[ShipmentResponse])
+def list_shipments_for_my_facility(
+    shipment_status: ShipmentStatus | None = Query(default=None, alias="status"),
+    unassigned_only: bool = False,
+    include_archived: bool = False,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    principal: Principal = Depends(require_reader),
+    service: TMSService = Depends(get_service),
+) -> list[ShipmentResponse]:
+    """Shipments scoped to the CALLER's own registered facility only --
+    the facility filter is resolved server-side from staff_facility_assignments,
+    never accepted as a client-supplied parameter here."""
+    return service.list_shipments_for_staff_facility(
+        principal.user_id,
+        status=shipment_status,
+        unassigned_only=unassigned_only,
+        include_archived=include_archived,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/context/drivers/{driver_id}", response_model=DriverContextResponse)

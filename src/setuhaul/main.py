@@ -9,7 +9,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from setuhaul.backend.checkin_portal.api import router as checkin_portal_router
 from setuhaul.backend.dock_scheduler.api import router as dock_scheduler_router
-from setuhaul.backend.driver_chat_eta.api import router as driver_chat_eta_router
+from setuhaul.backend.driver_chat_eta.api import (
+    install_exception_handlers as install_driver_chat_eta_exception_handlers,
+    router as driver_chat_eta_router,
+)
 from setuhaul.backend.tms.api import install_exception_handlers, router as tms_router
 from setuhaul.infrastructure.logging import configure_logging
 from setuhaul.infrastructure.observability import RequestObservabilityMiddleware
@@ -33,6 +36,7 @@ install_exception_handlers(app)
 app.include_router(dock_scheduler_router, prefix=api_prefix)
 app.include_router(checkin_portal_router, prefix=api_prefix)
 app.include_router(driver_chat_eta_router, prefix=api_prefix)
+install_driver_chat_eta_exception_handlers(app)
 
 @app.get("/health", tags=["system"])
 def health() -> dict[str, str]:
