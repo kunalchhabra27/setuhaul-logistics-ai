@@ -148,6 +148,43 @@ class TMSService:
             raise ShipmentNotFoundError(f"Shipment {shipment_id} was not found.")
         return ShipmentResponse.model_validate(row)
 
+    def cancel_shipment(self, shipment_id: str, reason: str | None = None) -> ShipmentResponse:
+        current = self.get_shipment(shipment_id)
+        if current.current_status in (ShipmentStatus.COMPLETED, ShipmentStatus.CANCELLED):
+            raise BusinessValidationError(
+                f"A shipment that is already {current.current_status.value.lower()} cannot be cancelled."
+            )
+        now = datetime.now(timezone.utc).isoformat()
+        # Free the dock slot this shipment was holding, if any -- otherwise
+        # WMS would keep showing the slot occupied for a load that's no
+        # longer coming, and no future shipment could ever book it.
+        self.repository.cancel_current_appointment(shipment_id, now)
+        row = self.repository.update_shipment(shipment_id, {"current_status": ShipmentStatus.CANCELLED.value})
+        if row is None:
+            raise ShipmentNotFoundError(f"Shipment {shipment_id} was not found.")
+        shipment = ShipmentResponse.model_validate(row)
+        if current.driver_id:
+            self._notify_shipment_cancelled(current.driver_id, shipment, reason)
+        return shipment
+
+    def _notify_shipment_cancelled(self, driver_id: str, shipment: ShipmentResponse, reason: str | None) -> None:
+        """Best-effort SMS to the assigned driver -- mirrors
+        _notify_driver_assignment's never-block-the-request stance."""
+        try:
+            driver = self.repository.get_driver(driver_id)
+            phone = driver.get("phone") if driver else None
+            if not phone:
+                logger.info("No phone on file for driver %s; skipping cancellation SMS.", driver_id)
+                return
+            reason_suffix = f" Reason: {reason}" if reason else ""
+            send_sms(
+                phone,
+                f"SetuHaul: shipment {shipment.order_reference or shipment.shipment_id} has been "
+                f"cancelled by dispatch.{reason_suffix}",
+            )
+        except Exception:  # noqa: BLE001 - notifications must never break cancellation
+            logger.exception("Unable to send cancellation SMS for shipment %s", shipment.shipment_id)
+
     def create_shipment(self, request: ShipmentCreate) -> ShipmentResponse:
         if request.driver_id and request.vehicle_id:
             self._validate_active_assignment(request.driver_id, request.vehicle_id, request.current_status)
@@ -169,7 +206,13 @@ class TMSService:
         status = request.current_status or current.current_status
         if driver_id and vehicle_id:
             self._validate_active_assignment(driver_id, vehicle_id, status)
-        row = self.repository.update_shipment(shipment_id, request.model_dump(mode="json", exclude_unset=True))
+        payload = request.model_dump(mode="json", exclude_unset=True)
+        if request.current_status is ShipmentStatus.COMPLETED and "archived_flag" not in payload:
+            # A shipment reaching COMPLETED through any path -- including a
+            # direct staff edit here, not just the driver-side checkin flow
+            # -- auto-archives rather than waiting on a manual Archive click.
+            payload["archived_flag"] = True
+        row = self.repository.update_shipment(shipment_id, payload)
         if row is None:
             raise ShipmentNotFoundError(f"Shipment {shipment_id} was not found.")
         return ShipmentResponse.model_validate(row)

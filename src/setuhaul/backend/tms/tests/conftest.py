@@ -178,6 +178,13 @@ class FakeRepository:
     def current_appointment_for_shipment(self, shipment_id: str):
         return deepcopy(self.appointments.get(shipment_id))
 
+    def cancel_current_appointment(self, shipment_id: str, now_iso: str) -> None:
+        appointment = self.appointments.get(shipment_id)
+        if appointment is not None:
+            appointment["appointment_status"] = "CANCELLED"
+            appointment["is_current"] = 0
+            appointment["cancelled_at"] = now_iso
+
     def checkin_for_shipment(self, shipment_id: str):
         return deepcopy(self.checkins.get(shipment_id))
 

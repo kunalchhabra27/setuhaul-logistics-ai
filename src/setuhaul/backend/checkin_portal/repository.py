@@ -27,7 +27,7 @@ else:
 CHECKIN_COLUMNS = (
     "checkin_id,shipment_id,facility_id,gate_in_ts,yard_queue_enter_ts,dock_in_ts,"
     "unload_start_ts,unload_end_ts,gate_out_ts,arrival_state,queue_state,"
-    "queue_position,actual_dock_id,notes,updated_at"
+    "queue_position,actual_dock_id,notes,updated_at,staff_approved_flag"
 )
 
 
@@ -123,7 +123,7 @@ class CheckInRepository:
         try:
             slot_rows = self._data(
                 self.backend.table("appointment_slots")
-                .select("slot_id,dock_id")
+                .select("slot_id,dock_id,slot_start_ts")
                 .eq("slot_id", appt_rows[0]["slot_id"])
                 .limit(1)
                 .execute()
@@ -140,7 +140,11 @@ class CheckInRepository:
             self._raise_persistence(exc)
         if not dock_rows:
             return None
-        return {"dock_id": dock_rows[0]["dock_id"], "dock_code": dock_rows[0].get("dock_code")}
+        return {
+            "dock_id": dock_rows[0]["dock_id"],
+            "dock_code": dock_rows[0].get("dock_code"),
+            "slot_start_ts": slot_rows[0].get("slot_start_ts"),
+        }
 
     def get_by_shipment(self, shipment_id: str) -> dict[str, Any] | None:
         try:
@@ -217,6 +221,43 @@ class CheckInRepository:
                     "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
                 }
             ).eq("shipment_id", shipment_id).execute()
+        except APIError as exc:
+            self._raise_persistence(exc)
+
+    def approve_gate_checkin(self, shipment_id: str) -> None:
+        """Staff sign-off on a driver-reported gate arrival. Only after this
+        flips staff_approved_flag does the shipment's status become visible
+        to TMS/WMS as checked in -- see CheckInService.approve_gate_checkin
+        for why (a driver's own "I've arrived" claim shouldn't itself be
+        treated as fleet-wide fact)."""
+        try:
+            self.backend.table("facility_checkins").update(
+                {
+                    "staff_approved_flag": 1,
+                    "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                }
+            ).eq("shipment_id", shipment_id).execute()
+        except APIError as exc:
+            self._raise_persistence(exc)
+
+    # -- cross-context write: reflect check-in stage on the TMS shipment ----
+    #
+    # Mirrors the read-only cross-context pattern TMS's own repository uses
+    # for shipment_context (same caller-scoped client, direct table access,
+    # RLS enforces what the caller may actually do) -- except this one
+    # writes, because a check-in stage change is exactly the kind of event
+    # that must be visible on the TMS dashboard without a dispatcher having
+    # to separately poll the check-in portal.
+
+    def update_shipment_status(self, shipment_id: str, current_status: str, *, archive: bool = False) -> None:
+        payload: dict[str, Any] = {"current_status": current_status}
+        if archive:
+            # Integer 0/1 column, not native boolean -- see
+            # TMSRepository._coerce_booleans for why a Python bool would
+            # fail against it.
+            payload["archived_flag"] = 1
+        try:
+            self.backend.table("shipments").update(payload).eq("shipment_id", shipment_id).execute()
         except APIError as exc:
             self._raise_persistence(exc)
 

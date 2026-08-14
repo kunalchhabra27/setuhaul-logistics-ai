@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from setuhaul.backend._testing.fake_supabase import FakeSupabaseClient
-from setuhaul.backend.dock_scheduler.repository import DockSchedulerRepository
+from setuhaul.backend.dock_scheduler.repository import (
+    _FUTURE_SLOTS_LAST_CHECKED,
+    DockSchedulerRepository,
+)
 from setuhaul.backend.dock_scheduler.service import DockSchedulerService
 
 FACILITY = "FAC-JAI-01"
@@ -15,6 +20,22 @@ DOCK_REEFER = "DOCK-D5"
 SHP_NORMAL = "SHP-TEST1"
 SHP_REEFER = "SHP-TEST2"
 SHP_OCCUPANT = "SHP-TEST3"
+
+# compatible_slots() bounds its appointment_slots read relative to wall-clock
+# "now" (see repository.py), so fixture timestamps hardcoded to a fixed
+# calendar date rot the instant real time moves past that date -- exactly
+# the staleness bug ensure_future_slots() exists to fix in production, just
+# showing up in the test suite instead. SEED_DAY floats forward with the
+# real clock so these fixtures stay "today" no matter when the suite runs.
+SEED_DAY = datetime.now(timezone.utc).date()
+
+
+def seed_ts(hour: int, minute: int = 0, day_offset: int = 0) -> str:
+    """An ISO timestamp on (SEED_DAY + day_offset), IST offset to match the
+    real seed data / production convention (see dock_scheduler/repository.py's
+    module docstring)."""
+    day = SEED_DAY + timedelta(days=day_offset)
+    return f"{day.isoformat()}T{hour:02d}:{minute:02d}:00+05:30"
 
 
 def _shipment(shipment_id: str, **overrides) -> dict:
@@ -33,13 +54,13 @@ def _shipment(shipment_id: str, **overrides) -> dict:
         "required_dock_type": "STANDARD",
         "temperature_control_required": 0,
         "priority_code": "NORMAL",
-        "planned_departure_ts": "2026-08-04T04:00:00+05:30",
-        "original_eta_ts": "2026-08-04T08:00:00+05:30",
+        "planned_departure_ts": seed_ts(4),
+        "original_eta_ts": seed_ts(8),
         "latest_eta_ts": None,
         "expected_unload_min": 45,
         "current_status": "PLANNED",
-        "created_at": "2026-08-01T12:00:00+05:30",
-        "updated_at": "2026-08-01T12:00:00+05:30",
+        "created_at": seed_ts(12, day_offset=-3),
+        "updated_at": seed_ts(12, day_offset=-3),
     }
     base.update(overrides)
     return base
@@ -114,41 +135,41 @@ def tables() -> dict[str, list[dict]]:
                 "slot_id": "SLOT-D1-0800",
                 "facility_id": FACILITY,
                 "dock_id": DOCK_STANDARD_1,
-                "slot_start_ts": "2026-08-04T08:00:00+05:30",
-                "slot_end_ts": "2026-08-04T09:00:00+05:30",
+                "slot_start_ts": seed_ts(8),
+                "slot_end_ts": seed_ts(9),
                 "slot_status": "OPEN",
                 "block_reason": None,
-                "created_at": "2026-08-01T12:00:00+05:30",
+                "created_at": seed_ts(12, day_offset=-3),
             },
             {
                 "slot_id": "SLOT-D1-0900",
                 "facility_id": FACILITY,
                 "dock_id": DOCK_STANDARD_1,
-                "slot_start_ts": "2026-08-04T09:00:00+05:30",
-                "slot_end_ts": "2026-08-04T10:00:00+05:30",
+                "slot_start_ts": seed_ts(9),
+                "slot_end_ts": seed_ts(10),
                 "slot_status": "OPEN",
                 "block_reason": None,
-                "created_at": "2026-08-01T12:00:00+05:30",
+                "created_at": seed_ts(12, day_offset=-3),
             },
             {
                 "slot_id": "SLOT-D2-0800",
                 "facility_id": FACILITY,
                 "dock_id": DOCK_STANDARD_2,
-                "slot_start_ts": "2026-08-04T08:00:00+05:30",
-                "slot_end_ts": "2026-08-04T09:00:00+05:30",
+                "slot_start_ts": seed_ts(8),
+                "slot_end_ts": seed_ts(9),
                 "slot_status": "OPEN",
                 "block_reason": None,
-                "created_at": "2026-08-01T12:00:00+05:30",
+                "created_at": seed_ts(12, day_offset=-3),
             },
             {
                 "slot_id": "SLOT-D5-0800",
                 "facility_id": FACILITY,
                 "dock_id": DOCK_REEFER,
-                "slot_start_ts": "2026-08-04T08:00:00+05:30",
-                "slot_end_ts": "2026-08-04T09:00:00+05:30",
+                "slot_start_ts": seed_ts(8),
+                "slot_end_ts": seed_ts(9),
                 "slot_status": "OPEN",
                 "block_reason": None,
-                "created_at": "2026-08-01T12:00:00+05:30",
+                "created_at": seed_ts(12, day_offset=-3),
             },
         ],
         "appointments": [],
@@ -173,6 +194,10 @@ def tables() -> dict[str, list[dict]]:
 
 @pytest.fixture()
 def repository(tables: dict[str, list[dict]]) -> DockSchedulerRepository:
+    # ensure_future_slots() caches "already checked this facility" at
+    # module scope (see its docstring) -- clear it so one test's cached
+    # result can't hide a real bug in the next test's fresh fixture data.
+    _FUTURE_SLOTS_LAST_CHECKED.clear()
     return DockSchedulerRepository(FakeSupabaseClient(tables))
 
 

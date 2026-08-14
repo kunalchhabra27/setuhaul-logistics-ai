@@ -44,6 +44,15 @@ export function gateCheckIn(input: { shipment_id: string; facility_id: string; g
   });
 }
 
+// Staff sign-off on a driver-reported gate arrival -- only after this does
+// the shipment's status become visible to TMS/WMS as checked in.
+export function approveGateCheckin(shipmentId: string) {
+  return api.request<CheckInRecord>("/checkins/approve-gate", {
+    method: "PATCH",
+    body: JSON.stringify({ shipment_id: shipmentId }),
+  });
+}
+
 export function updateQueue(input: { shipment_id: string; queue_status: "NONE" | "GATE_QUEUE" | "YARD_QUEUE" | "CALLED_TO_DOCK" }) {
   return api.request<CheckInRecord>("/checkins/queue", {
     method: "PATCH",

@@ -61,7 +61,38 @@ export function createApiClient(serviceId: string) {
     return payload as T;
   }
 
-  return { request };
+  // For binary responses (e.g. an .xlsx export) that api.request's
+  // JSON/text parsing can't handle. Shares the same auth-header and
+  // refresh-on-401 behavior as request() above so a downloaded report
+  // doesn't silently fail just because the token happened to expire.
+  async function requestBlob(
+    path: string,
+    init?: RequestInit,
+    isRetry = false
+  ): Promise<{ blob: Blob; filename: string | null }> {
+    const token = getAccessToken(serviceId);
+    const response = await fetch(`${baseUrl}${path}`, {
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(init?.headers ?? {}),
+      },
+      ...init,
+    });
+
+    if (!response.ok) {
+      if (response.status === 401 && !isRetry && token) {
+        const refreshed = await refreshAccessToken(serviceId);
+        if (refreshed) return requestBlob(path, init, true);
+      }
+      throw new ApiClientError("Request failed", response.status);
+    }
+
+    const disposition = response.headers.get("content-disposition") ?? "";
+    const match = /filename="?([^";]+)"?/.exec(disposition);
+    return { blob: await response.blob(), filename: match?.[1] ?? null };
+  }
+
+  return { request, requestBlob };
 }
 
 export function apiUrl(path: string) {

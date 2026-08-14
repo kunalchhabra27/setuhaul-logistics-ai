@@ -53,6 +53,10 @@ class ListFeasibleSlotsInput(BaseModel):
     """No arguments needed -- re-checks slots for the driver's current shipment/ETA."""
 
 
+class AutoBookSlotInput(BaseModel):
+    """No arguments needed -- the agent picks the earliest compatible slot itself."""
+
+
 class SlotIdInput(BaseModel):
     slot_id: str = Field(
         description=(

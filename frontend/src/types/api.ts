@@ -16,6 +16,13 @@ export type CheckInRecord = {
   queue_status: "NONE" | "GATE_QUEUE" | "YARD_QUEUE" | "CALLED_TO_DOCK";
   dock_in_at: string | null;
   completed_at: string | null;
+  driver_name?: string | null;
+  driver_phone?: string | null;
+  staff_approved?: boolean;
+  // Real timeliness vs. the booked slot -- separate from arrival_status
+  // above, which despite its name is actually a check-in stage label, not
+  // a timing classification. See CheckInService._compute_timing_status.
+  timing_status?: "EARLY" | "ON_TIME" | "LATE" | null;
 };
 
 export type ShipmentStatus =
@@ -153,6 +160,34 @@ export type ShipmentContext = {
   shipment: ShipmentSummary;
   dock?: DockTraceSummary | null;
   checkin?: CheckinTraceSummary | null;
+};
+
+export type ChangeRequestRole = "TMS" | "DRIVER";
+export type ChangeRequestStatus = "PENDING" | "APPROVED" | "DECLINED";
+
+export type ChangeRequest = {
+  change_request_id: string;
+  shipment_id: string;
+  current_appointment_id?: string | null;
+  requested_slot_id: string;
+  requested_by_role: ChangeRequestRole;
+  requested_by_user_id: string;
+  reason?: string | null;
+  request_status: ChangeRequestStatus;
+  created_at?: string | null;
+  decided_at?: string | null;
+  decided_by_user_id?: string | null;
+  decision_note?: string | null;
+  dock_code?: string | null;
+  slot_start_ts?: string | null;
+  slot_end_ts?: string | null;
+  // Set only for a priority-swap request (see DriverChatService.
+  // auto_book_earliest_feasible_slot / DeterministicReschedulingEngine's
+  // PRIORITY_SWAP suggestions): the shipment currently occupying
+  // requested_slot_id that would be moved to displaced_to_slot_id if this
+  // request is approved. Null for an ordinary change request.
+  displaced_shipment_id?: string | null;
+  displaced_to_slot_id?: string | null;
 };
 
 export type DockSuggestion = {

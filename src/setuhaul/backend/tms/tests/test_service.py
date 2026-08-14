@@ -101,6 +101,45 @@ def test_archive_completed_shipment(service, repository):
     assert result.archived_flag is True
 
 
+def test_completing_a_shipment_via_update_auto_archives(service):
+    from setuhaul.backend.tms.models import ShipmentUpdate
+
+    result = service.update_shipment("SHP001", ShipmentUpdate(current_status=ShipmentStatus.COMPLETED))
+    assert result.current_status is ShipmentStatus.COMPLETED
+    assert result.archived_flag is True
+
+
+def test_cancel_shipment_sets_cancelled_status(service):
+    # SHP001 is IN_TRANSIT in the fixture.
+    result = service.cancel_shipment("SHP001", reason="Customer cancelled the order.")
+    assert result.current_status is ShipmentStatus.CANCELLED
+
+
+def test_cancel_shipment_releases_any_current_appointment(service, repository):
+    repository.appointments["SHP001"] = {
+        "appointment_id": "APT-1",
+        "shipment_id": "SHP001",
+        "slot_id": "SLOT-1",
+        "appointment_status": "CONFIRMED",
+        "is_current": 1,
+    }
+    service.cancel_shipment("SHP001")
+    assert repository.appointments["SHP001"]["appointment_status"] == "CANCELLED"
+    assert repository.appointments["SHP001"]["is_current"] == 0
+
+
+def test_cancel_completed_shipment_is_rejected(service, repository):
+    repository.shipments["SHP001"]["current_status"] = "COMPLETED"
+    with pytest.raises(BusinessValidationError, match="completed"):
+        service.cancel_shipment("SHP001")
+
+
+def test_cancel_already_cancelled_shipment_is_rejected(service, repository):
+    repository.shipments["SHP001"]["current_status"] = "CANCELLED"
+    with pytest.raises(BusinessValidationError, match="cancelled"):
+        service.cancel_shipment("SHP001")
+
+
 def test_shipment_context_includes_dock_and_checkin_trace(service, repository):
     repository.appointments["SHP001"] = {
         "appointment_id": "APT-1",

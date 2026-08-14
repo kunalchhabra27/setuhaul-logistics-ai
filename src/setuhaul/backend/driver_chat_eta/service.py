@@ -46,11 +46,13 @@ from setuhaul.backend.dock_scheduler.exceptions import (
     SlotUnavailableError as DockSlotUnavailableError,
     UnknownShipmentError as DockUnknownShipmentError,
 )
+from setuhaul.backend.dock_scheduler.models import ChangeRequestRole, DriverConstraints, SuggestionType
 from setuhaul.backend.dock_scheduler.repository import DockSchedulerRepository
 from setuhaul.backend.dock_scheduler.service import DockSchedulerService
 from setuhaul.backend.driver_chat_eta.auth import DriverPrincipal
 from setuhaul.backend.driver_chat_eta.exceptions import (
     BusinessValidationError,
+    DriverChatError,
     DriverProfileNotFoundError,
     PersistenceError,
     ShipmentNotFoundError,
@@ -88,11 +90,35 @@ HOLD_MINUTES = 5
 # snapshot/DockSlotBoard is unaffected; it always gets the full list from
 # _feasible_slots().
 LLM_SLOT_SUMMARY_LIMIT = 8
-_DELAY_PATTERN = re.compile(r"(\d{1,3})\s*(?:min(?:ute)?s?)", re.IGNORECASE)
-_HOUR_DELAY_PATTERN = re.compile(r"(\d{1,2})\s*(?:hour|hr)s?", re.IGNORECASE)
+# This regex parser is the deterministic FALLBACK only -- the primary path
+# is the Gemini tool-calling agent (llm/agent.py), which understands Hindi
+# and any other language natively since it's a real LLM. This layer only
+# ever runs when GOOGLE_API_KEY isn't configured or the LLM call itself
+# fails for some reason (see handle_chat_message's except Exception below).
+# It was originally English-only, which meant a Hindi message falling back
+# to this path silently parsed as "0 minutes late" with no delay detected
+# at all. Devanagari digits are normalized to ASCII first (see
+# _normalize_digits), and the unit words also match common Hindi delay
+# vocabulary (मिनट = minutes, घंटा/घंटे = hour/hours) so a bare fallback
+# turn still extracts a real delay instead of silently dropping it. This is
+# still a partial mitigation, not full Hindi understanding -- word order,
+# grammar, and phrases outside these patterns (e.g. "देर से पहुंचूंगा")
+# still won't be understood by this layer; that's expected to be Gemini's
+# job, so the real fix for full Hindi support is keeping the LLM path
+# reliable, not expanding this fallback further.
+_DEVANAGARI_DIGIT_MAP = str.maketrans("०१२३४५६७८९", "0123456789")
+_DELAY_PATTERN = re.compile(r"(\d{1,3})\s*(?:min(?:ute)?s?|मिनट)", re.IGNORECASE)
+_HOUR_DELAY_PATTERN = re.compile(r"(\d{1,2})\s*(?:hour|hr|घंट[ेाों]*)s?", re.IGNORECASE)
 _LEAVE_BEFORE_PATTERN = re.compile(
-    r"(?:before|leave by|out by)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", re.IGNORECASE
+    r"(?:before|leave by|out by|तक)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", re.IGNORECASE
 )
+
+
+def _normalize_digits(text: str) -> str:
+    """Convert Devanagari numerals (०-९) to ASCII digits so the regex
+    patterns above (which only match \\d) can find them. No-op for text
+    that's already ASCII."""
+    return text.translate(_DEVANAGARI_DIGIT_MAP)
 
 
 def _new_id(prefix: str) -> str:
@@ -445,11 +471,29 @@ class DriverChatService:
 
         options: list[SlotOption] = []
         if shipment_row.get("destination_facility_id"):
-            options = self._feasible_slots(
-                shipment_row=shipment_row,
-                after=declared_eta.isoformat(),
-                max_leave_at=max_leave_dt.isoformat() if max_leave_dt else None,
-            )
+            # Unlike _build_snapshot's own call to _feasible_slots (which is
+            # deliberately wrapped, see its comment), this call used to be
+            # unguarded -- a dock-feasibility failure here (e.g. the
+            # unbounded-query bug that used to live in
+            # dock_scheduler.repository.compatible_slots) propagated straight
+            # out of handle_chat_message as a raw 500, since this is the
+            # regex fallback path and nothing above it catches anything
+            # broader than DriverChatError. Same defensive degrade-to-empty
+            # policy as _build_snapshot, for the same reason: a slot lookup
+            # hiccup must never take down the whole chat turn.
+            try:
+                options = self._feasible_slots(
+                    shipment_row=shipment_row,
+                    after=declared_eta.isoformat(),
+                    max_leave_at=max_leave_dt.isoformat() if max_leave_dt else None,
+                )
+            except Exception:  # noqa: BLE001 - deliberate broad fallback, see comment above
+                import logging
+
+                logging.getLogger(__name__).exception(
+                    "driver_chat_eta: failed to compute feasible slots for shipment %s; showing none.",
+                    shipment_row.get("shipment_id"),
+                )
 
         agent_text = self._compose_agent_reply(
             driver_name=driver.driver_name,
@@ -487,6 +531,7 @@ class DriverChatService:
 
     @staticmethod
     def _parse_delay_minutes(text: str) -> int:
+        text = _normalize_digits(text)
         delay_minutes = 0
         hour_match = _HOUR_DELAY_PATTERN.search(text)
         if hour_match:
@@ -498,6 +543,7 @@ class DriverChatService:
 
     @staticmethod
     def _parse_leave_before(text: str, *, reference_date) -> datetime | None:
+        text = _normalize_digits(text)
         match = _LEAVE_BEFORE_PATTERN.search(text)
         if not match:
             return None
@@ -535,6 +581,7 @@ class DriverChatService:
         shipment_id = shipment_row["shipment_id"]
 
         try:
+            self.dock_scheduler.repository.ensure_future_slots_for_shipment(shipment_id)
             rows = self.dock_scheduler.repository.compatible_slots(shipment_id)
         except DockSchedulerError as exc:
             raise PersistenceError(str(exc)) from exc
@@ -839,6 +886,226 @@ class DriverChatService:
             message=f"Slot {slot_id} held for {HOLD_MINUTES} minutes.",
         )
 
+    def auto_book_earliest_feasible_slot(self, principal: DriverPrincipal) -> dict:
+        """Let the agent decide and book the driver's dock slot, instead of
+        presenting options for the driver to pick via Hold/Confirm buttons.
+
+        Replaces the old "list feasible slots -> driver holds one -> driver
+        confirms" chat flow with a single step: pick the earliest slot that
+        is currently compatible with the shipment (dock type, refrigeration,
+        weight) AND fits the driver's latest declared ETA (exactly the same
+        ranking `_feasible_slots` already produces -- compatible-first,
+        earliest start first), then book it through the same validated
+        `dock_scheduler` primitives `hold_slot`/`confirm_slot` use
+        (create_hold -> book_after_acceptance), so double-booking protection
+        and RLS scoping are unchanged. Only the driver-facing UX changes: no
+        manual click, no waiting on a 5-minute hold timer.
+
+        Also considers whether a *better* (earlier) slot could be freed up
+        by displacing a genuinely lower-priority shipment -- see
+        `_best_priority_swap`, which reuses `DeterministicReschedulingEngine`
+        (the same engine `suggest_slots`/the WMS "suggest" endpoint use) to
+        find a PRIORITY_SWAP candidate. This method never executes a swap
+        itself -- moving another shipment's confirmed appointment always
+        goes through `dock_slot_change_requests` for a WMS coordinator to
+        approve first (see `DockSchedulerService.decide_change_request`'s
+        swap-aware branch), the same human-in-the-loop guarantee the
+        existing driver/TMS "request a slot change" flow already has.
+        - If a swap would be earlier than the best directly available slot
+          (or nothing is directly available at all), it's filed as a
+          pending change request.
+        - If a direct slot is also available, it's booked immediately as a
+          guaranteed fallback while the (possibly better) swap request is
+          pending -- the driver is never left without an appointment just
+          because a theoretically-better one might get approved later.
+        - If neither a direct slot nor a swap candidate exists, this
+          escalates to a human coordinator exactly as before.
+
+        This does NOT touch the DockSlotBoard's own manual Hold slot/Confirm
+        booking buttons (`hold_slot`/`confirm_slot` below, and their REST
+        endpoints) -- those remain untouched self-service actions outside of
+        chat. This method is only ever called from the LLM tool-calling loop
+        (see llm/tools.py's `book_next_available_dock_slot`).
+        """
+        shipment_row = self.repository.get_active_shipment_for_driver(principal.user_id)
+        if shipment_row is None:
+            raise ShipmentNotFoundError("No active shipment is assigned to you.")
+        shipment_id = shipment_row["shipment_id"]
+
+        exception_row = self.repository.get_active_exception_for_driver(principal.user_id)
+        after = (
+            (exception_row or {}).get("declared_eta_ts")
+            or shipment_row.get("latest_eta_ts")
+            or shipment_row.get("original_eta_ts")
+        )
+        max_leave_at = (exception_row or {}).get("latest_acceptable_ts")
+        options = self._feasible_slots(shipment_row=shipment_row, after=after, max_leave_at=max_leave_at)
+
+        already = next((opt for opt in options if opt.is_booked_by_me), None)
+        if already:
+            return {
+                "status": "already_booked",
+                "slot_id": already.slot_id,
+                "dock_code": already.dock_code,
+                "start_time": already.start_time.isoformat(),
+                "end_time": already.end_time.isoformat(),
+                "message": "This shipment already has a confirmed dock appointment -- no need to book another.",
+            }
+
+        compatible = [opt for opt in options if opt.is_compatible]
+        best_direct = compatible[0] if compatible else None
+        best_swap = self._best_priority_swap(
+            shipment_id=shipment_id,
+            after_dt=_parse_dt(after) or datetime.utcnow(),
+            max_leave_dt=_parse_dt(max_leave_at),
+        )
+
+        swap_is_better = best_swap is not None and (best_direct is None or best_swap.start < best_direct.start_time)
+
+        if swap_is_better:
+            request = None
+            try:
+                request = self.dock_scheduler.create_change_request(
+                    shipment_id=shipment_id,
+                    requested_slot_id=best_swap.slot_id,
+                    requested_by_role=ChangeRequestRole.DRIVER,
+                    requested_by_user_id=principal.user_id,
+                    reason=f"Auto-requested by dispatch assistant: {best_swap.reason}",
+                    displaced_shipment_id=best_swap.displaced_shipment_id,
+                    displaced_to_slot_id=best_swap.displaced_to_slot_id,
+                )
+            except DockSchedulerError:
+                import logging
+
+                logging.getLogger(__name__).exception(
+                    "driver_chat_eta: failed to file a priority-swap change request for shipment %s.", shipment_id
+                )
+
+            if request and best_direct is None:
+                return {
+                    "status": "swap_requested",
+                    "slot_id": best_swap.slot_id,
+                    "dock_code": best_swap.dock_code,
+                    "start_time": best_swap.start.isoformat(),
+                    "end_time": best_swap.end.isoformat(),
+                    "swap_change_request_id": request["change_request_id"],
+                    "message": (
+                        f"No dock slot is open right now, but slot {best_swap.slot_id} at "
+                        f"{best_swap.dock_code or best_swap.slot_id} could be freed up for you. I've requested it "
+                        "from a WMS coordinator and this shipment will be booked automatically once it's approved."
+                    ),
+                }
+
+            if request and best_direct is not None:
+                result = self._commit_direct_booking(shipment_id, best_direct, exception_row)
+                result["status"] = "booked_with_pending_upgrade"
+                result["swap_slot_id"] = best_swap.slot_id
+                result["swap_change_request_id"] = request["change_request_id"]
+                result["message"] += (
+                    f" I've also requested an earlier slot ({best_swap.slot_id}) from a WMS coordinator -- "
+                    "you'll be notified if that gets approved instead."
+                )
+                return result
+            # Swap filing failed -- fall through to the direct/escalate path below exactly
+            # as if no swap had been found at all.
+
+        if best_direct is None:
+            self.escalate(principal, "No feasible dock slot was found matching the driver's declared ETA.")
+            return {
+                "status": "escalated",
+                "message": "No compatible dock slot was found for the declared ETA, so this was escalated to a human coordinator.",
+            }
+
+        return self._commit_direct_booking(shipment_id, best_direct, exception_row)
+
+    def _best_priority_swap(
+        self, *, shipment_id: str, after_dt: datetime, max_leave_dt: datetime | None
+    ):
+        """Earliest PRIORITY_SWAP candidate for this shipment, if any.
+
+        Reuses `DeterministicReschedulingEngine` (via `DockSchedulerService.
+        suggest_slots`) rather than reimplementing swap logic here -- a
+        PRIORITY_SWAP suggestion only exists when this shipment's own
+        `priority_code` genuinely outranks the slot's current occupant (see
+        `PRIORITY_WEIGHT` in dock_scheduler/constraints.py) AND that
+        occupant has its own later compatible slot to move to, so this never
+        proposes bumping someone with equal or higher priority. Always
+        optional -- any failure here degrades to None (no swap considered),
+        never breaks auto-booking.
+        """
+        try:
+            constraints = DriverConstraints(earliest_start=after_dt, must_finish_by=max_leave_dt)
+            suggestions = self.dock_scheduler.suggest_slots(shipment_id, constraints, limit=10)
+        except Exception:  # noqa: BLE001 - optional enhancement, must never break auto-booking
+            import logging
+
+            logging.getLogger(__name__).exception(
+                "driver_chat_eta: failed to compute priority-swap suggestions for shipment %s.", shipment_id
+            )
+            return None
+        swaps = [s for s in suggestions if s.suggestion_type is SuggestionType.PRIORITY_SWAP]
+        return min(swaps, key=lambda s: s.start) if swaps else None
+
+    def _commit_direct_booking(
+        self,
+        shipment_id: str,
+        best: SlotOption,
+        exception_row: dict | None,
+    ) -> dict:
+        """Hold then confirm `best` for `shipment_id` -- the same
+        create_hold -> book_after_acceptance sequence hold_slot()/
+        confirm_slot() below use, done back-to-back with no driver click in
+        between. Shared by auto_book_earliest_feasible_slot's plain and
+        swap-fallback paths.
+        """
+        previous_hold = self.repository.get_active_hold_for_shipment(shipment_id)
+        if previous_hold and previous_hold.get("slot_id") != best.slot_id:
+            self.dock_scheduler.cancel_hold(previous_hold["hold_id"])
+            previous_hold = None
+
+        try:
+            if not previous_hold:
+                self.dock_scheduler.hold_slot(shipment_id, best.slot_id, ttl_minutes=HOLD_MINUTES)
+            self.dock_scheduler.confirm_booking(shipment_id, best.slot_id, accepted=True)
+        except (DockInvalidBookingError, DockSlotUnavailableError) as exc:
+            raise SlotConflictError(str(exc)) from exc
+        except DockUnknownShipmentError as exc:
+            raise ShipmentNotFoundError(str(exc)) from exc
+        except DockSchedulerError as exc:
+            raise PersistenceError(str(exc)) from exc
+
+        appointment_row = self.dock_scheduler.repository.current_appointment(shipment_id)
+        if appointment_row is None:
+            raise PersistenceError("Booking succeeded but the confirmed appointment could not be re-read.")
+
+        if exception_row:
+            self.repository.update_exception(exception_row["exception_id"], {"exception_status": "RESOLVED"})
+            if exception_row.get("thread_id"):
+                self.repository.update_thread(
+                    exception_row["thread_id"], {"thread_status": "RESOLVED", "closed_at": _now_iso()}
+                )
+                self.repository.insert_chat_message(
+                    {
+                        "chat_message_id": _new_id("MSG"),
+                        "thread_id": exception_row["thread_id"],
+                        "sender_type": "SYSTEM",
+                        "message_text": f"Appointment auto-booked for slot {best.slot_id}. Driver notified.",
+                        "message_ts": _now_iso(),
+                    }
+                )
+
+        return {
+            "status": "booked",
+            "slot_id": best.slot_id,
+            "dock_code": best.dock_code,
+            "start_time": best.start_time.isoformat(),
+            "end_time": best.end_time.isoformat(),
+            "message": (
+                f"Booked dock slot {best.slot_id} at {best.dock_code or best.dock_id}, "
+                f"{best.start_time.strftime('%H:%M')}-{best.end_time.strftime('%H:%M')}."
+            ),
+        }
+
     def confirm_slot(self, principal: DriverPrincipal, slot_id: str) -> ConfirmSlotResponse:
         """Confirm a held slot via the shared WMS scheduling engine."""
         driver = self.get_my_profile(principal)
@@ -942,7 +1209,17 @@ class DriverChatService:
                 payload["unload_end_ts"] = now
                 payload["gate_out_ts"] = now
                 payload["queue_state"] = "COMPLETED"
-                self.repository.update_shipment(shipment_row["shipment_id"], {"current_status": "COMPLETED"})
+                # Auto-archive on completion -- previously a shipment stayed
+                # in the active TMS view until a dispatcher clicked Archive
+                # by hand; completion is unambiguous enough to do this
+                # automatically instead.
+                self.repository.update_shipment(
+                    # archived_flag is stored as integer 0/1, not a native
+                    # boolean column -- PostgREST rejects a JSON true/false
+                    # literal against it (see TMSRepository._coerce_booleans).
+                    shipment_row["shipment_id"],
+                    {"current_status": "COMPLETED", "archived_flag": 1},
+                )
             row = self.repository.update_checkin(existing["checkin_id"], payload) or existing
 
         snapshot = self._build_snapshot(principal, driver)

@@ -126,23 +126,29 @@ class FakeQuery:
                 rows = rows[: self._limit_n]
             return FakeResponse([dict(row) for row in rows])
         if self._op == "insert":
-            new_row = dict(self._payload or {})
-            self._table.data.append(new_row)
-            return FakeResponse([dict(new_row)])
+            payloads = self._payload if isinstance(self._payload, list) else [self._payload or {}]
+            new_rows = [dict(row) for row in payloads]
+            self._table.data.extend(new_rows)
+            return FakeResponse([dict(row) for row in new_rows])
         if self._op == "update":
             matched = [row for row in self._table.data if self._matches(row)]
             for row in matched:
                 row.update(self._payload or {})
             return FakeResponse([dict(row) for row in matched])
         if self._op == "upsert":
-            payload = dict(self._payload or {})
+            payloads = self._payload if isinstance(self._payload, list) else [self._payload or {}]
             key = self._on_conflict or "id"
-            existing = next((row for row in self._table.data if row.get(key) == payload.get(key)), None)
-            if existing is not None:
-                existing.update(payload)
-                return FakeResponse([dict(existing)])
-            self._table.data.append(payload)
-            return FakeResponse([dict(payload)])
+            results: list[dict[str, Any]] = []
+            for payload in payloads:
+                existing = next((row for row in self._table.data if row.get(key) == payload.get(key)), None)
+                if existing is not None:
+                    existing.update(payload)
+                    results.append(dict(existing))
+                else:
+                    new_row = dict(payload)
+                    self._table.data.append(new_row)
+                    results.append(dict(new_row))
+            return FakeResponse(results)
         raise AssertionError(f"Unsupported fake query op: {self._op}")
 
 
@@ -153,13 +159,15 @@ class FakeTable:
     def select(self, _columns: str = "*") -> FakeQuery:
         return FakeQuery(self, "select")
 
-    def insert(self, payload: dict[str, Any]) -> FakeQuery:
+    def insert(self, payload: dict[str, Any] | list[dict[str, Any]]) -> FakeQuery:
         return FakeQuery(self, "insert", payload)
 
     def update(self, payload: dict[str, Any]) -> FakeQuery:
         return FakeQuery(self, "update", payload)
 
-    def upsert(self, payload: dict[str, Any], on_conflict: str | None = None, **_kwargs: Any) -> FakeQuery:
+    def upsert(
+        self, payload: dict[str, Any] | list[dict[str, Any]], on_conflict: str | None = None, **_kwargs: Any
+    ) -> FakeQuery:
         return FakeQuery(self, "upsert", payload, on_conflict=on_conflict)
 
 

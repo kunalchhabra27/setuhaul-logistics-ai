@@ -54,6 +54,22 @@ logger = logging.getLogger(__name__)
 MAX_TOOL_ROUNDS = 5
 HISTORY_HYDRATE_LIMIT = 20
 
+# Tools that actually change dock/exception/checkin state -- only these
+# warrant recomputing a fresh snapshot (which includes a full dock-slot
+# feasibility pass, see DriverChatService._feasible_slots) after the turn.
+# report_delay_or_eta_change, book_next_available_dock_slot, and
+# update_arrival_checkin all mutate something the snapshot reflects;
+# list_feasible_dock_slots and escalate_to_human don't (the former already
+# returns fresh slots straight from its own tool result; the latter is
+# folded into book_next_available_dock_slot's own state change when it
+# triggers automatically, and is otherwise a thread-status-only change that
+# doesn't affect dock-slot feasibility).
+STATE_CHANGING_TOOLS = {
+    "report_delay_or_eta_change",
+    "book_next_available_dock_slot",
+    "update_arrival_checkin",
+}
+
 
 def is_configured() -> bool:
     """Whether GOOGLE_API_KEY is set, i.e. whether the LLM path should be tried."""
@@ -162,9 +178,11 @@ def run_chat_turn(service: "DriverChatService", principal: "DriverPrincipal", te
     history.append(response)
 
     rounds_used = 0
+    called_tool_names: set[str] = set()
     while getattr(response, "tool_calls", None) and rounds_used < MAX_TOOL_ROUNDS:
         rounds_used += 1
         for call in response.tool_calls:
+            called_tool_names.add(call["name"])
             tool_fn = tool_map.get(call["name"])
             if tool_fn is None:
                 result: dict = {"error": "unknown_tool", "message": f"No such tool: {call['name']}"}
@@ -196,7 +214,17 @@ def run_chat_turn(service: "DriverChatService", principal: "DriverPrincipal", te
         }
     )
 
-    fresh_snapshot = service._build_snapshot(principal, driver)
+    # _build_snapshot recomputes dock-slot feasibility from scratch (a full
+    # board query) -- this loop already unconditionally did that once
+    # before the LLM even ran. Only pay for it again if a tool that could
+    # actually have changed shipment/exception/dock/checkin state was
+    # called this turn; otherwise the original snapshot is still accurate
+    # and re-fetching it was the literal cost behind "the chatbot keeps
+    # checking dock status on every message" even for plain small talk.
+    if called_tool_names & STATE_CHANGING_TOOLS:
+        fresh_snapshot = service._build_snapshot(principal, driver)
+    else:
+        fresh_snapshot = snapshot
     exception_row = service.repository.get_active_exception_for_driver(principal.user_id)
     from setuhaul.backend.driver_chat_eta.models import DriverExceptionSummary
 

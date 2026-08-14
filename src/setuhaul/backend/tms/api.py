@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, FastAPI, Query, Request, status
+from datetime import datetime, timezone
+from io import BytesIO
+
+from fastapi import APIRouter, Depends, FastAPI, Query, Request, Response, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from openpyxl import Workbook
+from openpyxl.styles import Font
+from openpyxl.utils import get_column_letter
 from pydantic import BaseModel, Field
 
 from setuhaul.backend.tms.exceptions import TMSError
 from setuhaul.backend.tms.models import (
+    CancelShipmentRequest,
     DriverContextResponse,
     DriverCreate,
     DriverResponse,
@@ -218,6 +225,16 @@ def unarchive_shipment(
     return service.unarchive_shipment(shipment_id)
 
 
+@router.post("/shipments/{shipment_id}/cancel", response_model=ShipmentResponse)
+def cancel_shipment(
+    shipment_id: str,
+    request: CancelShipmentRequest = CancelShipmentRequest(),
+    _: Principal = Depends(require_admin),
+    service: TMSService = Depends(get_service),
+) -> ShipmentResponse:
+    return service.cancel_shipment(shipment_id, reason=request.reason)
+
+
 @router.get("/facilities", response_model=list[FacilityResponse])
 def list_facilities(
     limit: int = Query(default=200, ge=1, le=500),
@@ -232,6 +249,76 @@ def get_shipment_reference_data(service: TMSService = Depends(get_service)) -> S
     """Real, already-used origin/product-category values to back the
     shipment-creation dropdowns -- see ShipmentReferenceData's docstring."""
     return service.shipment_reference_data()
+
+
+_EXPORT_COLUMNS: list[tuple[str, str]] = [
+    ("shipment_id", "Shipment ID"),
+    ("order_reference", "Order Reference"),
+    ("current_status", "Status"),
+    ("carrier_id", "Carrier"),
+    ("driver_id", "Driver"),
+    ("vehicle_id", "Vehicle"),
+    ("origin_name", "Origin"),
+    ("origin_city", "Origin City"),
+    ("destination_facility_id", "Destination Facility"),
+    ("customer_name", "Customer"),
+    ("product_category", "Product Category"),
+    ("load_weight_kg", "Load Weight (kg)"),
+    ("required_dock_type", "Required Dock Type"),
+    ("temperature_control_required", "Reefer Required"),
+    ("priority_code", "Priority"),
+    ("planned_departure_ts", "Planned Departure"),
+    ("original_eta_ts", "Original ETA"),
+    ("latest_eta_ts", "Latest ETA"),
+    ("expected_unload_min", "Expected Unload (min)"),
+    ("archived_flag", "Archived"),
+    ("created_at", "Created At"),
+    ("updated_at", "Updated At"),
+]
+
+
+def _build_shipments_workbook(shipments: list[ShipmentResponse]) -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Shipments"
+
+    for col_index, (_, header) in enumerate(_EXPORT_COLUMNS, start=1):
+        cell = sheet.cell(row=1, column=col_index, value=header)
+        cell.font = Font(bold=True)
+
+    for row_index, shipment in enumerate(shipments, start=2):
+        data = shipment.model_dump(mode="json")
+        for col_index, (field, _) in enumerate(_EXPORT_COLUMNS, start=1):
+            sheet.cell(row=row_index, column=col_index, value=data.get(field))
+
+    for col_index, (field, header) in enumerate(_EXPORT_COLUMNS, start=1):
+        sheet.column_dimensions[get_column_letter(col_index)].width = max(len(header) + 2, 14)
+
+    sheet.freeze_panes = "A2"
+
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+@router.get("/reports/shipments-export")
+def export_shipments(
+    _: Principal = Depends(require_reader),
+    service: TMSService = Depends(get_service),
+) -> Response:
+    """Every shipment regardless of status or archive state -- in transit,
+    completed, cancelled, and archived alike -- as a downloadable .xlsx.
+    Unlike the dashboard's Active/Historical filters, this is meant to be a
+    complete export a dispatcher can hand off or file away.
+    """
+    shipments = service.list_shipments(include_archived=True, limit=10_000)
+    content = _build_shipments_workbook(shipments)
+    filename = f"setuhaul-shipments-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.xlsx"
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.post("/facility-staff/register", response_model=FacilityStaffResponse, status_code=status.HTTP_201_CREATED)

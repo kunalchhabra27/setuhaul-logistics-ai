@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import { Loader2, MessageCircle, X } from "lucide-react";
 import { ApiClientError } from "../../services/api";
@@ -8,6 +9,7 @@ import {
   getDriverSnapshot,
   getMyDriverProfile,
   holdDockSlot,
+  requestDriverDockSlotChange,
   sendDriverChatMessage,
   sendDriverVoiceMessage,
   updateDriverCheckin,
@@ -34,10 +36,24 @@ export default function DriversPortal({ color }: { color: string }) {
 
   const showToast = (text: string, tone: "success" | "error" | "info" = "info") => {
     setToast({ text, tone });
-    setTimeout(() => setToast(null), 4000);
+    setTimeout(() => setToast(null), 120_000);
   };
 
+  const snapshotInFlight = useRef(false);
+
   const refreshSnapshot = useCallback(async () => {
+    // The backend's /snapshot read is several sequential Supabase round
+    // trips deep (shipment, vehicle, facility, docks, appointment,
+    // checkin, exception, chat messages, dock-slot feasibility) and can
+    // legitimately take longer than this poll's own 8s interval -- without
+    // this guard, setInterval fires again before the previous fetch
+    // resolves, so overlapping polls pile up on the single backend worker
+    // and can starve a driver's actual chat message behind a growing queue
+    // of stale background polls (this is what made the chatbot look
+    // completely unresponsive: the message was queued behind several
+    // already-overlapping snapshot polls, not failing to parse the query).
+    if (snapshotInFlight.current) return;
+    snapshotInFlight.current = true;
     try {
       const data = await getDriverSnapshot();
       setSnapshot((prev) => {
@@ -59,6 +75,8 @@ export default function DriversPortal({ color }: { color: string }) {
       if (!(err instanceof ApiClientError && err.status === 404)) {
         console.warn("Failed to refresh driver snapshot:", err);
       }
+    } finally {
+      snapshotInFlight.current = false;
     }
   }, []);
 
@@ -156,6 +174,16 @@ export default function DriversPortal({ color }: { color: string }) {
     }
   };
 
+  const handleRequestSlotChange = async (slotId: string) => {
+    if (!snapshot?.shipment) return;
+    try {
+      await requestDriverDockSlotChange(snapshot.shipment.shipment_id, slotId);
+      showToast("Slot change requested -- waiting on WMS approval.", "success");
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Failed to request a slot change", "error");
+    }
+  };
+
   const handleUpdateCheckin = async (status: ArrivalUpdateChoice) => {
     try {
       const res = await updateDriverCheckin(status);
@@ -228,19 +256,32 @@ export default function DriversPortal({ color }: { color: string }) {
 
   return (
     <div className="space-y-5">
-      {toast && (
-        <div
-          className={`rounded-xl border px-4 py-3 text-sm font-bold ${
-            toast.tone === "success"
-              ? "border-emerald-200 bg-emerald-50 text-emerald-800"
-              : toast.tone === "error"
-              ? "border-rose-200 bg-rose-50 text-rose-800"
-              : "border-line bg-cloud text-ink"
-          }`}
-        >
-          {toast.text}
-        </div>
-      )}
+      {toast &&
+        createPortal(
+          <motion.div
+            initial={{ opacity: 0, y: -12, scale: 0.97 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -12, scale: 0.97 }}
+            transition={{ duration: 0.18 }}
+            className={`fixed right-5 top-5 z-[9999] flex max-w-sm items-start gap-2.5 rounded-2xl border px-4 py-3 text-sm font-bold shadow-lg ${
+              toast.tone === "success"
+                ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                : toast.tone === "error"
+                ? "border-rose-200 bg-rose-50 text-rose-800"
+                : "border-line bg-cloud text-ink"
+            }`}
+          >
+            <span className="flex-1">{toast.text}</span>
+            <button
+              onClick={() => setToast(null)}
+              className="shrink-0 opacity-60 transition hover:opacity-100"
+              aria-label="Dismiss"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </motion.div>,
+          document.body
+        )}
 
       <div className="grid gap-4 sm:grid-cols-3">
         {driverStats.map((s, i) => (
@@ -279,6 +320,7 @@ export default function DriversPortal({ color }: { color: string }) {
           slotOptions={snapshot.slot_options}
           onHoldSlot={handleHoldSlot}
           onConfirmSlot={handleConfirmSlot}
+          onRequestSlotChange={handleRequestSlotChange}
         />
       )}
 
@@ -300,12 +342,9 @@ export default function DriversPortal({ color }: { color: string }) {
               <ChatPanel
                 color={color}
                 messages={snapshot?.chat_messages ?? []}
-                suggestedOptions={snapshot?.slot_options ?? []}
                 isSending={isSending}
                 onSendMessage={handleSendMessage}
                 onSendVoiceMessage={handleSendVoiceMessage}
-                onHoldSlot={handleHoldSlot}
-                onConfirmSlot={handleConfirmSlot}
                 onEscalate={handleEscalate}
                 onClose={() => setChatOpen(false)}
                 isExpanded={chatExpanded}

@@ -129,6 +129,64 @@ class ConfirmResponse(BaseModel):
     lifecycle_stage: SlotLifecycleStage
 
 
+class ChangeRequestRole(str, Enum):
+    TMS = "TMS"
+    DRIVER = "DRIVER"
+
+
+class ChangeRequestStatus(str, Enum):
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    DECLINED = "DECLINED"
+
+
+class CreateChangeRequest(BaseModel):
+    """Body for POST /change-requests -- the public TMS/driver-facing route.
+
+    Deliberately has no displaced_shipment_id/displaced_to_slot_id field:
+    those are only ever set internally, by DriverChatService.
+    auto_book_earliest_feasible_slot calling DockSchedulerService.
+    create_change_request(...) directly in Python using values computed by
+    DeterministicReschedulingEngine's own priority-swap validation. Exposing
+    them here would let any caller of this REST endpoint claim an arbitrary
+    shipment should be displaced, with none of that validation.
+    """
+
+    shipment_id: str
+    requested_slot_id: str
+    requested_by_role: ChangeRequestRole
+    reason: str | None = None
+
+
+class DecideChangeRequest(BaseModel):
+    approve: bool
+    note: str | None = None
+
+
+class ChangeRequestResponse(BaseModel):
+    """A pending/decided request to move a shipment's dock appointment to a
+    different slot. Enriched with the requested slot's dock/time so WMS
+    staff can decide without a second lookup."""
+
+    change_request_id: str
+    shipment_id: str
+    current_appointment_id: str | None = None
+    requested_slot_id: str
+    requested_by_role: str
+    requested_by_user_id: str
+    reason: str | None = None
+    request_status: str
+    created_at: str | None = None
+    decided_at: str | None = None
+    decided_by_user_id: str | None = None
+    decision_note: str | None = None
+    dock_code: str | None = None
+    slot_start_ts: str | None = None
+    slot_end_ts: str | None = None
+    displaced_shipment_id: str | None = None
+    displaced_to_slot_id: str | None = None
+
+
 class DockSlot(BaseModel):
     """A single slot on the visual dock board -- every compatible slot for a
     shipment (not just the top-ranked ones from /suggest), for rendering a

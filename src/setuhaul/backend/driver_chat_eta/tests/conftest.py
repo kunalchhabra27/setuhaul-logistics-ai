@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from setuhaul.backend._testing.fake_supabase import FakeSupabaseClient
+from setuhaul.backend.dock_scheduler.repository import _FUTURE_SLOTS_LAST_CHECKED
 from setuhaul.backend.driver_chat_eta.auth import DriverPrincipal
 from setuhaul.backend.driver_chat_eta.repository import DriverChatRepository
 from setuhaul.backend.driver_chat_eta.service import DriverChatService
@@ -158,6 +159,10 @@ def tables() -> dict:
 
 @pytest.fixture()
 def service(tables: dict) -> DriverChatService:
+    # See dock_scheduler/tests/conftest.py -- ensure_future_slots() caches
+    # "already checked this facility" at module scope, which would
+    # otherwise leak between tests that reuse the same FACILITY id.
+    _FUTURE_SLOTS_LAST_CHECKED.clear()
     return DriverChatService(DriverChatRepository(FakeSupabaseClient(tables)))
 
 

@@ -1,4 +1,5 @@
 import { createApiClient } from "./api";
+import type { ChangeRequest, DockSlot } from "../types/api";
 import type {
   ArrivalUpdateChoice,
   DriverAppointmentSlotSummary,
@@ -82,4 +83,28 @@ export function escalateDriverException(reason: string) {
     `${base}/escalate`,
     { method: "POST", body: JSON.stringify({ reason }) }
   );
+}
+
+// -- dock-slot change requests -------------------------------------------
+//
+// A driver who already has a confirmed slot can ask for a different one --
+// unlike holdDockSlot/confirmDockSlot (only usable when there's no booking
+// yet), this doesn't touch the appointment itself. WMS staff must approve
+// it first (see dockSchedulerApi.ts's decideChangeRequest, used from the
+// WMS panel).
+
+export function getDockBoardForShipment(shipmentId: string) {
+  return api.request<DockSlot[]>(`/dock-scheduler/board?shipment_id=${encodeURIComponent(shipmentId)}`);
+}
+
+export function requestDriverDockSlotChange(shipmentId: string, requestedSlotId: string, reason?: string) {
+  return api.request<ChangeRequest>("/dock-scheduler/change-requests", {
+    method: "POST",
+    body: JSON.stringify({
+      shipment_id: shipmentId,
+      requested_slot_id: requestedSlotId,
+      requested_by_role: "DRIVER",
+      reason: reason ?? null,
+    }),
+  });
 }

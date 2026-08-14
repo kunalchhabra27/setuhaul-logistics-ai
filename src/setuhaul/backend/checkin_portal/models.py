@@ -54,6 +54,12 @@ class CompleteRequest(BaseModel):
     completed_at: datetime
 
 
+class ApproveGateCheckinRequest(BaseModel):
+    """Request payload for staff approving a driver-reported gate arrival."""
+
+    shipment_id: str
+
+
 class CheckInRecord(BaseModel):
     """Persisted representation of a facility check-in."""
 

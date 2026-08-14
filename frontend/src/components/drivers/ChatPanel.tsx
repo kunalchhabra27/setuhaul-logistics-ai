@@ -6,7 +6,6 @@ import {
   ShieldAlert,
   CheckCircle2,
   Sparkles,
-  Lock,
   AlertCircle,
   X,
   Maximize2,
@@ -14,7 +13,7 @@ import {
   Mic,
   Square,
 } from "lucide-react";
-import type { DriverChatMessageSummary, DriverSlotOption } from "../../types/driverChat";
+import type { DriverChatMessageSummary } from "../../types/driverChat";
 
 function blobToBase64(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -43,12 +42,9 @@ function formatDuration(totalSeconds: number): string {
 export default function ChatPanel({
   color,
   messages,
-  suggestedOptions,
   isSending,
   onSendMessage,
   onSendVoiceMessage,
-  onHoldSlot,
-  onConfirmSlot,
   onEscalate,
   onClose,
   isExpanded,
@@ -56,12 +52,9 @@ export default function ChatPanel({
 }: {
   color: string;
   messages: DriverChatMessageSummary[];
-  suggestedOptions: DriverSlotOption[];
   isSending: boolean;
   onSendMessage: (text: string) => Promise<void>;
   onSendVoiceMessage?: (audioBase64: string, mimeType: string) => Promise<void>;
-  onHoldSlot: (slotId: string) => Promise<void>;
-  onConfirmSlot: (slotId: string) => Promise<void>;
   onEscalate: (reason: string) => Promise<void>;
   onClose?: () => void;
   isExpanded?: boolean;
@@ -158,8 +151,6 @@ export default function ChatPanel({
     if (isRecording) stopRecording();
     else void startRecording();
   };
-
-  const lastAgentId = [...messages].reverse().find((m) => m.sender_type === "AGENT")?.chat_message_id;
 
   return (
     <div className="flex h-full w-full flex-col overflow-hidden rounded-3xl border border-line bg-white shadow-pop">
@@ -266,55 +257,6 @@ export default function ChatPanel({
                   </span>
                 </div>
                 <p className="whitespace-pre-wrap text-sm leading-relaxed sm:text-base">{msg.message_text}</p>
-
-                {msg.chat_message_id === lastAgentId && suggestedOptions.length > 0 && (
-                  <div className="mt-4 space-y-3 border-t border-line pt-3">
-                    <p className="flex items-center gap-1.5 text-xs font-bold sm:text-sm" style={{ color }}>
-                      <Sparkles className="h-4 w-4" /> Recommended unloading times
-                    </p>
-                    <div className="grid grid-cols-1 gap-2.5">
-                      {suggestedOptions.map((opt) => (
-                        <div
-                          key={opt.slot_id}
-                          className={`rounded-xl border p-3.5 transition-all ${opt.is_held ? "" : opt.is_compatible ? "border-line bg-cloud" : "border-line bg-cloud opacity-60"}`}
-                          style={opt.is_held ? { borderColor: color, background: `${color}0D` } : undefined}
-                        >
-                          <div className="mb-1.5 flex items-center justify-between font-bold text-ink">
-                            <span className="text-sm sm:text-base">{opt.dock_code || opt.dock_id.slice(0, 8)}</span>
-                            <span className="rounded px-2 py-0.5 font-mono text-xs font-bold" style={{ background: `${color}1A`, color }}>
-                              Slot {opt.slot_id.slice(0, 8)}
-                            </span>
-                          </div>
-                          <div className="mb-3 space-y-1 text-xs text-ink-soft sm:text-sm">
-                            <p className="font-black" style={{ color }}>
-                              {new Date(opt.start_time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} - {new Date(opt.end_time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                            </p>
-                            <p>Estimated wait: <span className="font-bold text-ink">{opt.estimated_wait_minutes} mins</span></p>
-                            {!opt.is_compatible && <p className="text-mist">{opt.compatibility_reason}</p>}
-                          </div>
-                          <div className="flex gap-2">
-                            <button
-                              onClick={() => void onHoldSlot(opt.slot_id)}
-                              disabled={opt.is_held || !opt.is_compatible}
-                              className="flex flex-1 items-center justify-center gap-1.5 rounded-xl border border-line py-2.5 text-xs font-bold text-ink transition disabled:opacity-50 sm:text-sm"
-                              style={opt.is_held ? { background: color, color: "white", borderColor: color } : undefined}
-                            >
-                              <Lock className="h-4 w-4" />
-                              {opt.is_held ? "Locked (5 mins)" : "Hold time"}
-                            </button>
-                            <button
-                              onClick={() => void onConfirmSlot(opt.slot_id)}
-                              className="flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-emerald-600 py-2.5 text-xs font-bold text-white shadow-soft transition hover:bg-emerald-500 sm:text-sm"
-                            >
-                              <CheckCircle2 className="h-4 w-4" />
-                              Confirm booking
-                            </button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
               </div>
             </div>
           );

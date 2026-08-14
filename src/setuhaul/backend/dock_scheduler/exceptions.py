@@ -15,3 +15,11 @@ class SlotUnavailableError(DockSchedulerError):
 
 class InvalidBookingError(DockSchedulerError):
     """Raised when a booking request does not satisfy scheduler rules."""
+
+
+class ChangeRequestNotFoundError(DockSchedulerError):
+    """Raised when a dock-slot-change request id does not exist."""
+
+
+class ChangeRequestAlreadyDecidedError(DockSchedulerError):
+    """Raised when trying to approve/decline a request that was already decided."""

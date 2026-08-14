@@ -92,13 +92,15 @@ def test_get_confirmed_dock_for_shipment() -> None:
                         "appointment_status": "CONFIRMED",
                     }
                 ],
-                "appointment_slots": [{"slot_id": "SLOT-1", "dock_id": "DOCK-1"}],
+                "appointment_slots": [
+                    {"slot_id": "SLOT-1", "dock_id": "DOCK-1", "slot_start_ts": "2026-08-08T18:00:00+05:30"}
+                ],
                 "docks": [{"dock_id": "DOCK-1", "dock_code": "D1"}],
             }
         )
     )
     dock = repo.get_confirmed_dock_for_shipment("SHP1006")
-    assert dock == {"dock_id": "DOCK-1", "dock_code": "D1"}
+    assert dock == {"dock_id": "DOCK-1", "dock_code": "D1", "slot_start_ts": "2026-08-08T18:00:00+05:30"}
 
 
 def test_get_confirmed_dock_for_shipment_returns_none_without_confirmed_appointment() -> None:

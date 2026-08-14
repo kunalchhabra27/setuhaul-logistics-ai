@@ -22,10 +22,10 @@ from typing import TYPE_CHECKING, Any
 
 from setuhaul.backend.driver_chat_eta.exceptions import DriverChatError
 from setuhaul.backend.driver_chat_eta.llm.schemas import (
+    AutoBookSlotInput,
     EscalateInput,
     ListFeasibleSlotsInput,
     ReportExceptionInput,
-    SlotIdInput,
     UpdateCheckinInput,
 )
 
@@ -94,26 +94,29 @@ def build_tools(service: "DriverChatService", principal: "DriverPrincipal") -> l
         except DriverChatError as exc:
             return {"error": exc.code, "message": exc.message}
 
-    @tool(args_schema=SlotIdInput)
-    def hold_dock_slot(slot_id: str) -> dict:
-        """Place a short temporary hold on one dock slot so no one else can take it
-        while the driver decides. This does NOT book the appointment yet -- the driver
-        must still explicitly confirm before confirm_dock_slot is called."""
+    @tool(args_schema=AutoBookSlotInput)
+    def book_next_available_dock_slot() -> dict:
+        """Book the earliest dock slot that is compatible with the shipment (dock
+        type, refrigeration, weight) and fits the driver's latest declared ETA --
+        no driver click required. This directly books (not just holds) the slot
+        through the same validated scheduling engine WMS staff use, so it's safe
+        against double-booking. It also checks whether a genuinely lower-priority
+        shipment is occupying a better (earlier) slot that could be freed up --
+        if so it automatically files that as a pending WMS-approved request
+        (never executes it itself). Call this immediately after
+        report_delay_or_eta_change (or after list_feasible_dock_slots if the
+        driver is just asking about slots with no new delay to report) instead of
+        listing multiple options for the driver to choose from. Returns one of
+        these statuses: "booked" (done, nothing else needed), "already_booked"
+        (this shipment already has a confirmed appointment), "booked_with_pending_upgrade"
+        (booked into the earliest available slot now, AND a possibly-earlier slot
+        was also requested from a WMS coordinator as an upgrade), "swap_requested"
+        (nothing was directly available, but a slot occupied by a lower-priority
+        shipment was requested from a WMS coordinator -- not booked yet), or
+        "escalated" (nothing compatible and no swap candidate existed, so this
+        was handed to a human coordinator)."""
         try:
-            result = service.hold_slot(principal, slot_id)
-            return {"status": "held", "slot_id": slot_id, "message": result.message}
-        except DriverChatError as exc:
-            return {"error": exc.code, "message": exc.message}
-
-    @tool(args_schema=SlotIdInput)
-    def confirm_dock_slot(slot_id: str) -> dict:
-        """Confirm and permanently book the dock slot the driver currently has held.
-        Only call this after the driver has explicitly confirmed, in this
-        conversation, that they want this specific slot -- never call it just because
-        a slot was held, and never call it for a slot that was not held first."""
-        try:
-            result = service.confirm_slot(principal, slot_id)
-            return {"status": "confirmed", "slot_id": slot_id, "message": result.message}
+            return service.auto_book_earliest_feasible_slot(principal)
         except DriverChatError as exc:
             return {"error": exc.code, "message": exc.message}
 
@@ -145,8 +148,7 @@ def build_tools(service: "DriverChatService", principal: "DriverPrincipal") -> l
     return [
         report_delay_or_eta_change,
         list_feasible_dock_slots,
-        hold_dock_slot,
-        confirm_dock_slot,
+        book_next_available_dock_slot,
         update_arrival_checkin,
         escalate_to_human,
     ]

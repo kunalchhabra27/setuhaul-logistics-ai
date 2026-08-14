@@ -266,6 +266,19 @@ class TMSRepository:
             self._raise_persistence(exc)
         return rows[0] if rows else None
 
+    def cancel_current_appointment(self, shipment_id: str, now_iso: str) -> None:
+        """Release a shipment's current dock appointment when TMS cancels
+        the shipment itself. One narrow exception to the read-only stance
+        above -- cancelling a shipment should free the dock slot it was
+        holding rather than leave a phantom booking WMS still shows as
+        occupied for a load that's no longer coming."""
+        try:
+            self.backend.table("appointments").update(
+                {"is_current": 0, "appointment_status": "CANCELLED", "cancelled_at": now_iso, "updated_at": now_iso}
+            ).eq("shipment_id", shipment_id).eq("is_current", 1).execute()
+        except APIError as exc:
+            self._raise_persistence(exc)
+
     # -- facilities -------------------------------------------------------
 
     def list_facilities(self, *, limit: int = 200, offset: int = 0) -> list[dict[str, Any]]:

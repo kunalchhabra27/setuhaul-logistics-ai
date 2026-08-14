@@ -5,6 +5,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 
 from setuhaul.backend.dock_scheduler.exceptions import (
+    ChangeRequestAlreadyDecidedError,
+    ChangeRequestNotFoundError,
     DockSchedulerError,
     InvalidBookingError,
     SlotUnavailableError,
@@ -12,8 +14,11 @@ from setuhaul.backend.dock_scheduler.exceptions import (
 )
 from setuhaul.backend.dock_scheduler.models import (
     CancelHoldRequest,
+    ChangeRequestResponse,
     ConfirmRequest,
     ConfirmResponse,
+    CreateChangeRequest,
+    DecideChangeRequest,
     DockSlot,
     DriverConstraints,
     HoldRequest,
@@ -39,9 +44,9 @@ def get_service(principal: Principal = Depends(require_reader)) -> DockScheduler
 
 
 def _handle_error(exc: DockSchedulerError) -> HTTPException:
-    if isinstance(exc, UnknownShipmentError):
+    if isinstance(exc, (UnknownShipmentError, ChangeRequestNotFoundError)):
         return HTTPException(status_code=404, detail=str(exc))
-    if isinstance(exc, SlotUnavailableError):
+    if isinstance(exc, (SlotUnavailableError, ChangeRequestAlreadyDecidedError)):
         return HTTPException(status_code=409, detail=str(exc))
     if isinstance(exc, InvalidBookingError):
         return HTTPException(status_code=400, detail=str(exc))
@@ -142,3 +147,59 @@ def cancel_hold(
 ) -> dict[str, str]:
     service.cancel_hold(request.hold_id)
     return {"status": "released", "hold_id": request.hold_id}
+
+
+@router.post("/change-requests", response_model=ChangeRequestResponse)
+def create_change_request(
+    request: CreateChangeRequest,
+    principal: Principal = Depends(require_reader),
+    service: DockSchedulerService = Depends(get_service),
+) -> ChangeRequestResponse:
+    """A TMS dispatcher or a driver asks to move an already-booked shipment
+    to a different dock slot. This does not move the appointment yet -- see
+    POST /change-requests/{id}/decide, which WMS staff use to approve or
+    decline it."""
+    try:
+        row = service.create_change_request(
+            shipment_id=request.shipment_id,
+            requested_slot_id=request.requested_slot_id,
+            requested_by_role=request.requested_by_role,
+            requested_by_user_id=principal.user_id,
+            reason=request.reason,
+        )
+    except DockSchedulerError as exc:
+        raise _handle_error(exc) from exc
+    return ChangeRequestResponse(**row)
+
+
+@router.get("/change-requests", response_model=list[ChangeRequestResponse])
+def list_change_requests(
+    status: str | None = None,
+    _: Principal = Depends(require_reader),
+    service: DockSchedulerService = Depends(get_service),
+) -> list[ChangeRequestResponse]:
+    """List dock-slot change requests, optionally filtered by status
+    (PENDING/APPROVED/DECLINED). WMS filters client-side to requests for
+    shipments at its own facility using its already-fetched shipment list,
+    the same way the rest of the WMS board is facility-scoped.
+
+    Example:
+    `GET /dock-scheduler/change-requests?status=PENDING`
+    """
+    return [ChangeRequestResponse(**row) for row in service.list_change_requests(status)]
+
+
+@router.post("/change-requests/{change_request_id}/decide", response_model=ChangeRequestResponse)
+def decide_change_request(
+    change_request_id: str,
+    request: DecideChangeRequest,
+    principal: Principal = Depends(require_admin),
+    service: DockSchedulerService = Depends(get_service),
+) -> ChangeRequestResponse:
+    try:
+        row = service.decide_change_request(
+            change_request_id, approve=request.approve, decided_by_user_id=principal.user_id, note=request.note
+        )
+    except DockSchedulerError as exc:
+        raise _handle_error(exc) from exc
+    return ChangeRequestResponse(**row)

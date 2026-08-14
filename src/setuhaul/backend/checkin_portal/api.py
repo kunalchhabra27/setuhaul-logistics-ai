@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from setuhaul.backend.checkin_portal.exceptions import InvalidCheckInTransition
 from setuhaul.backend.checkin_portal.models import (
+    ApproveGateCheckinRequest,
     CompleteRequest,
     DockInRequest,
     GateCheckInRequest,
@@ -63,6 +64,26 @@ def gate_check_in(
     """
     try:
         return service.gate_check_in(request)
+    except InvalidCheckInTransition as exc:
+        raise _handle_transition_error(exc) from exc
+
+
+@router.patch("/approve-gate")
+def approve_gate_checkin(
+    request: ApproveGateCheckinRequest,
+    _: Principal = Depends(require_admin),
+    service: CheckInService = Depends(get_service),
+) -> dict:
+    """Staff approves a driver-reported gate arrival -- only after this does
+    the shipment's status become visible to TMS/WMS as checked in.
+
+    Example request body:
+    ```json
+    { "shipment_id": "SHP1006" }
+    ```
+    """
+    try:
+        return service.approve_gate_checkin(request.shipment_id)
     except InvalidCheckInTransition as exc:
         raise _handle_transition_error(exc) from exc
 

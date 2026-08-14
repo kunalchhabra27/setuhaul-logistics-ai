@@ -40,15 +40,33 @@ never hard-fails just because the LLM isn't configured yet.
 - `llm/schemas.py` -- Pydantic input schema per tool call (these become the
   JSON schema Gemini sees; field descriptions are written as instructions
   to the model).
-- `llm/tools.py` -- the six tools, each a thin wrapper around an existing
+- `llm/tools.py` -- five tools, each a thin wrapper around an existing
   `DriverChatService` method: `report_delay_or_eta_change` (wraps
   `service.report_exception`), `list_feasible_dock_slots` (wraps
-  `service.get_current_feasible_slots`), `hold_dock_slot`
-  (`service.hold_slot`), `confirm_dock_slot` (`service.confirm_slot`),
-  `update_arrival_checkin` (`service.update_checkin`), `escalate_to_human`
-  (`service.escalate`). The LLM never talks to Supabase directly and can't
-  do anything a button in the UI couldn't already do -- it calls the exact
-  same RLS-scoped, caller-authenticated service methods either way.
+  `service.get_current_feasible_slots`), `book_next_available_dock_slot`
+  (`service.auto_book_earliest_feasible_slot` -- the agent picks and books
+  the earliest compatible slot itself, atomically, with no driver click and
+  no separate hold/confirm step; this is chat-only and does not affect the
+  DockSlotBoard's own manual Hold slot/Confirm booking buttons, which still
+  call `service.hold_slot`/`service.confirm_slot` directly via their own
+  REST endpoints), `update_arrival_checkin` (`service.update_checkin`),
+  `escalate_to_human` (`service.escalate`). The LLM never talks to Supabase
+  directly and can't do anything the deterministic service layer doesn't
+  already validate -- it calls the exact same RLS-scoped, caller-
+  authenticated service methods, and slot booking still goes through the
+  same `dock_scheduler` hold->confirm primitives WMS staff use, so double-
+  booking protection is unchanged.
+  `auto_book_earliest_feasible_slot` also checks whether a genuinely
+  lower-priority shipment is occupying a better (earlier) slot, via
+  `DeterministicReschedulingEngine`'s `PRIORITY_SWAP` suggestions (see
+  `dock_scheduler/scheduler.py`) -- if so it files a
+  `dock_slot_change_requests` row (with `displaced_shipment_id`/
+  `displaced_to_slot_id` set) for a WMS coordinator to approve, exactly like
+  the existing driver/TMS "request a slot change" flow. It never executes a
+  swap itself. If a direct slot is also available, that's booked immediately
+  as a guaranteed fallback while the swap request is pending; if nothing is
+  directly available, the driver just gets the pending-swap status instead
+  of a bare escalation.
 - `llm/prompts.py` -- builds the system prompt fresh every turn from a live
   snapshot (shipment/exception/slot state), so the model is grounded in the
   current database rather than stale memory.

@@ -1,11 +1,31 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { Navigate, useParams } from "react-router-dom";
-import { motion } from "framer-motion";
-import { AlertTriangle, CalendarClock, CheckCircle2, Clock, Loader2, PackageCheck, RefreshCw } from "lucide-react";
+import { AnimatePresence, motion } from "framer-motion";
+import {
+  AlertTriangle,
+  ArrowRightLeft,
+  Ban,
+  Bell,
+  CalendarClock,
+  CheckCircle2,
+  ChevronDown,
+  Clock,
+  Download,
+  Loader2,
+  MapPin,
+  PackageCheck,
+  Phone,
+  RefreshCw,
+  ShieldAlert,
+  ShieldCheck,
+  X,
+} from "lucide-react";
 import { getService } from "../data/services";
 import { useAuth } from "../context/AuthContext";
 import { ApiClientError } from "../services/api";
 import {
+  approveGateCheckin,
   completeUnload,
   fetchCheckInStatus,
   gateCheckIn,
@@ -19,24 +39,31 @@ import {
 import {
   archiveShipment,
   assignShipmentDriver,
+  cancelShipment,
   createShipment,
+  downloadShipmentsExport,
+  getDockBoardForShipment as getTmsDockBoardForShipment,
   getShipmentContext,
   getShipmentReferenceData,
   listDrivers,
   listFacilities,
   listShipments,
   listVehicles,
+  requestDockSlotChange,
 } from "../services/tmsApi";
 import {
   confirmBooking,
+  decideChangeRequest,
   getDockBoard,
   getMyWmsFacility,
   holdSlot,
   listFacilitiesForRegistration as listFacilitiesForWmsRegistration,
+  listPendingChangeRequests,
   listShipmentsForMyFacility,
   registerMyWmsFacility,
 } from "../services/dockSchedulerApi";
 import type {
+  ChangeRequest,
   CheckInRecord,
   DockSlot,
   FacilityStaffAssignment,
@@ -70,6 +97,7 @@ export default function PortalWorkspace() {
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<string>("");
   const [error, setError] = useState<string>("");
+  const [wmsToast, setWmsToast] = useState<{ text: string; tone: "success" | "error" } | null>(null);
   const [wmsShipments, setWmsShipments] = useState<ShipmentSummary[]>([]);
   const [checkinShipments, setCheckinShipments] = useState<ShipmentSummary[]>([]);
   const [activeShipmentId, setActiveShipmentId] = useState<string>("");
@@ -81,6 +109,17 @@ export default function PortalWorkspace() {
   if (!isAuthed(service.id)) return <Navigate to={`/auth/${service.id}`} replace />;
 
   const name = sessions[service.id]?.name ?? "there";
+
+  // Action-result toasts are scoped to whichever portal produced them --
+  // without this, switching from e.g. Check-in to WMS (React Router keeps
+  // this same component instance mounted across /portal/:serviceId
+  // navigations, it doesn't remount) would leave a stale "Gate check-in
+  // approved" toast floating on a portal it has nothing to do with.
+  useEffect(() => {
+    setMessage("");
+    setError("");
+    setWmsToast(null);
+  }, [service?.id]);
 
   // WMS/Check-in staff must register which single warehouse facility they
   // work at before they can see any shipments -- this is what makes the
@@ -192,6 +231,33 @@ export default function PortalWorkspace() {
     }
   }
 
+  async function handleCancelShipment(shipmentId: string, reason?: string) {
+    setBusy(`cancel-${shipmentId}`);
+    setError("");
+    try {
+      await cancelShipment(shipmentId, reason);
+      setMessage(`Shipment ${shipmentId} cancelled.`);
+      await refreshTms();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to cancel shipment.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleRequestSlotChange(shipmentId: string, slotId: string, reason?: string) {
+    setBusy(`slot-change-${shipmentId}`);
+    setError("");
+    try {
+      await requestDockSlotChange(shipmentId, slotId, reason);
+      setMessage(`Dock slot change requested for ${shipmentId} -- awaiting WMS approval.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to request a dock slot change.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
   useEffect(() => {
     if (service.id !== "wms" || !wmsFacility) return;
     void (async () => {
@@ -227,14 +293,17 @@ export default function PortalWorkspace() {
   async function handleReserveSlot() {
     if (!activeShipmentId || !selectedSlotId) return;
     setBusy("reserve-slot");
-    setError("");
+    setWmsToast(null);
     try {
       await holdSlot({ shipment_id: activeShipmentId, slot_id: selectedSlotId });
       await confirmBooking({ shipment_id: activeShipmentId, slot_id: selectedSlotId, accepted: true });
-      setMessage(`Slot ${selectedSlotId} reserved for ${activeShipmentId}.`);
+      setWmsToast({ text: `Slot ${selectedSlotId} reserved for ${activeShipmentId}.`, tone: "success" });
       await refreshDockBoard();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to reserve that slot.");
+      setWmsToast({
+        text: err instanceof Error ? err.message : "Unable to reserve that slot.",
+        tone: "error",
+      });
     } finally {
       setBusy(null);
     }
@@ -271,15 +340,6 @@ export default function PortalWorkspace() {
     }
   }
 
-  const checkinTimeline = useMemo(() => {
-    if (!checkin) return [];
-    return [
-      { label: "Gate", value: checkin.gate_in_at ?? "Pending", status: checkin.arrival_status },
-      { label: "Queue", value: checkin.queue_status, status: checkin.arrival_status },
-      { label: "Dock", value: checkin.dock_in_at ?? "Pending", status: checkin.arrival_status },
-      { label: "Complete", value: checkin.completed_at ?? "Pending", status: checkin.arrival_status },
-    ];
-  }, [checkin]);
 
   // Real TMS stats derived from the shipments already fetched via GET /tms/shipments.
   // Note: the backend model has no actual-arrival timestamp and TMS doesn't expose an
@@ -383,7 +443,19 @@ export default function PortalWorkspace() {
         className="mt-6 rounded-3xl border border-line bg-white p-6"
       >
         {error && <div className="mb-4 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div>}
-        {message && <div className="mb-4 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{message}</div>}
+        <AnimatePresence>
+          {message && service.id !== "wms" && (
+            <FloatingToast key="portal-toast" text={message} tone="success" onDismiss={() => setMessage("")} />
+          )}
+          {wmsToast && service.id === "wms" && (
+            <FloatingToast
+              key="wms-toast"
+              text={wmsToast.text}
+              tone={wmsToast.tone}
+              onDismiss={() => setWmsToast(null)}
+            />
+          )}
+        </AnimatePresence>
         {service.id === "tms" && (
           <TmsPanel
             color={service.color}
@@ -395,6 +467,8 @@ export default function PortalWorkspace() {
             busy={busy}
             onAssign={handleAssignDriver}
             onArchive={handleArchive}
+            onCancel={handleCancelShipment}
+            onRequestSlotChange={handleRequestSlotChange}
             createOpen={createOpen}
             onOpenCreate={() => setCreateOpen(true)}
             onCloseCreate={() => setCreateOpen(false)}
@@ -425,6 +499,8 @@ export default function PortalWorkspace() {
             onSelectSlot={setSelectedSlotId}
             onReserve={handleReserveSlot}
             reserving={busy === "reserve-slot"}
+            onDecided={refreshDockBoard}
+            onMessage={(text, tone) => setWmsToast({ text, tone })}
           />
         )}
         {service.id === "checkin" && facilityLoading && (
@@ -444,7 +520,6 @@ export default function PortalWorkspace() {
           <CheckinPanel
             color={service.color}
             record={checkin}
-            timeline={checkinTimeline}
             busy={busy}
             shipments={checkinShipments}
             selectedShipmentId={activeShipmentId}
@@ -459,7 +534,13 @@ export default function PortalWorkspace() {
                       "",
                     gate_in_at: new Date().toISOString(),
                   }),
-                "Gate check-in saved"
+                `Gate check-in saved for ${activeShipmentId}`
+              )
+            }
+            onApproveGate={() =>
+              mutateCheckin(
+                () => approveGateCheckin(activeShipmentId),
+                `Gate check-in approved for ${activeShipmentId} -- now visible on TMS`
               )
             }
             onQueue={() =>
@@ -469,7 +550,7 @@ export default function PortalWorkspace() {
                     shipment_id: activeShipmentId,
                     queue_status: "YARD_QUEUE",
                   }),
-                "Queue updated"
+                `Queue updated for ${activeShipmentId}`
               )
             }
             onDock={() =>
@@ -479,7 +560,7 @@ export default function PortalWorkspace() {
                     shipment_id: activeShipmentId,
                     dock_in_at: new Date().toISOString(),
                   }),
-                "Docked status saved"
+                `Docked status saved for ${activeShipmentId}`
               )
             }
             onComplete={() =>
@@ -489,7 +570,7 @@ export default function PortalWorkspace() {
                     shipment_id: activeShipmentId,
                     completed_at: new Date().toISOString(),
                   }),
-                "Unload completed"
+                `Unload completed for ${activeShipmentId}`
               )
             }
           />
@@ -509,6 +590,52 @@ function Badge({ status }: { status: string }) {
   return <span className={`rounded-full px-2.5 py-1 text-[11px] font-bold ${tone}`}>{status}</span>;
 }
 
+// Floating, self-dismissing confirmation for an action just taken --
+// portal-scoped (see the reset-on-service-switch effect in PortalWorkspace)
+// so a message from one portal never lingers into another, and time-boxed
+// so it never just sits there forever like the old inline banner did.
+function FloatingToast({
+  text,
+  tone,
+  onDismiss,
+  durationMs = 120_000,
+}: {
+  text: string;
+  tone: "success" | "error";
+  onDismiss: () => void;
+  durationMs?: number;
+}) {
+  useEffect(() => {
+    const timer = setTimeout(onDismiss, durationMs);
+    return () => clearTimeout(timer);
+    // Intentionally keyed only on the message text -- onDismiss is a fresh
+    // closure every parent render, and including it would restart the
+    // 2-minute timer on every unrelated re-render (e.g. WMS's 15s poll).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [text, durationMs]);
+
+  return createPortal(
+    <motion.div
+      initial={{ opacity: 0, y: -12, scale: 0.97 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, y: -12, scale: 0.97 }}
+      transition={{ duration: 0.18 }}
+      className="fixed right-5 top-5 z-[9999] flex max-w-sm items-start gap-2.5 rounded-2xl border px-4 py-3 text-sm font-semibold shadow-lg"
+      style={
+        tone === "success"
+          ? { background: "#ecfdf5", borderColor: "#a7f3d0", color: "#047857" }
+          : { background: "#fef2f2", borderColor: "#fecaca", color: "#b91c1c" }
+      }
+    >
+      <span className="flex-1">{text}</span>
+      <button onClick={onDismiss} className="shrink-0 opacity-60 transition hover:opacity-100" aria-label="Dismiss">
+        <X className="h-4 w-4" />
+      </button>
+    </motion.div>,
+    document.body
+  );
+}
+
 function TmsPanel({
   color,
   shipments,
@@ -519,6 +646,8 @@ function TmsPanel({
   busy,
   onAssign,
   onArchive,
+  onCancel,
+  onRequestSlotChange,
   createOpen,
   onOpenCreate,
   onCloseCreate,
@@ -533,6 +662,8 @@ function TmsPanel({
   busy: string | null;
   onAssign: (shipmentId: string, driverId: string) => void;
   onArchive: (shipmentId: string) => void;
+  onCancel: (shipmentId: string, reason?: string) => void;
+  onRequestSlotChange: (shipmentId: string, slotId: string, reason?: string) => void;
   createOpen: boolean;
   onOpenCreate: () => void;
   onCloseCreate: () => void;
@@ -542,6 +673,25 @@ function TmsPanel({
   const vehiclesById = new Map(vehicles.map((v) => [v.vehicle_id, v]));
   const facilitiesById = new Map(facilities.map((f) => [f.facility_id, f]));
   const availableDrivers = drivers.filter((d) => d.driver_status === "ACTIVE");
+
+  const [tab, setTab] = useState<"active" | "historical">("active");
+  const [exporting, setExporting] = useState(false);
+  const [cancelTarget, setCancelTarget] = useState<ShipmentSummary | null>(null);
+  const [slotChangeTarget, setSlotChangeTarget] = useState<ShipmentSummary | null>(null);
+
+  const visibleShipments = shipments.filter((s) => {
+    const isHistorical = Boolean(s.archived_flag) || s.current_status === "COMPLETED" || s.current_status === "CANCELLED";
+    return tab === "historical" ? isHistorical : !isHistorical;
+  });
+
+  const handleExport = async () => {
+    setExporting(true);
+    try {
+      await downloadShipmentsExport();
+    } finally {
+      setExporting(false);
+    }
+  };
 
   // Live trace (dock booking / check-in / ETA) fetched lazily on hover of the
   // status icon per shipment, so we're not firing N context calls up front.
@@ -561,10 +711,37 @@ function TmsPanel({
 
   return (
     <div>
-      <h2 className="text-lg font-extrabold text-ink">Active shipments</h2>
-      <p className="text-sm text-ink-soft">Live loads currently assigned across the fleet.</p>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-extrabold text-ink">Active shipments</h2>
+          <p className="text-sm text-ink-soft">Live loads currently assigned across the fleet.</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="flex rounded-full border border-line bg-cloud p-1 text-xs font-bold">
+            {(["active", "historical"] as const).map((key) => (
+              <button
+                key={key}
+                onClick={() => setTab(key)}
+                className={`rounded-full px-3.5 py-1.5 capitalize transition ${
+                  tab === key ? "bg-white text-ink shadow-soft" : "text-ink-soft"
+                }`}
+              >
+                {key}
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={() => void handleExport()}
+            disabled={exporting}
+            className="flex items-center gap-1.5 rounded-full border border-line px-3.5 py-1.5 text-xs font-bold text-ink-soft transition hover:border-mist disabled:opacity-50"
+          >
+            {exporting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+            Export monthly report
+          </button>
+        </div>
+      </div>
       <div className="mt-4 overflow-x-auto">
-        <table className="w-full min-w-[820px] border-collapse text-sm">
+        <table className="w-full min-w-[900px] border-collapse text-sm">
           <thead>
             <tr className="text-left text-xs font-bold uppercase tracking-wide text-mist">
               <th className="pb-2"></th>
@@ -578,7 +755,7 @@ function TmsPanel({
             </tr>
           </thead>
           <tbody>
-            {shipments.map((s) => (
+            {visibleShipments.map((s) => (
               <tr key={s.shipment_id} className="border-t border-line">
                 <td className="py-3 pr-1">
                   <ShipmentStatusIcon
@@ -614,23 +791,47 @@ function TmsPanel({
                 <td className="py-3 text-ink-soft">
                   {s.vehicle_id ? vehiclesById.get(s.vehicle_id)?.registration_number ?? s.vehicle_id : "—"}
                 </td>
-                <td className="py-3 text-right">
-                  {s.current_status === "COMPLETED" && !s.archived_flag && (
-                    <button
-                      onClick={() => onArchive(s.shipment_id)}
-                      disabled={busy === `archive-${s.shipment_id}`}
-                      className="rounded-lg border border-line px-3 py-1.5 text-xs font-bold text-ink-soft transition hover:border-mist disabled:opacity-50"
-                    >
-                      {busy === `archive-${s.shipment_id}` ? "Archiving…" : "Archive"}
-                    </button>
-                  )}
+                <td className="py-3">
+                  <div className="flex justify-end gap-1.5">
+                    {s.current_status === "COMPLETED" && !s.archived_flag && (
+                      <button
+                        onClick={() => onArchive(s.shipment_id)}
+                        disabled={busy === `archive-${s.shipment_id}`}
+                        className="rounded-lg border border-line px-3 py-1.5 text-xs font-bold text-ink-soft transition hover:border-mist disabled:opacity-50"
+                      >
+                        {busy === `archive-${s.shipment_id}` ? "Archiving…" : "Archive"}
+                      </button>
+                    )}
+                    {s.current_status !== "COMPLETED" && s.current_status !== "CANCELLED" && (
+                      <>
+                        <button
+                          onClick={() => setCancelTarget(s)}
+                          disabled={busy === `cancel-${s.shipment_id}`}
+                          className="flex items-center gap-1 rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-bold text-rose-600 transition hover:border-rose-300 disabled:opacity-50"
+                        >
+                          <Ban className="h-3.5 w-3.5" />
+                          {busy === `cancel-${s.shipment_id}` ? "Cancelling…" : "Cancel"}
+                        </button>
+                        {s.driver_id && s.vehicle_id && (
+                          <button
+                            onClick={() => setSlotChangeTarget(s)}
+                            disabled={busy === `slot-change-${s.shipment_id}`}
+                            className="flex items-center gap-1 rounded-lg border border-line px-3 py-1.5 text-xs font-bold text-ink-soft transition hover:border-mist disabled:opacity-50"
+                          >
+                            <ArrowRightLeft className="h-3.5 w-3.5" />
+                            Slot change
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </div>
                 </td>
               </tr>
             ))}
-            {shipments.length === 0 && (
+            {visibleShipments.length === 0 && (
               <tr>
                 <td colSpan={8} className="py-6 text-center text-sm text-ink-soft">
-                  No shipments yet.
+                  {tab === "historical" ? "No completed, cancelled or archived shipments yet." : "No shipments yet."}
                 </td>
               </tr>
             )}
@@ -656,6 +857,193 @@ function TmsPanel({
           onCreate={onCreate}
         />
       )}
+      {cancelTarget && (
+        <CancelShipmentModal
+          shipment={cancelTarget}
+          busy={busy === `cancel-${cancelTarget.shipment_id}`}
+          onClose={() => setCancelTarget(null)}
+          onConfirm={(reason) => {
+            onCancel(cancelTarget.shipment_id, reason);
+            setCancelTarget(null);
+          }}
+        />
+      )}
+      {slotChangeTarget && (
+        <ChangeSlotModal
+          color={color}
+          shipment={slotChangeTarget}
+          busy={busy === `slot-change-${slotChangeTarget.shipment_id}`}
+          onClose={() => setSlotChangeTarget(null)}
+          onSubmit={(slotId, reason) => {
+            onRequestSlotChange(slotChangeTarget.shipment_id, slotId, reason);
+            setSlotChangeTarget(null);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function CancelShipmentModal({
+  shipment,
+  busy,
+  onClose,
+  onConfirm,
+}: {
+  shipment: ShipmentSummary;
+  busy: boolean;
+  onClose: () => void;
+  onConfirm: (reason?: string) => void;
+}) {
+  const [reason, setReason] = useState("");
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4">
+      <div className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-2xl">
+        <div className="flex items-start gap-3">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-rose-50 text-rose-600">
+            <Ban className="h-5 w-5" />
+          </div>
+          <div>
+            <h3 className="text-base font-extrabold text-ink">Cancel {shipment.shipment_id}?</h3>
+            <p className="mt-1 text-sm text-ink-soft">
+              This releases any booked dock slot and notifies the assigned driver. This can't be undone.
+            </p>
+          </div>
+        </div>
+        <label className="mt-4 block text-xs font-bold uppercase tracking-wide text-mist">
+          Reason (optional)
+          <textarea
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            rows={2}
+            className="mt-1.5 w-full rounded-xl border border-line px-3 py-2 text-sm font-normal normal-case text-ink outline-none focus:border-ink"
+            placeholder="e.g. Customer cancelled the order"
+          />
+        </label>
+        <div className="mt-5 flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            className="rounded-xl border border-line px-4 py-2 text-sm font-bold text-ink-soft transition hover:border-mist"
+          >
+            Keep shipment
+          </button>
+          <button
+            onClick={() => onConfirm(reason.trim() || undefined)}
+            disabled={busy}
+            className="rounded-xl bg-rose-600 px-4 py-2 text-sm font-bold text-white transition hover:bg-rose-500 disabled:opacity-50"
+          >
+            {busy ? "Cancelling…" : "Cancel shipment"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ChangeSlotModal({
+  color,
+  shipment,
+  busy,
+  onClose,
+  onSubmit,
+}: {
+  color: string;
+  shipment: ShipmentSummary;
+  busy: boolean;
+  onClose: () => void;
+  onSubmit: (slotId: string, reason?: string) => void;
+}) {
+  const [slots, setSlots] = useState<DockSlot[] | null>(null);
+  const [loadError, setLoadError] = useState("");
+  const [selectedSlotId, setSelectedSlotId] = useState("");
+  const [reason, setReason] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    getTmsDockBoardForShipment(shipment.shipment_id)
+      .then((board) => !cancelled && setSlots(board))
+      .catch((err) => !cancelled && setLoadError(err instanceof Error ? err.message : "Unable to load dock slots."));
+    return () => {
+      cancelled = true;
+    };
+  }, [shipment.shipment_id]);
+
+  const available = (slots ?? []).filter((s) => s.availability_status === "AVAILABLE");
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4">
+      <div className="flex max-h-[85vh] w-full max-w-md flex-col rounded-2xl bg-white p-6 shadow-2xl">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h3 className="text-base font-extrabold text-ink">Request a different dock slot</h3>
+            <p className="mt-1 text-sm text-ink-soft">
+              For {shipment.shipment_id}. WMS staff must approve this before it takes effect.
+            </p>
+          </div>
+          <button onClick={onClose} className="rounded-full p-1 text-mist transition hover:bg-cloud">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="mt-4 flex-1 overflow-y-auto">
+          {loadError && <p className="text-sm text-rose-600">{loadError}</p>}
+          {!loadError && slots === null && (
+            <div className="flex items-center gap-2 py-6 text-sm text-ink-soft">
+              <Loader2 className="h-4 w-4 animate-spin" /> Loading available slots…
+            </div>
+          )}
+          {!loadError && slots !== null && available.length === 0 && (
+            <p className="py-6 text-center text-sm italic text-mist">No open slots right now.</p>
+          )}
+          <div className="space-y-1.5">
+            {available.map((slot) => (
+              <button
+                key={slot.slot_id}
+                onClick={() => setSelectedSlotId(slot.slot_id)}
+                className="flex w-full items-center justify-between rounded-xl border px-3 py-2.5 text-left text-sm transition"
+                style={
+                  selectedSlotId === slot.slot_id
+                    ? { borderColor: color, background: `${color}0D` }
+                    : { borderColor: "var(--color-line)" }
+                }
+              >
+                <span className="font-bold text-ink">{slot.dock_code}</span>
+                <span className="text-xs text-ink-soft">
+                  {new Date(slot.start).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} -{" "}
+                  {new Date(slot.end).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <label className="mt-4 block text-xs font-bold uppercase tracking-wide text-mist">
+          Reason (optional)
+          <input
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            className="mt-1.5 w-full rounded-xl border border-line px-3 py-2 text-sm font-normal normal-case text-ink outline-none focus:border-ink"
+            placeholder="e.g. Driver reported a 40 min delay"
+          />
+        </label>
+
+        <div className="mt-5 flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            className="rounded-xl border border-line px-4 py-2 text-sm font-bold text-ink-soft transition hover:border-mist"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => selectedSlotId && onSubmit(selectedSlotId, reason.trim() || undefined)}
+            disabled={busy || !selectedSlotId}
+            className="rounded-xl px-4 py-2 text-sm font-bold text-white transition disabled:opacity-50"
+            style={{ background: color }}
+          >
+            {busy ? "Submitting…" : "Send request to WMS"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -721,12 +1109,44 @@ function ShipmentStatusIcon({
     shipment.latest_eta_ts && shipment.original_eta_ts && shipment.latest_eta_ts !== shipment.original_eta_ts,
   );
 
+  // Rendered through a portal at a fixed, viewport-computed position rather
+  // than absolutely positioned inside the table cell -- the shipments table
+  // sits in an overflow-x-auto wrapper, and per the CSS overflow spec,
+  // setting only overflow-x to a non-visible value forces the browser to
+  // also compute overflow-y as auto, which was silently clipping the
+  // popover instead of letting it float above the table like the reference
+  // design.
+  const anchorRef = useRef<HTMLButtonElement>(null);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [open, setOpen] = useState(false);
+  const [coords, setCoords] = useState<{ top: number; left: number; openUp: boolean } | null>(null);
+
+  const show = () => {
+    if (closeTimer.current) clearTimeout(closeTimer.current);
+    onHover();
+    const rect = anchorRef.current?.getBoundingClientRect();
+    if (rect) {
+      const openUp = rect.bottom + 340 > window.innerHeight;
+      const left = Math.min(Math.max(rect.left + rect.width / 2, 170), window.innerWidth - 170);
+      setCoords({ top: openUp ? rect.top - 8 : rect.bottom + 8, left, openUp });
+    }
+    setOpen(true);
+  };
+  const scheduleHide = () => {
+    closeTimer.current = setTimeout(() => setOpen(false), 120);
+  };
+
   return (
-    <div className="group/status relative inline-flex" onMouseEnter={onHover}>
+    <>
       <button
+        ref={anchorRef}
         type="button"
         aria-label={tone.label}
-        className={`flex h-7 w-7 items-center justify-center rounded-full border transition ${tone.ringClasses}`}
+        onMouseEnter={show}
+        onMouseLeave={scheduleHide}
+        onFocus={show}
+        onBlur={scheduleHide}
+        className={`relative flex h-7 w-7 items-center justify-center rounded-full border transition ${tone.ringClasses}`}
       >
         <Icon className={`h-3.5 w-3.5 ${tone.iconClasses} ${tone.spin ? "animate-spin" : ""}`} />
         {etaChanged && !tone.spin && (
@@ -734,86 +1154,107 @@ function ShipmentStatusIcon({
         )}
       </button>
 
-      <div className="pointer-events-none invisible absolute left-1/2 top-full z-30 mt-2 w-80 -translate-x-1/2 translate-y-1 opacity-0 transition-all duration-150 group-hover/status:visible group-hover/status:translate-y-0 group-hover/status:opacity-100 group-hover/status:pointer-events-auto">
-        <div className="overflow-hidden rounded-2xl border border-line bg-white shadow-xl">
-          <div className={`flex items-center gap-2 border-b border-line px-4 py-2.5 ${tone.ringClasses}`}>
-            <Icon className={`h-4 w-4 ${tone.iconClasses} ${tone.spin ? "animate-spin" : ""}`} />
-            <span className="text-xs font-extrabold uppercase tracking-wide text-ink">{tone.label}</span>
-            <span className="ml-auto font-mono text-[11px] font-bold text-mist">{shipment.shipment_id}</span>
-          </div>
-
-          {context === "loading" && (
-            <div className="px-4 py-4 text-xs text-ink-soft">Fetching dock, check-in and ETA trace…</div>
-          )}
-          {context === "error" && (
-            <div className="px-4 py-4 text-xs text-rose-600">Live status is unavailable right now.</div>
-          )}
-          {context && context !== "loading" && context !== "error" && (
-            <div className="space-y-3 px-4 py-3">
-              <TraceRow label="ETA">
-                <div className="flex items-center gap-1.5 text-xs">
-                  <span className="font-bold text-ink">{formatTraceTime(shipment.original_eta_ts) ?? "TBD"}</span>
-                  {etaChanged && (
-                    <>
-                      <span className="text-mist">→</span>
-                      <span className="font-bold text-amber-600">{formatTraceTime(shipment.latest_eta_ts)}</span>
-                      <span className="rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] font-bold text-amber-700">updated</span>
-                    </>
-                  )}
+      {createPortal(
+        <AnimatePresence>
+          {open && coords && (
+            <motion.div
+              initial={{ opacity: 0, scale: 0.96, y: coords.openUp ? 6 : -6 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.96, y: coords.openUp ? 6 : -6 }}
+              transition={{ duration: 0.12 }}
+              onMouseEnter={() => closeTimer.current && clearTimeout(closeTimer.current)}
+              onMouseLeave={scheduleHide}
+              style={{
+                position: "fixed",
+                top: coords.top,
+                left: coords.left,
+                transform: `translate(-50%, ${coords.openUp ? "-100%" : "0"})`,
+              }}
+              className="z-50 w-80"
+            >
+              <div className="overflow-hidden rounded-2xl border border-line bg-white shadow-2xl">
+                <div className={`flex items-center gap-2 border-b border-line px-4 py-2.5 ${tone.ringClasses}`}>
+                  <Icon className={`h-4 w-4 ${tone.iconClasses} ${tone.spin ? "animate-spin" : ""}`} />
+                  <span className="text-xs font-extrabold uppercase tracking-wide text-ink">{tone.label}</span>
+                  <span className="ml-auto font-mono text-[11px] font-bold text-mist">{shipment.shipment_id}</span>
                 </div>
-              </TraceRow>
 
-              <TraceRow label="Dock booking">
-                {context.dock ? (
-                  <div className="text-xs text-ink-soft">
-                    <span className="font-bold text-ink">{context.dock.dock_code ?? "Dock TBD"}</span>
-                    {context.dock.appointment_status && (
-                      <span className="ml-1.5 rounded-full bg-cloud px-1.5 py-0.5 text-[10px] font-bold uppercase text-ink-soft">
-                        {context.dock.appointment_status}
-                      </span>
-                    )}
-                    {context.dock.slot_start_ts && context.dock.slot_end_ts && (
-                      <div className="mt-0.5 flex items-center gap-1 text-[11px] text-mist">
-                        <Clock className="h-3 w-3" />
-                        {formatTraceTime(context.dock.slot_start_ts)} - {formatTraceTime(context.dock.slot_end_ts)}
+                {context === "loading" && (
+                  <div className="px-4 py-4 text-xs text-ink-soft">Fetching dock, check-in and ETA trace…</div>
+                )}
+                {context === "error" && (
+                  <div className="px-4 py-4 text-xs text-rose-600">Live status is unavailable right now.</div>
+                )}
+                {context && context !== "loading" && context !== "error" && (
+                  <div className="space-y-3 px-4 py-3">
+                    <TraceRow label="ETA">
+                      <div className="flex items-center gap-1.5 text-xs">
+                        <span className="font-bold text-ink">{formatTraceTime(shipment.original_eta_ts) ?? "TBD"}</span>
+                        {etaChanged && (
+                          <>
+                            <span className="text-mist">→</span>
+                            <span className="font-bold text-amber-600">{formatTraceTime(shipment.latest_eta_ts)}</span>
+                            <span className="rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] font-bold text-amber-700">updated</span>
+                          </>
+                        )}
                       </div>
-                    )}
-                  </div>
-                ) : (
-                  <span className="text-xs italic text-mist">No slot booked yet</span>
-                )}
-              </TraceRow>
+                    </TraceRow>
 
-              <TraceRow label="Check-in">
-                {context.checkin ? (
-                  <div className="space-y-1 text-xs text-ink-soft">
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      {context.checkin.arrival_state && (
-                        <span className="rounded-full bg-cloud px-1.5 py-0.5 text-[10px] font-bold uppercase text-ink-soft">
-                          {context.checkin.arrival_state}
-                        </span>
+                    <TraceRow label="Dock booking">
+                      {context.dock ? (
+                        <div className="text-xs text-ink-soft">
+                          <span className="font-bold text-ink">{context.dock.dock_code ?? "Dock TBD"}</span>
+                          {context.dock.appointment_status && (
+                            <span className="ml-1.5 rounded-full bg-cloud px-1.5 py-0.5 text-[10px] font-bold uppercase text-ink-soft">
+                              {context.dock.appointment_status}
+                            </span>
+                          )}
+                          {context.dock.slot_start_ts && context.dock.slot_end_ts && (
+                            <div className="mt-0.5 flex items-center gap-1 text-[11px] text-mist">
+                              <Clock className="h-3 w-3" />
+                              {formatTraceTime(context.dock.slot_start_ts)} - {formatTraceTime(context.dock.slot_end_ts)}
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-xs italic text-mist">No slot booked yet</span>
                       )}
-                      {context.checkin.queue_state && (
-                        <span className="rounded-full bg-cloud px-1.5 py-0.5 text-[10px] font-bold uppercase text-ink-soft">
-                          {context.checkin.queue_state.replaceAll("_", " ")}
-                        </span>
+                    </TraceRow>
+
+                    <TraceRow label="Check-in">
+                      {context.checkin ? (
+                        <div className="space-y-1 text-xs text-ink-soft">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {context.checkin.arrival_state && (
+                              <span className="rounded-full bg-cloud px-1.5 py-0.5 text-[10px] font-bold uppercase text-ink-soft">
+                                {context.checkin.arrival_state}
+                              </span>
+                            )}
+                            {context.checkin.queue_state && (
+                              <span className="rounded-full bg-cloud px-1.5 py-0.5 text-[10px] font-bold uppercase text-ink-soft">
+                                {context.checkin.queue_state.replaceAll("_", " ")}
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-mist">
+                            {context.checkin.gate_in_ts && <span>Gate in {formatTraceTime(context.checkin.gate_in_ts)}</span>}
+                            {context.checkin.dock_in_ts && <span>Dock in {formatTraceTime(context.checkin.dock_in_ts)}</span>}
+                            {context.checkin.unload_end_ts && <span>Unload done {formatTraceTime(context.checkin.unload_end_ts)}</span>}
+                          </div>
+                        </div>
+                      ) : (
+                        <span className="text-xs italic text-mist">Not checked in yet</span>
                       )}
-                    </div>
-                    <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-mist">
-                      {context.checkin.gate_in_ts && <span>Gate in {formatTraceTime(context.checkin.gate_in_ts)}</span>}
-                      {context.checkin.dock_in_ts && <span>Dock in {formatTraceTime(context.checkin.dock_in_ts)}</span>}
-                      {context.checkin.unload_end_ts && <span>Unload done {formatTraceTime(context.checkin.unload_end_ts)}</span>}
-                    </div>
+                    </TraceRow>
                   </div>
-                ) : (
-                  <span className="text-xs italic text-mist">Not checked in yet</span>
                 )}
-              </TraceRow>
-            </div>
+              </div>
+            </motion.div>
           )}
-        </div>
-      </div>
-    </div>
+        </AnimatePresence>,
+        document.body,
+      )}
+    </>
   );
 }
 
@@ -1122,6 +1563,152 @@ function formatTime(ts: string) {
   return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+// The dock board now spans several days of backfilled capacity (see the
+// backend's ensure_future_slots), not just "today" -- without a date label,
+// a flat time-only list of e.g. "09:00 AM - 10:00 AM" repeated once per
+// upcoming day looked like duplicated or nonsensical data.
+function formatDayLabel(ts: string) {
+  const date = new Date(ts);
+  const today = new Date();
+  const tomorrow = new Date(today);
+  tomorrow.setDate(today.getDate() + 1);
+  if (date.toDateString() === today.toDateString()) return "Today";
+  if (date.toDateString() === tomorrow.toDateString()) return "Tomorrow";
+  return date.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
+}
+
+function dayKey(ts: string) {
+  return new Date(ts).toDateString();
+}
+
+function WmsChangeRequestsHeader({
+  color,
+  shipments,
+  onDecided,
+  onMessage,
+}: {
+  color: string;
+  shipments: ShipmentSummary[];
+  onDecided: () => void;
+  onMessage: (text: string, tone: "success" | "error") => void;
+}) {
+  const [requests, setRequests] = useState<ChangeRequest[]>([]);
+  const [expanded, setExpanded] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [error, setError] = useState("");
+
+  // Facility-scoped by cross-referencing against the shipments this WMS
+  // staff member can already see (already resolved server-side from their
+  // own staff_facility_assignments row) -- dock_scheduler's change-request
+  // endpoint itself has no facility filter of its own.
+  const shipmentIds = useMemo(() => new Set(shipments.map((s) => s.shipment_id)), [shipments]);
+
+  const refresh = useCallback(async () => {
+    try {
+      const pending = await listPendingChangeRequests();
+      setRequests(pending.filter((r) => shipmentIds.has(r.shipment_id)));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to load change requests.");
+    }
+  }, [shipmentIds]);
+
+  useEffect(() => {
+    void refresh();
+    const interval = setInterval(() => void refresh(), 15_000);
+    return () => clearInterval(interval);
+  }, [refresh]);
+
+  const decide = async (id: string, approve: boolean) => {
+    setBusyId(id);
+    setError("");
+    const target = requests.find((r) => r.change_request_id === id);
+    try {
+      await decideChangeRequest(id, approve);
+      await refresh();
+      onDecided();
+      onMessage(
+        approve
+          ? `Approved -- ${target?.shipment_id ?? "shipment"} moved to ${target?.dock_code ?? "the requested dock"}.`
+          : `Declined the slot change request for ${target?.shipment_id ?? "that shipment"}.`,
+        "success"
+      );
+    } catch (err) {
+      const text = err instanceof Error ? err.message : "Unable to record that decision.";
+      setError(text);
+      onMessage(text, "error");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  if (requests.length === 0) return null;
+
+  return (
+    <div className="mb-5 overflow-hidden rounded-2xl border border-amber-200 bg-amber-50">
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
+      >
+        <div className="flex items-center gap-2">
+          <Bell className="h-4 w-4 text-amber-700" />
+          <span className="text-sm font-extrabold text-amber-800">
+            {requests.length} dock slot change {requests.length === 1 ? "request" : "requests"} awaiting your approval
+          </span>
+        </div>
+        <ChevronDown className={`h-4 w-4 shrink-0 text-amber-700 transition-transform ${expanded ? "rotate-180" : ""}`} />
+      </button>
+      {expanded && (
+        <div className="space-y-2 border-t border-amber-200 px-4 py-3">
+          {error && <p className="text-xs font-semibold text-rose-600">{error}</p>}
+          {requests.map((r) => (
+            <div
+              key={r.change_request_id}
+              className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-line bg-white p-3"
+            >
+              <div className="text-xs">
+                <p className="font-bold text-ink">
+                  {r.shipment_id} → {r.dock_code ?? "Dock TBD"}
+                </p>
+                <p className="mt-0.5 text-ink-soft">
+                  {r.slot_start_ts && r.slot_end_ts
+                    ? `${formatTime(r.slot_start_ts)} - ${formatTime(r.slot_end_ts)}`
+                    : "Time TBD"}
+                  {" · requested by "}
+                  {r.requested_by_role === "TMS" ? "dispatch" : "driver"}
+                </p>
+                {r.reason && <p className="mt-0.5 italic text-mist">"{r.reason}"</p>}
+                {r.displaced_shipment_id && (
+                  <p className="mt-1 rounded-lg border border-amber-200 bg-amber-50 px-2 py-1 font-bold text-amber-800">
+                    Approving this will also move {r.displaced_shipment_id}'s appointment to slot{" "}
+                    {r.displaced_to_slot_id ?? "TBD"}.
+                  </p>
+                )}
+              </div>
+              <div className="flex gap-1.5">
+                <button
+                  onClick={() => void decide(r.change_request_id, false)}
+                  disabled={busyId === r.change_request_id}
+                  className="rounded-lg border border-line px-3 py-1.5 text-xs font-bold text-ink-soft transition hover:border-mist disabled:opacity-50"
+                >
+                  Decline
+                </button>
+                <button
+                  onClick={() => void decide(r.change_request_id, true)}
+                  disabled={busyId === r.change_request_id}
+                  className="rounded-lg px-3 py-1.5 text-xs font-bold text-white transition disabled:opacity-50"
+                  style={{ background: color }}
+                >
+                  {busyId === r.change_request_id ? "Approving…" : "Approve"}
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function WmsPanel({
   color,
   board,
@@ -1132,6 +1719,8 @@ function WmsPanel({
   onSelectSlot,
   onReserve,
   reserving,
+  onDecided,
+  onMessage,
 }: {
   color: string;
   board: DockSlot[];
@@ -1142,6 +1731,8 @@ function WmsPanel({
   onSelectSlot: (slotId: string) => void;
   onReserve: () => void;
   reserving: boolean;
+  onDecided: () => void;
+  onMessage: (text: string, tone: "success" | "error") => void;
 }) {
   // Group by real dock_code from the DB response -- the number of dock
   // columns and slots rendered adjusts automatically to whatever docks and
@@ -1161,6 +1752,7 @@ function WmsPanel({
 
   return (
     <div>
+      <WmsChangeRequestsHeader color={color} shipments={shipments} onDecided={onDecided} onMessage={onMessage} />
       <h2 className="text-lg font-extrabold text-ink">Dock & appointment slots</h2>
       <p className="text-sm text-ink-soft">Hover a slot for details. Click an open slot to select it, then reserve.</p>
       <div className="mt-4 max-w-xs">
@@ -1192,46 +1784,59 @@ function WmsPanel({
               {slots[0] && <span className="ml-1 font-medium normal-case text-mist">· {slots[0].dock_type}</span>}
             </p>
             <div className="flex flex-col gap-1.5">
-              {slots.map((slot) => {
-                const style = dockSlotStyle(slot.availability_status);
-                const isSelected = slot.slot_id === selectedSlotId;
-                const selectable = slot.availability_status === "AVAILABLE";
-                return (
-                  <div key={slot.slot_id} className="group relative">
-                    <button
-                      type="button"
-                      disabled={!selectable}
-                      onClick={() => onSelectSlot(isSelected ? "" : slot.slot_id)}
-                      className={`w-full rounded-lg border px-2.5 py-1.5 text-left text-xs font-semibold transition ${style.chip} ${
-                        selectable ? "cursor-pointer hover:brightness-95" : "cursor-not-allowed opacity-80"
-                      }`}
-                      style={isSelected ? { boxShadow: `0 0 0 2px ${color}` } : undefined}
-                    >
-                      {formatTime(slot.start)} – {formatTime(slot.end)}
-                    </button>
-                    {/* Hoverable diagram detail: full time range, status, and
-                        occupant, revealed on hover without needing a click. */}
-                    <div className="pointer-events-none absolute left-1/2 top-full z-10 mt-1.5 w-56 -translate-x-1/2 rounded-xl border border-line bg-white p-3 text-xs text-ink opacity-0 shadow-pop transition duration-150 group-hover:opacity-100">
-                      <p className="font-bold">
-                        {slot.dock_code} · {slot.slot_id}
-                      </p>
-                      <p className="mt-1 flex items-center gap-1.5 text-ink-soft">
-                        <Clock className="h-3.5 w-3.5" />
-                        {formatTime(slot.start)} – {formatTime(slot.end)}
-                      </p>
-                      <div className="mt-1.5">
-                        <Badge status={slot.availability_status} />
-                      </div>
-                      {slot.occupant_shipment_id && (
-                        <p className="mt-1.5 text-ink-soft">
-                          Booked by {slot.occupant_shipment_id}
-                          {slot.occupant_driver_name ? ` · ${slot.occupant_driver_name}` : ""}
+              {(() => {
+                let lastDay = "";
+                return slots.map((slot) => {
+                  const style = dockSlotStyle(slot.availability_status);
+                  const isSelected = slot.slot_id === selectedSlotId;
+                  const selectable = slot.availability_status === "AVAILABLE";
+                  const thisDay = dayKey(slot.start);
+                  const showDayLabel = thisDay !== lastDay;
+                  lastDay = thisDay;
+                  return (
+                    <div key={slot.slot_id}>
+                      {showDayLabel && (
+                        <p className="mb-1 mt-2 text-[10px] font-bold uppercase tracking-wide text-mist first:mt-0">
+                          {formatDayLabel(slot.start)}
                         </p>
                       )}
+                      <div className="group relative">
+                        <button
+                          type="button"
+                          disabled={!selectable}
+                          onClick={() => onSelectSlot(isSelected ? "" : slot.slot_id)}
+                          className={`w-full rounded-lg border px-2.5 py-1.5 text-left text-xs font-semibold transition ${style.chip} ${
+                            selectable ? "cursor-pointer hover:brightness-95" : "cursor-not-allowed opacity-80"
+                          }`}
+                          style={isSelected ? { boxShadow: `0 0 0 2px ${color}` } : undefined}
+                        >
+                          {formatTime(slot.start)} – {formatTime(slot.end)}
+                        </button>
+                        {/* Hoverable diagram detail: full time range, status, and
+                            occupant, revealed on hover without needing a click. */}
+                        <div className="pointer-events-none absolute left-1/2 top-full z-10 mt-1.5 w-56 -translate-x-1/2 rounded-xl border border-line bg-white p-3 text-xs text-ink opacity-0 shadow-pop transition duration-150 group-hover:opacity-100">
+                          <p className="font-bold">
+                            {slot.dock_code} · {slot.slot_id}
+                          </p>
+                          <p className="mt-1 flex items-center gap-1.5 text-ink-soft">
+                            <Clock className="h-3.5 w-3.5" />
+                            {formatDayLabel(slot.start)}, {formatTime(slot.start)} – {formatTime(slot.end)}
+                          </p>
+                          <div className="mt-1.5">
+                            <Badge status={slot.availability_status} />
+                          </div>
+                          {slot.occupant_shipment_id && (
+                            <p className="mt-1.5 text-ink-soft">
+                              Booked by {slot.occupant_shipment_id}
+                              {slot.occupant_driver_name ? ` · ${slot.occupant_driver_name}` : ""}
+                            </p>
+                          )}
+                        </div>
+                      </div>
                     </div>
-                  </div>
-                );
-              })}
+                  );
+                });
+              })()}
               {slots.length === 0 && <p className="text-xs text-mist">No slots</p>}
             </div>
           </div>
@@ -1259,31 +1864,47 @@ function WmsPanel({
   );
 }
 
+const TIMING_STYLES: Record<string, { label: string; bg: string; text: string }> = {
+  EARLY: { label: "Arrived early", bg: "#eff6ff", text: "#1d4ed8" },
+  ON_TIME: { label: "On time", bg: "#ecfdf5", text: "#047857" },
+  LATE: { label: "Running late", bg: "#fef2f2", text: "#b91c1c" },
+};
+
 function CheckinPanel({
   color,
   record,
-  timeline,
   busy,
   shipments,
   selectedShipmentId,
   onSelectShipment,
   onGateIn,
+  onApproveGate,
   onQueue,
   onDock,
   onComplete,
 }: {
   color: string;
   record: CheckInRecord | null;
-  timeline: Array<{ label: string; value: string; status: string }>;
   busy: string | null;
   shipments: ShipmentSummary[];
   selectedShipmentId: string;
   onSelectShipment: (shipmentId: string) => void;
   onGateIn: () => void;
+  onApproveGate: () => void;
   onQueue: () => void;
   onDock: () => void;
   onComplete: () => void;
 }) {
+  const stages: Array<{ key: string; label: string; icon: typeof MapPin; done: boolean; active: boolean; value: string | null }> = [
+    { key: "gate", label: "Gate check-in", icon: MapPin, done: Boolean(record?.gate_in_at), active: record?.arrival_status === "GATE_IN", value: record?.gate_in_at ?? null },
+    { key: "queue", label: "Queue", icon: Clock, done: record?.arrival_status === "WAITING" || record?.arrival_status === "DOCKED" || record?.arrival_status === "COMPLETED", active: record?.arrival_status === "WAITING", value: record?.queue_status && record.queue_status !== "NONE" ? record.queue_status.replace("_", " ").toLowerCase() : null },
+    { key: "dock", label: "Docked", icon: PackageCheck, done: Boolean(record?.dock_in_at), active: record?.arrival_status === "DOCKED", value: record?.dock_in_at ?? null },
+    { key: "complete", label: "Unload complete", icon: CheckCircle2, done: Boolean(record?.completed_at), active: record?.arrival_status === "COMPLETED", value: record?.completed_at ?? null },
+  ];
+
+  const needsApproval = Boolean(record?.gate_in_at) && !record?.staff_approved;
+  const timing = record?.timing_status ? TIMING_STYLES[record.timing_status] : null;
+
   return (
     <div>
       <h2 className="text-lg font-extrabold text-ink">Gate & yard activity</h2>
@@ -1304,18 +1925,87 @@ function CheckinPanel({
           </select>
         </Field>
       </div>
+
+      {needsApproval && (
+        <div className="mt-4 flex flex-col items-start justify-between gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 sm:flex-row sm:items-center">
+          <div className="flex items-start gap-2.5">
+            <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-amber-600" />
+            <div>
+              <p className="text-sm font-bold text-amber-800">Driver reported gate arrival — pending your approval</p>
+              <p className="mt-0.5 text-xs text-amber-700">
+                TMS and WMS won't see this shipment as checked in until you confirm the driver is actually at the gate.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={onApproveGate}
+            disabled={Boolean(busy)}
+            className="flex shrink-0 items-center gap-1.5 rounded-xl bg-amber-600 px-4 py-2 text-sm font-bold text-white shadow-soft transition hover:bg-amber-500 disabled:opacity-50"
+          >
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}
+            Approve check-in
+          </button>
+        </div>
+      )}
+
       <div className="mt-4 grid gap-4 lg:grid-cols-2">
         <div className="rounded-2xl border border-line p-4">
-          <p className="text-sm font-bold text-ink">Shipment {record?.shipment_id ?? selectedShipmentId ?? "—"}</p>
-          <p className="mt-1 text-xs text-ink-soft">Backend validated status only. React never reimplements the state machine.</p>
-          <div className="mt-4 grid gap-2">
-            {timeline.length === 0 && <p className="text-sm text-ink-soft">Not checked in yet.</p>}
-            {timeline.map((item) => (
-              <div key={item.label} className="flex items-center justify-between rounded-xl bg-cloud/70 px-3 py-2 text-sm">
-                <span className="font-medium text-ink">{item.label}</span>
-                <span className="text-ink-soft">{item.value}</span>
-              </div>
-            ))}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm font-bold text-ink">Shipment {record?.shipment_id ?? selectedShipmentId ?? "—"}</p>
+            <div className="flex items-center gap-1.5">
+              {record?.staff_approved && (
+                <span className="flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-bold text-emerald-700">
+                  <ShieldCheck className="h-3 w-3" /> approved
+                </span>
+              )}
+              {timing && (
+                <span className="flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-bold" style={{ background: timing.bg, color: timing.text }}>
+                  {record?.timing_status === "LATE" ? <AlertTriangle className="h-3 w-3" /> : <Clock className="h-3 w-3" />}
+                  {timing.label}
+                </span>
+              )}
+            </div>
+          </div>
+
+          {(record?.driver_name || record?.driver_phone) && (
+            <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-ink-soft">
+              {record?.driver_name && <span className="font-medium text-ink">{record.driver_name}</span>}
+              {record?.driver_phone && (
+                <span className="flex items-center gap-1">
+                  <Phone className="h-3 w-3" /> {record.driver_phone}
+                </span>
+              )}
+            </div>
+          )}
+
+          <p className="mt-2 text-xs text-ink-soft">Backend validated status only. React never reimplements the state machine.</p>
+
+          <div className="mt-4 space-y-2">
+            {!record && <p className="text-sm text-ink-soft">Not checked in yet.</p>}
+            {stages.map((stage) => {
+              const Icon = stage.icon;
+              return (
+                <div
+                  key={stage.key}
+                  className="flex items-center justify-between rounded-xl px-3 py-2 text-sm transition-colors"
+                  style={
+                    stage.active
+                      ? { background: `${color}14`, border: `1px solid ${color}40` }
+                      : stage.done
+                      ? { background: "#ecfdf5", border: "1px solid transparent" }
+                      : { background: "var(--color-cloud)", border: "1px solid transparent", opacity: 0.7 }
+                  }
+                >
+                  <span className="flex items-center gap-2 font-medium text-ink">
+                    <Icon className="h-4 w-4" style={{ color: stage.done || stage.active ? color : "var(--color-mist)" }} />
+                    {stage.label}
+                  </span>
+                  <span className="text-xs text-ink-soft">
+                    {stage.value ? (stage.key === "gate" || stage.key === "dock" || stage.key === "complete" ? new Date(stage.value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : stage.value) : stage.done ? "done" : "pending"}
+                  </span>
+                </div>
+              );
+            })}
           </div>
         </div>
         <div className="rounded-2xl border border-line p-4">

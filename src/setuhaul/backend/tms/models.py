@@ -327,6 +327,10 @@ class ShipmentReferenceData(DBModel):
     product_categories: list[str]
 
 
+class CancelShipmentRequest(APIModel):
+    reason: str | None = None
+
+
 class FacilityStaffRegisterRequest(APIModel):
     facility_id: str = Field(min_length=1)
 

@@ -1,5 +1,5 @@
 import { createApiClient } from "./api";
-import type { DockSlot, DockSuggestion, FacilityStaffAssignment, ShipmentSummary, TmsFacility } from "../types/api";
+import type { ChangeRequest, DockSlot, DockSuggestion, FacilityStaffAssignment, ShipmentSummary, TmsFacility } from "../types/api";
 
 const api = createApiClient("wms");
 
@@ -61,4 +61,21 @@ export function registerMyWmsFacility(facilityId: string) {
 // another facility's shipments here.
 export function listShipmentsForMyFacility() {
   return api.request<ShipmentSummary[]>("/tms/facility-staff/shipments");
+}
+
+// -- dock-slot change requests (TMS/driver requested, WMS approved) --------
+//
+// TMS and Driver call POST /dock-scheduler/change-requests through their OWN
+// api client (see tmsApi.ts / driverChatApi.ts) so the request is attributed
+// to the right requester -- this file only owns the WMS-side review actions.
+
+export function listPendingChangeRequests() {
+  return api.request<ChangeRequest[]>("/dock-scheduler/change-requests?status=PENDING");
+}
+
+export function decideChangeRequest(changeRequestId: string, approve: boolean, note?: string) {
+  return api.request<ChangeRequest>(`/dock-scheduler/change-requests/${encodeURIComponent(changeRequestId)}/decide`, {
+    method: "POST",
+    body: JSON.stringify({ approve, ...(note ? { note } : {}) }),
+  });
 }
