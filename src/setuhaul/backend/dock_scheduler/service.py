@@ -22,6 +22,7 @@ from setuhaul.backend.dock_scheduler.models import (
 )
 from setuhaul.backend.dock_scheduler.repository import DockSchedulerRepository, parse_ts
 from setuhaul.backend.dock_scheduler.scheduler import DeterministicReschedulingEngine
+from setuhaul.infrastructure import cache
 
 
 def _now_iso() -> str:
@@ -50,6 +51,15 @@ class DockSchedulerService:
         this is not limited/ranked -- it's meant to show the whole day's
         capacity across every dock the shipment could use.
         """
+        cache_key = cache.dock_board_key(shipment_id)
+        rows = cache.get_or_set(
+            cache_key,
+            cache.TTL_HOT,
+            lambda: [slot.model_dump(mode="json") for slot in self._build_dock_board(shipment_id)],
+        )
+        return [DockSlot.model_validate(row) for row in rows]
+
+    def _build_dock_board(self, shipment_id: str) -> list[DockSlot]:
         self.repository.ensure_future_slots_for_shipment(shipment_id)
         slots = self.repository.compatible_slots(shipment_id)
 
@@ -92,26 +102,47 @@ class DockSchedulerService:
         compatible = self.repository.compatible_slots(shipment_id)
         if not any(slot["slot_id"] == slot_id for slot in compatible):
             raise InvalidBookingError("Slot is not a feasible option for this shipment")
-        return self.repository.create_hold(shipment_id, slot_id, ttl_minutes)
+        result = self.repository.create_hold(shipment_id, slot_id, ttl_minutes)
+        self._invalidate_booking_caches(shipment_id)
+        return result
 
     def request_confirmation(self, shipment_id: str, slot_id: str) -> str:
         """Move from HELD to PENDING_CONFIRMATION."""
         hold = self.repository.active_hold_for_shipment(shipment_id, slot_id)
         if hold is None:
             self.repository.create_hold(shipment_id, slot_id, ttl_minutes=15)
-        return self.repository.create_pending_appointment(shipment_id, slot_id)
+        appointment_id = self.repository.create_pending_appointment(shipment_id, slot_id)
+        self._invalidate_booking_caches(shipment_id)
+        return appointment_id
 
     def confirm_booking(self, shipment_id: str, slot_id: str, accepted: bool = True) -> str:
         """Confirm a held or pending slot after explicit driver acceptance."""
-        return self.repository.book_after_acceptance(shipment_id, slot_id, accepted)
+        appointment_id = self.repository.book_after_acceptance(shipment_id, slot_id, accepted)
+        self._invalidate_booking_caches(shipment_id)
+        return appointment_id
 
     def cancel_hold(self, hold_id: str) -> None:
         """Release a temporary slot hold."""
         self.repository.release_hold(hold_id)
+        # release_hold only takes hold_id, not shipment_id -- but a hold
+        # changes availability for every shipment that could have used the
+        # slot anyway (see invalidate_dock_boards' docstring), so a
+        # shipment-scoped invalidation isn't needed here.
+        cache.invalidate_dock_boards()
 
     def cancel_pending(self, shipment_id: str, slot_id: str) -> None:
         """Cancel a pending booking and release any active hold."""
         self.repository.cancel_pending(shipment_id, slot_id)
+        self._invalidate_booking_caches(shipment_id)
+
+    def _invalidate_booking_caches(self, shipment_id: str) -> None:
+        """A booking mutation for one shipment changes slot availability for
+        every other shipment that could have used the same slot, and this
+        shipment's own cached shipment/context/checkin/snapshot views are
+        now stale too (dock_scheduler shares its tables directly with
+        tms/checkin_portal/driver_chat_eta)."""
+        cache.invalidate_dock_boards()
+        cache.invalidate_shipment(shipment_id)
 
     def rebook_slot(self, shipment_id: str, new_slot_id: str) -> str:
         """Directly move a shipment's appointment to a different slot.
@@ -142,7 +173,9 @@ class DockSchedulerService:
                 f"(currently {availability['availability_status'].lower()})"
             )
         self.repository.create_hold(shipment_id, new_slot_id, ttl_minutes=5)
-        return self.repository.book_after_acceptance(shipment_id, new_slot_id, accepted=True)
+        appointment_id = self.repository.book_after_acceptance(shipment_id, new_slot_id, accepted=True)
+        self._invalidate_booking_caches(shipment_id)
+        return appointment_id
 
     # -- dock-slot change requests (TMS/driver requested, WMS approved) -----
 
@@ -181,10 +214,13 @@ class DockSchedulerService:
             "displaced_shipment_id": displaced_shipment_id,
             "displaced_to_slot_id": displaced_to_slot_id,
         }
-        return self.repository.create_change_request(payload)
+        row = self.repository.create_change_request(payload)
+        cache.invalidate_facility_board(self.repository.facility_id_for_shipment(shipment_id))
+        return row
 
     def list_change_requests(self, status: str | None = None) -> list[dict]:
-        return self.repository.list_change_requests(status)
+        cache_key = cache.change_requests_key(status)
+        return cache.get_or_set(cache_key, cache.TTL_HOT, lambda: self.repository.list_change_requests(status))
 
     def decide_change_request(self, change_request_id: str, approve: bool, decided_by_user_id: str, note: str | None) -> dict:
         request = self.repository.get_change_request(change_request_id)
@@ -244,6 +280,7 @@ class DockSchedulerService:
                 "decision_note": note,
             },
         )
+        cache.invalidate_facility_board(self.repository.facility_id_for_shipment(request["shipment_id"]))
         return updated or request
 
     @staticmethod

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "framer-motion";
-import { Loader2, MessageCircle, X } from "lucide-react";
+import { MessageCircle, X } from "lucide-react";
 import { ApiClientError } from "../../services/api";
 import {
   confirmDockSlot,
@@ -15,6 +15,10 @@ import {
   updateDriverCheckin,
 } from "../../services/driverChatApi";
 import type { ArrivalUpdateChoice, DriverProfile, DriverSnapshot } from "../../types/driverChat";
+import { getService } from "../../data/services";
+import { SkeletonCard } from "../Skeleton";
+import { ErrorBanner } from "../ErrorBanner";
+import { useAsyncResource } from "../../lib/useAsyncResource";
 import ProfileSetupForm from "./ProfileSetupForm";
 import ContextBar from "./ContextBar";
 import AppointmentBanner from "./AppointmentBanner";
@@ -22,11 +26,21 @@ import GateTimeline from "./GateTimeline";
 import ChatPanel from "./ChatPanel";
 import DockSlotBoard from "./DockSlotBoard";
 
+const driversServiceDef = getService("drivers")!;
+
+// Module-level (stable-reference) predicate so useAsyncResource's internal
+// `run` callback keeps a stable identity across renders -- refreshSnapshot's
+// own useCallback and the 8s-poll effect below both depend on that identity
+// staying put, the same way they depended on refreshSnapshot's own [] deps
+// before this change.
+const isSnapshotEmpty = (data: DriverSnapshot) => !data.shipment;
+
 export default function DriversPortal({ color }: { color: string }) {
   const [driver, setDriver] = useState<DriverProfile | null>(null);
   const [needsProfile, setNeedsProfile] = useState(false);
-  const [snapshot, setSnapshot] = useState<DriverSnapshot | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [profileLoading, setProfileLoading] = useState(true);
+  const [profileError, setProfileError] = useState<string | null>(null);
+  const snapshotResource = useAsyncResource<DriverSnapshot>({ isEmpty: isSnapshotEmpty });
   const [isSending, setIsSending] = useState(false);
   const [toast, setToast] = useState<{ text: string; tone: "success" | "error" | "info" } | null>(null);
   const [chatOpen, setChatOpen] = useState(false);
@@ -40,6 +54,15 @@ export default function DriversPortal({ color }: { color: string }) {
   };
 
   const snapshotInFlight = useRef(false);
+
+  // Mirrors snapshotResource.data one render behind, purely so the fetcher
+  // below (which runs *before* the resource's own state updates) can see
+  // "what we were showing right before this fetch" without React's setState
+  // updater-function form (useAsyncResource's run() doesn't expose one).
+  const prevSnapshotRef = useRef<DriverSnapshot | null>(null);
+  useEffect(() => {
+    prevSnapshotRef.current = snapshotResource.data;
+  }, [snapshotResource.data]);
 
   const refreshSnapshot = useCallback(async () => {
     // The backend's /snapshot read is several sequential Supabase round
@@ -55,8 +78,9 @@ export default function DriversPortal({ color }: { color: string }) {
     if (snapshotInFlight.current) return;
     snapshotInFlight.current = true;
     try {
-      const data = await getDriverSnapshot();
-      setSnapshot((prev) => {
+      await snapshotResource.run(async () => {
+        const data = await getDriverSnapshot();
+        setDriver(data.driver);
         // With no shipment assigned, chat replies are ephemeral (no
         // chat_threads row exists to persist to or reload from -- see
         // service.py's no-shipment branch). A background poll's snapshot
@@ -65,38 +89,45 @@ export default function DriversPortal({ color }: { color: string }) {
         // driver just saw the assistant say. Only let a poll clear/replace
         // the visible messages once a real, persisted thread exists
         // (i.e. a shipment is assigned) or the poll actually has content.
+        const prev = prevSnapshotRef.current;
         if (data.chat_messages.length === 0 && !data.shipment && prev?.chat_messages?.length) {
           return { ...data, chat_messages: prev.chat_messages };
         }
         return data;
       });
-      setDriver(data.driver);
-    } catch (err) {
-      if (!(err instanceof ApiClientError && err.status === 404)) {
-        console.warn("Failed to refresh driver snapshot:", err);
-      }
     } finally {
       snapshotInFlight.current = false;
     }
-  }, []);
+  }, [snapshotResource.run]);
+
+  // The single entry point for "resolve who this driver is and what they're
+  // hauling" -- used on mount and by the profile-fetch error's Retry button.
+  // profileLoading/profileError/needsProfile only ever get their *final*
+  // value once this whole chain has actually settled (success, 404, or a
+  // real error), never optimistically, so the render below can never see
+  // "not loading" while the profile fetch is still genuinely unresolved.
+  const loadInitial = useCallback(async () => {
+    setProfileLoading(true);
+    setProfileError(null);
+    try {
+      const profile = await getMyDriverProfile();
+      setDriver(profile);
+      setNeedsProfile(false);
+      await refreshSnapshot();
+    } catch (err) {
+      if (err instanceof ApiClientError && err.status === 404) {
+        setNeedsProfile(true);
+      } else {
+        setProfileError(err instanceof Error ? err.message : "Failed to load your driver profile.");
+      }
+    } finally {
+      setProfileLoading(false);
+    }
+  }, [refreshSnapshot]);
 
   useEffect(() => {
-    void (async () => {
-      try {
-        const profile = await getMyDriverProfile();
-        setDriver(profile);
-        await refreshSnapshot();
-      } catch (err) {
-        if (err instanceof ApiClientError && err.status === 404) {
-          setNeedsProfile(true);
-        } else {
-          showToast(err instanceof Error ? err.message : "Failed to load your driver profile.", "error");
-        }
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, [refreshSnapshot]);
+    void loadInitial();
+  }, [loadInitial]);
 
   useEffect(() => {
     if (!driver) return;
@@ -110,7 +141,7 @@ export default function DriversPortal({ color }: { color: string }) {
 
   // Flag a new agent reply while the chat widget is closed, and clear it once opened.
   useEffect(() => {
-    const messages = snapshot?.chat_messages ?? [];
+    const messages = snapshotResource.data?.chat_messages ?? [];
     const last = messages[messages.length - 1];
     if (!last) return;
     if (chatOpen) {
@@ -122,7 +153,7 @@ export default function DriversPortal({ color }: { color: string }) {
       lastSeenMessageId.current = last.chat_message_id;
       setHasUnread(true);
     }
-  }, [snapshot?.chat_messages, chatOpen]);
+  }, [snapshotResource.data?.chat_messages, chatOpen]);
 
   const handleProfileComplete = (profile: DriverProfile) => {
     setDriver(profile);
@@ -134,7 +165,7 @@ export default function DriversPortal({ color }: { color: string }) {
     setIsSending(true);
     try {
       const res = await sendDriverChatMessage(text);
-      setSnapshot(res.snapshot);
+      await snapshotResource.run(async () => res.snapshot);
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Error communicating with the dispatch agent", "error");
     } finally {
@@ -146,7 +177,7 @@ export default function DriversPortal({ color }: { color: string }) {
     setIsSending(true);
     try {
       const res = await sendDriverVoiceMessage(audioBase64, mimeType);
-      setSnapshot(res.snapshot);
+      await snapshotResource.run(async () => res.snapshot);
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Could not process that voice message", "error");
     } finally {
@@ -157,7 +188,7 @@ export default function DriversPortal({ color }: { color: string }) {
   const handleHoldSlot = async (slotId: string) => {
     try {
       const res = await holdDockSlot(slotId);
-      setSnapshot(res.snapshot);
+      await snapshotResource.run(async () => res.snapshot);
       showToast(res.message, "success");
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Failed to hold slot", "error");
@@ -167,7 +198,7 @@ export default function DriversPortal({ color }: { color: string }) {
   const handleConfirmSlot = async (slotId: string) => {
     try {
       const res = await confirmDockSlot(slotId);
-      setSnapshot(res.snapshot);
+      await snapshotResource.run(async () => res.snapshot);
       showToast(res.message, "success");
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Failed to confirm slot", "error");
@@ -175,9 +206,10 @@ export default function DriversPortal({ color }: { color: string }) {
   };
 
   const handleRequestSlotChange = async (slotId: string) => {
-    if (!snapshot?.shipment) return;
+    const shipment = snapshotResource.data?.shipment;
+    if (!shipment) return;
     try {
-      await requestDriverDockSlotChange(snapshot.shipment.shipment_id, slotId);
+      await requestDriverDockSlotChange(shipment.shipment_id, slotId);
       showToast("Slot change requested -- waiting on WMS approval.", "success");
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Failed to request a slot change", "error");
@@ -187,7 +219,7 @@ export default function DriversPortal({ color }: { color: string }) {
   const handleUpdateCheckin = async (status: ArrivalUpdateChoice) => {
     try {
       const res = await updateDriverCheckin(status);
-      setSnapshot(res.snapshot);
+      await snapshotResource.run(async () => res.snapshot);
       showToast(`Check-in updated to ${status.replace("_", " ")}`, "success");
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Error updating gate status", "error");
@@ -206,8 +238,8 @@ export default function DriversPortal({ color }: { color: string }) {
   // never meaningful here: a driver's own JWT can't see fleet-wide RLS-scoped
   // data like "how many drivers are on the road" anyway).
   const driverStats = useMemo(() => {
-    const shipment = snapshot?.shipment;
-    const exception = snapshot?.exception;
+    const shipment = snapshotResource.data?.shipment;
+    const exception = snapshotResource.data?.exception;
 
     const statusLabel = shipment?.current_status
       ? shipment.current_status.replace(/_/g, " ").toLowerCase()
@@ -230,29 +262,89 @@ export default function DriversPortal({ color }: { color: string }) {
       { value: hasOpenException ? "1" : "0", label: "your open exceptions" },
       { value: etaLabel, label: "ETA vs. original plan" },
     ];
-  }, [snapshot]);
+  }, [snapshotResource.data]);
 
   const handleEscalate = async (reason: string) => {
     try {
       const res = await escalateDriverException(reason);
-      setSnapshot(res.snapshot);
+      await snapshotResource.run(async () => res.snapshot);
       showToast("Thread escalated to a human coordinator", "info");
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Escalation failed", "error");
     }
   };
 
-  if (loading) {
+  if (profileError) {
     return (
-      <div className="flex items-center justify-center gap-2 py-16 text-sm font-semibold text-ink-soft">
-        <Loader2 className="h-4 w-4 animate-spin" /> Loading driver portal...
+      <div className="space-y-3">
+        <ErrorBanner>{profileError}</ErrorBanner>
+        <button
+          onClick={() => void loadInitial()}
+          className="rounded-xl px-4 py-2.5 text-sm font-bold text-white"
+          style={{ background: color }}
+        >
+          Retry
+        </button>
       </div>
+    );
+  }
+
+  if (profileLoading) {
+    return (
+      <SkeletonCard
+        color={driversServiceDef.color}
+        colorSoft={driversServiceDef.colorSoft}
+        icon={driversServiceDef.icon}
+        label="Loading driver portal…"
+        lines={4}
+      />
     );
   }
 
   if (needsProfile || !driver) {
     return <ProfileSetupForm color={color} onComplete={handleProfileComplete} />;
   }
+
+  // Driver profile is resolved. Whether to show the shipment view, "no
+  // active load", the loading skeleton, or an error now depends entirely on
+  // snapshotResource's own explicit status -- never on snapshot data being
+  // merely falsy, which is what let a still-in-flight/failed fetch get
+  // misread as "confirmed no shipment" before this change.
+  const snapshotStillResolving = (snapshotResource.status === "idle" || snapshotResource.status === "loading") && !snapshotResource.data;
+  if (snapshotStillResolving) {
+    return (
+      <SkeletonCard
+        color={driversServiceDef.color}
+        colorSoft={driversServiceDef.colorSoft}
+        icon={driversServiceDef.icon}
+        label="Loading your shipment…"
+        lines={4}
+      />
+    );
+  }
+
+  const snapshotFailedWithNoData = snapshotResource.status === "error" && !snapshotResource.data;
+  if (snapshotFailedWithNoData) {
+    return (
+      <div className="space-y-3">
+        <ErrorBanner>{snapshotResource.error ?? "Unable to load your shipment right now."}</ErrorBanner>
+        <button
+          onClick={() => void refreshSnapshot()}
+          className="rounded-xl px-4 py-2.5 text-sm font-bold text-white"
+          style={{ background: color }}
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  // A background poll can be mid-retry (status "error") while we still have
+  // the last good payload -- keep rendering that instead of an error
+  // screen, matching the resilient "one dropped poll shouldn't nuke a
+  // working view" behavior this portal already had.
+  const snapshot = snapshotResource.data;
+  if (!snapshot) return null;
 
   return (
     <div className="space-y-5">
@@ -298,7 +390,7 @@ export default function DriversPortal({ color }: { color: string }) {
         ))}
       </div>
 
-      {snapshot?.shipment ? (
+      {snapshot.shipment ? (
         <>
           <ContextBar snapshot={snapshot} color={color} onQuickUpdateEta={handleQuickUpdateEta} />
           <AppointmentBanner appointment={snapshot.appointment} color={color} />
@@ -312,7 +404,7 @@ export default function DriversPortal({ color }: { color: string }) {
         </div>
       )}
 
-      {snapshot?.shipment && (
+      {snapshot.shipment && (
         <DockSlotBoard
           color={color}
           facility={snapshot.facility}
@@ -341,7 +433,7 @@ export default function DriversPortal({ color }: { color: string }) {
             >
               <ChatPanel
                 color={color}
-                messages={snapshot?.chat_messages ?? []}
+                messages={snapshot.chat_messages}
                 isSending={isSending}
                 onSendMessage={handleSendMessage}
                 onSendVoiceMessage={handleSendVoiceMessage}

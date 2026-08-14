@@ -82,6 +82,7 @@ from setuhaul.backend.driver_chat_eta.models import (
     VehicleSummary,
 )
 from setuhaul.backend.driver_chat_eta.repository import DriverChatRepository
+from setuhaul.infrastructure import cache
 
 HOLD_MINUTES = 5
 # Cap on how many feasible slots get surfaced to the LLM per tool call (see
@@ -156,18 +157,25 @@ class DriverChatService:
     # -- profile ----------------------------------------------------------
 
     def list_carriers(self) -> list[CarrierSummary]:
-        carriers_with_vehicles = self.repository.list_active_vehicle_carrier_ids()
-        return [
-            CarrierSummary(
-                carrier_id=row["carrier_id"],
-                carrier_name=row.get("carrier_name"),
-                has_active_vehicle=row["carrier_id"] in carriers_with_vehicles,
-            )
-            for row in self.repository.list_carriers()
-        ]
+        def _fetch() -> list[dict]:
+            carriers_with_vehicles = self.repository.list_active_vehicle_carrier_ids()
+            carriers = [
+                CarrierSummary(
+                    carrier_id=row["carrier_id"],
+                    carrier_name=row.get("carrier_name"),
+                    has_active_vehicle=row["carrier_id"] in carriers_with_vehicles,
+                )
+                for row in self.repository.list_carriers()
+            ]
+            return [c.model_dump(mode="json") for c in carriers]
+
+        rows = cache.get_or_set(cache.reference_key("carriers"), cache.TTL_REFERENCE, _fetch)
+        return [CarrierSummary.model_validate(row) for row in rows]
 
     def list_home_base_cities(self) -> list[str]:
-        return self.repository.list_home_base_cities()
+        return cache.get_or_set(
+            cache.reference_key("home-base-cities"), cache.TTL_REFERENCE, self.repository.list_home_base_cities
+        )
 
     def complete_profile(self, principal: DriverPrincipal, request: ProfileCompleteRequest) -> DriverProfile:
         if self.repository.get_carrier(request.carrier_id) is None:
@@ -181,14 +189,19 @@ class DriverChatService:
             "driver_status": "ACTIVE",
         }
         row = self.repository.upsert_driver(principal.user_id, payload)
+        cache.invalidate_driver(principal.user_id)
         return DriverProfile.model_validate(row)
 
     def get_my_profile(self, principal: DriverPrincipal) -> DriverProfile:
-        row = self.repository.get_driver(principal.user_id)
-        if row is None:
-            raise DriverProfileNotFoundError(
-                "No driver profile exists yet for this account. Complete your profile to continue."
-            )
+        def _fetch() -> dict:
+            row = self.repository.get_driver(principal.user_id)
+            if row is None:
+                raise DriverProfileNotFoundError(
+                    "No driver profile exists yet for this account. Complete your profile to continue."
+                )
+            return row
+
+        row = cache.get_or_set(cache.driver_profile_key(principal.user_id), cache.TTL_SNAPSHOT_PART, _fetch)
         return DriverProfile.model_validate(row)
 
     # -- snapshot -----------------------------------------------------------
@@ -196,6 +209,27 @@ class DriverChatService:
     def snapshot(self, principal: DriverPrincipal) -> DriverSnapshot:
         driver = self.get_my_profile(principal)
         return self._build_snapshot(principal, driver)
+
+    def _get_vehicle_cached(self, vehicle_id: str) -> dict | None:
+        """Vehicle attributes rarely change mid-shipment -- cache by
+        vehicle_id (a shared reference entity, not per-driver) so every
+        driver/poll referencing the same vehicle benefits, not just this one."""
+        return cache.get_or_set(
+            cache.vehicle_key(vehicle_id), cache.TTL_SNAPSHOT_PART, lambda: self.repository.get_vehicle(vehicle_id)
+        )
+
+    def _get_facility_cached(self, facility_id: str) -> dict | None:
+        return cache.get_or_set(
+            cache.facility_key(facility_id), cache.TTL_SNAPSHOT_PART, lambda: self.repository.get_facility(facility_id)
+        )
+
+    def _list_docks_cached(self, facility_id: str) -> list[dict]:
+        """Dock hardware/type rarely changes -- dock *availability* (the
+        fast-changing part) comes from compatible_slots()/dock_board
+        separately, never from here, so this is safe to cache."""
+        return cache.get_or_set(
+            cache.docks_key(facility_id), cache.TTL_SNAPSHOT_PART, lambda: self.repository.list_docks(facility_id)
+        )
 
     def _build_snapshot(self, principal: DriverPrincipal, driver: DriverProfile) -> DriverSnapshot:
         shipment_row = self.repository.get_active_shipment_for_driver(principal.user_id)
@@ -209,13 +243,10 @@ class DriverChatService:
 
         if shipment_row:
             if shipment_row.get("vehicle_id"):
-                vehicle_row = self.repository.get_vehicle(shipment_row["vehicle_id"])
+                vehicle_row = self._get_vehicle_cached(shipment_row["vehicle_id"])
             if shipment_row.get("destination_facility_id"):
-                facility_row = self.repository.get_facility(shipment_row["destination_facility_id"])
-                docks = [
-                    DockSummary.model_validate(row)
-                    for row in self.repository.list_docks(shipment_row["destination_facility_id"])
-                ]
+                facility_row = self._get_facility_cached(shipment_row["destination_facility_id"])
+                docks = [DockSummary.model_validate(row) for row in self._list_docks_cached(shipment_row["destination_facility_id"])]
             # dock_scheduler.repository.current_appointment() joins in
             # dock_code/slot_start_ts/slot_end_ts (the raw appointments row
             # only has slot_id) -- lets the driver UI show a real "confirmed
@@ -410,6 +441,7 @@ class DriverChatService:
             }
         )
         self.repository.update_shipment(shipment_row["shipment_id"], {"latest_eta_ts": declared_eta.isoformat()})
+        cache.invalidate_shipment(shipment_row["shipment_id"])
 
         thread_row = self.repository.get_open_thread_for_driver(principal.user_id)
         if thread_row is None:
@@ -718,6 +750,7 @@ class DriverChatService:
             }
         )
         self.repository.update_shipment(shipment_row["shipment_id"], {"latest_eta_ts": declared_eta.isoformat()})
+        cache.invalidate_shipment(shipment_row["shipment_id"])
 
         thread_row = self.repository.get_open_thread_for_driver(principal.user_id)
         if thread_row is None:
@@ -1222,6 +1255,11 @@ class DriverChatService:
                 )
             row = self.repository.update_checkin(existing["checkin_id"], payload) or existing
 
+        # A driver-initiated check-in writes the same facility_checkins/
+        # shipments rows checkin_portal's own GET /checkins/{id} and TMS's
+        # shipment/context reads are cached from -- bust both, not just this
+        # module's own (uncached) view.
+        cache.invalidate_shipment(shipment_row["shipment_id"])
         snapshot = self._build_snapshot(principal, driver)
         return CheckinResponse(checkin=FacilityCheckinSummary.model_validate(row), snapshot=snapshot)
 

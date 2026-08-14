@@ -38,6 +38,7 @@ from setuhaul.backend.tms.models import (
     VehicleUpdate,
 )
 from setuhaul.backend.tms.repository import TMSRepository
+from setuhaul.infrastructure import cache
 from setuhaul.infrastructure.sms import send_sms
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,7 @@ class TMSService:
         row = self.repository.update_driver(driver_id, request.model_dump(mode="json", exclude_unset=True))
         if row is None:
             raise DriverNotFoundError(f"Driver {driver_id} was not found.")
+        cache.invalidate_driver(driver_id)
         return DriverResponse.model_validate(row)
 
     # -- vehicles ---------------------------------------------------------
@@ -119,9 +121,23 @@ class TMSService:
         limit: int = 100,
         offset: int = 0,
     ) -> list[ShipmentResponse]:
-        return [
-            ShipmentResponse.model_validate(row)
-            for row in self.repository.list_shipments(
+        fingerprint = "|".join(
+            str(part)
+            for part in (
+                driver_id,
+                status.value if status else None,
+                active_only,
+                unassigned_only,
+                include_archived,
+                limit,
+                offset,
+            )
+        )
+        cache_key = cache.shipments_list_key(destination_facility_id or "all", fingerprint)
+        rows = cache.get_or_set(
+            cache_key,
+            cache.TTL_MODERATE,
+            lambda: self.repository.list_shipments(
                 driver_id=driver_id,
                 destination_facility_id=destination_facility_id,
                 status=status,
@@ -130,8 +146,9 @@ class TMSService:
                 include_archived=include_archived,
                 limit=limit,
                 offset=offset,
-            )
-        ]
+            ),
+        )
+        return [ShipmentResponse.model_validate(row) for row in rows]
 
     def archive_shipment(self, shipment_id: str) -> ShipmentResponse:
         current = self.get_shipment(shipment_id)
@@ -140,13 +157,23 @@ class TMSService:
         row = self.repository.update_shipment(shipment_id, {"archived_flag": True})
         if row is None:
             raise ShipmentNotFoundError(f"Shipment {shipment_id} was not found.")
+        self._invalidate_shipment_caches(shipment_id)
         return ShipmentResponse.model_validate(row)
 
     def unarchive_shipment(self, shipment_id: str) -> ShipmentResponse:
         row = self.repository.update_shipment(shipment_id, {"archived_flag": False})
         if row is None:
             raise ShipmentNotFoundError(f"Shipment {shipment_id} was not found.")
+        self._invalidate_shipment_caches(shipment_id)
         return ShipmentResponse.model_validate(row)
+
+    @staticmethod
+    def _invalidate_shipment_caches(shipment_id: str) -> None:
+        """Bust this shipment's own cached views plus every cached list page
+        (facility-scoped and global) -- shared with dock_scheduler/
+        checkin_portal/driver_chat_eta since they read the same tables."""
+        cache.invalidate_shipment(shipment_id)
+        cache.invalidate_shipments_lists()
 
     def cancel_shipment(self, shipment_id: str, reason: str | None = None) -> ShipmentResponse:
         current = self.get_shipment(shipment_id)
@@ -162,6 +189,11 @@ class TMSService:
         row = self.repository.update_shipment(shipment_id, {"current_status": ShipmentStatus.CANCELLED.value})
         if row is None:
             raise ShipmentNotFoundError(f"Shipment {shipment_id} was not found.")
+        self._invalidate_shipment_caches(shipment_id)
+        if current.destination_facility_id:
+            # cancel_current_appointment above frees a dock slot -- WMS's
+            # cached board for that facility must not keep showing it occupied.
+            cache.invalidate_facility_board(current.destination_facility_id)
         shipment = ShipmentResponse.model_validate(row)
         if current.driver_id:
             self._notify_shipment_cancelled(current.driver_id, shipment, reason)
@@ -195,6 +227,8 @@ class TMSService:
         payload["updated_at"] = now
         row = self.repository.create_shipment(payload)
         shipment = ShipmentResponse.model_validate(row)
+        cache.invalidate_shipments_lists()
+        cache.invalidate_reference("shipment-options")
         if shipment.driver_id:
             self._notify_driver_assignment(shipment.driver_id, shipment)
         return shipment
@@ -215,6 +249,7 @@ class TMSService:
         row = self.repository.update_shipment(shipment_id, payload)
         if row is None:
             raise ShipmentNotFoundError(f"Shipment {shipment_id} was not found.")
+        self._invalidate_shipment_caches(shipment_id)
         return ShipmentResponse.model_validate(row)
 
     def assign_shipment(self, shipment_id: str, *, driver_id: str, vehicle_id: str | None = None) -> ShipmentResponse:
@@ -231,6 +266,7 @@ class TMSService:
         row = self.repository.update_shipment(shipment_id, payload)
         if row is None:
             raise ShipmentNotFoundError(f"Shipment {shipment_id} was not found.")
+        self._invalidate_shipment_caches(shipment_id)
         shipment = ShipmentResponse.model_validate(row)
         self._notify_driver_assignment(driver_id, shipment)
         return shipment
@@ -260,13 +296,16 @@ class TMSService:
     # -- facilities -----------------------------------------------------
 
     def list_facilities(self, *, limit: int = 200, offset: int = 0) -> list[FacilityResponse]:
-        return [
-            FacilityResponse.model_validate(row)
-            for row in self.repository.list_facilities(limit=limit, offset=offset)
-        ]
+        cache_key = cache.reference_key(f"facilities:{limit}:{offset}")
+        rows = cache.get_or_set(
+            cache_key, cache.TTL_REFERENCE, lambda: self.repository.list_facilities(limit=limit, offset=offset)
+        )
+        return [FacilityResponse.model_validate(row) for row in rows]
 
     def shipment_reference_data(self) -> ShipmentReferenceData:
-        return ShipmentReferenceData.model_validate(self.repository.list_shipment_reference_data())
+        cache_key = cache.reference_key("shipment-options")
+        data = cache.get_or_set(cache_key, cache.TTL_REFERENCE, self.repository.list_shipment_reference_data)
+        return ShipmentReferenceData.model_validate(data)
 
     # -- staff facility assignments (WMS/Check-in facility scoping) -----
 
@@ -377,24 +416,32 @@ class TMSService:
         )
 
     def shipment_context(self, shipment_id: str) -> ShipmentContextResponse:
-        shipment = self.get_shipment(shipment_id)
-        if not shipment.driver_id or not shipment.vehicle_id:
-            raise BusinessValidationError(f"Shipment {shipment_id} has no driver/vehicle assigned yet.")
-        driver = self.get_driver(shipment.driver_id)
-        vehicle = self.get_vehicle(shipment.vehicle_id)
+        def _fetch() -> dict:
+            shipment = self.get_shipment(shipment_id)
+            if not shipment.driver_id or not shipment.vehicle_id:
+                raise BusinessValidationError(f"Shipment {shipment_id} has no driver/vehicle assigned yet.")
+            driver = self.get_driver(shipment.driver_id)
+            vehicle = self.get_vehicle(shipment.vehicle_id)
 
-        appointment_row = self.repository.current_appointment_for_shipment(shipment_id)
-        dock = DockTraceSummary.model_validate(appointment_row) if appointment_row else None
-        checkin_row = self.repository.checkin_for_shipment(shipment_id)
-        checkin = CheckinTraceSummary.model_validate(checkin_row) if checkin_row else None
+            appointment_row = self.repository.current_appointment_for_shipment(shipment_id)
+            dock = DockTraceSummary.model_validate(appointment_row) if appointment_row else None
+            checkin_row = self.repository.checkin_for_shipment(shipment_id)
+            checkin = CheckinTraceSummary.model_validate(checkin_row) if checkin_row else None
 
-        return ShipmentContextResponse(
-            driver=self._driver_summary(driver),
-            vehicle=self._vehicle_context(vehicle),
-            shipment=shipment,
-            dock=dock,
-            checkin=checkin,
-        )
+            context = ShipmentContextResponse(
+                driver=self._driver_summary(driver),
+                vehicle=self._vehicle_context(vehicle),
+                shipment=shipment,
+                dock=dock,
+                checkin=checkin,
+            )
+            return context.model_dump(mode="json")
+
+        # Not found / not-yet-assigned raises out of _fetch before get_or_set
+        # ever writes to the cache, so a missing shipment is never cached as
+        # if it were a valid (empty) result.
+        cached = cache.get_or_set(cache.shipment_context_key(shipment_id), cache.TTL_MODERATE, _fetch)
+        return ShipmentContextResponse.model_validate(cached)
 
     @staticmethod
     def _driver_summary(driver: DriverResponse) -> DriverSummary:

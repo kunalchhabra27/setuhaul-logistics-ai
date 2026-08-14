@@ -1,0 +1,20 @@
+# Local development cache -- "local Redis/container" per docs/deployment.md.
+# Not required: the app already falls back to no-cache (fail-open) when
+# REDIS_URL/CACHE_* are unset, and today's shared Redis Cloud instance
+# (see .env) keeps working unchanged too. This is purely a convenient,
+# no-AWS-access-required alternative for local development.
+#
+# Usage:
+#   docker-compose up -d valkey
+#   # then in .env (or exported in your shell):
+#   REDIS_URL=redis://localhost:6379/0
+services:
+  valkey:
+    image: valkey/valkey:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5

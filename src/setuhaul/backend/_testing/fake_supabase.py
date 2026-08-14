@@ -53,6 +53,10 @@ class FakeQuery:
         on_conflict: str | None = None,
     ):
         self._table = table
+        # Every execute() is counted against the owning client (see
+        # FakeSupabaseClient.execute_count) -- this is what caching tests use
+        # to assert a cache hit actually avoided a Supabase round trip,
+        # rather than just asserting the returned data still looks right.
         self._op = op
         self._payload = payload
         self._on_conflict = on_conflict
@@ -118,6 +122,7 @@ class FakeQuery:
         return True
 
     def execute(self) -> FakeResponse:
+        self._table.record_execute()
         if self._op == "select":
             rows = [row for row in self._table.data if self._matches(row)]
             for column, desc in reversed(self._order_by):
@@ -153,8 +158,13 @@ class FakeQuery:
 
 
 class FakeTable:
-    def __init__(self, data: list[dict[str, Any]]):
+    def __init__(self, data: list[dict[str, Any]], owner: "FakeSupabaseClient | None" = None):
         self.data = data
+        self._owner = owner
+
+    def record_execute(self) -> None:
+        if self._owner is not None:
+            self._owner.execute_count += 1
 
     def select(self, _columns: str = "*") -> FakeQuery:
         return FakeQuery(self, "select")
@@ -175,9 +185,10 @@ class FakeSupabaseClient:
     """Drop-in stand-in for `supabase.Client` limited to `.table(name)`."""
 
     def __init__(self, tables: dict[str, list[dict[str, Any]]] | None = None):
-        self._tables = {name: FakeTable(rows) for name, rows in (tables or {}).items()}
+        self.execute_count = 0
+        self._tables = {name: FakeTable(rows, owner=self) for name, rows in (tables or {}).items()}
 
     def table(self, name: str) -> FakeTable:
         if name not in self._tables:
-            self._tables[name] = FakeTable([])
+            self._tables[name] = FakeTable([], owner=self)
         return self._tables[name]

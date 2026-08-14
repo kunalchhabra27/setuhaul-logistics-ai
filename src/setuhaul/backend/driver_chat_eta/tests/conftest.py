@@ -17,6 +17,20 @@ from setuhaul.backend.dock_scheduler.repository import _FUTURE_SLOTS_LAST_CHECKE
 from setuhaul.backend.driver_chat_eta.auth import DriverPrincipal
 from setuhaul.backend.driver_chat_eta.repository import DriverChatRepository
 from setuhaul.backend.driver_chat_eta.service import DriverChatService
+from setuhaul.infrastructure import redis_client
+
+
+@pytest.fixture(autouse=True)
+def _no_real_redis_by_default(monkeypatch: pytest.MonkeyPatch):
+    """See tms/tests/conftest.py's fixture of the same name -- REDIS_URL in
+    .env points at a real shared instance; disable it by default so cached
+    results keyed by driver/shipment id (DRIVER_ID/SHIPMENT_ID are reused
+    constants across many tests) can't leak between tests. test_caching.py's
+    `fake_redis` fixture opts back in per-test."""
+    redis_client.reset_client_cache()
+    monkeypatch.setattr(redis_client, "get_client", lambda: None)
+    yield
+    redis_client.reset_client_cache()
 
 FACILITY = "FAC-1"
 DOCK_STANDARD = "DOCK-1"

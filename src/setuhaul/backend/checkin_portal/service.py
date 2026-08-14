@@ -16,6 +16,7 @@ from setuhaul.backend.checkin_portal.models import (
 )
 from setuhaul.backend.checkin_portal.repository import CheckInRepository
 from setuhaul.backend.checkin_portal.state_machine import validate_transition
+from setuhaul.infrastructure import cache
 from setuhaul.infrastructure.sms import send_sms
 
 logger = logging.getLogger(__name__)
@@ -38,20 +39,35 @@ class CheckInService:
         the assigned driver's name/phone so gate staff can verify the right
         person and vehicle showed up -- not just that a shipment_id matches.
         """
-        record = self.repository.get_by_shipment(shipment_id)
-        if record is None:
-            return None
-        contact = self.repository.get_driver_contact_for_shipment(shipment_id)
-        dock = self.repository.get_confirmed_dock_for_shipment(shipment_id)
-        return {
-            **record,
-            "driver_name": contact.get("driver_name") if contact else None,
-            "driver_phone": contact.get("phone") if contact else None,
-            "staff_approved": bool(record.get("staff_approved_flag")),
-            "timing_status": self._compute_timing_status(
-                record.get("gate_in_ts"), dock.get("slot_start_ts") if dock else None
-            ),
-        }
+        def _fetch() -> dict | None:
+            record = self.repository.get_by_shipment(shipment_id)
+            if record is None:
+                return None
+            contact = self.repository.get_driver_contact_for_shipment(shipment_id)
+            dock = self.repository.get_confirmed_dock_for_shipment(shipment_id)
+            return {
+                **record,
+                "driver_name": contact.get("driver_name") if contact else None,
+                "driver_phone": contact.get("phone") if contact else None,
+                "staff_approved": bool(record.get("staff_approved_flag")),
+                "timing_status": self._compute_timing_status(
+                    record.get("gate_in_ts"), dock.get("slot_start_ts") if dock else None
+                ),
+            }
+
+        # get_or_set can't distinguish "cached None" from "no cache entry" --
+        # a genuinely-absent check-in record is never cached and always
+        # re-fetched, same as before this change.
+        return cache.get_or_set(cache.checkin_status_key(shipment_id), cache.TTL_MODERATE, _fetch)
+
+    @staticmethod
+    def _invalidate_checkin_caches(shipment_id: str) -> None:
+        """A check-in write also updates shipments.current_status (see
+        repository.update_shipment_status), so TMS's cached shipment/context/
+        list views of this shipment go stale too -- bust all of them, not
+        just this module's own status cache."""
+        cache.invalidate_shipment(shipment_id)
+        cache.invalidate_shipments_lists()
 
     @staticmethod
     def _compute_timing_status(gate_in_ts: str | None, slot_start_ts: str | None) -> str | None:
@@ -123,6 +139,7 @@ class CheckInService:
             gate_in_at=request.gate_in_at.isoformat(),
         )
         record = self._require_record(request.shipment_id)
+        self._invalidate_checkin_caches(request.shipment_id)
         self._notify_gate_checkin(request.shipment_id)
         return record
 
@@ -164,6 +181,7 @@ class CheckInService:
             raise InvalidCheckInTransition("This gate check-in was already approved.")
         self.repository.approve_gate_checkin(shipment_id)
         self.repository.update_shipment_status(shipment_id, "AT_GATE")
+        self._invalidate_checkin_caches(shipment_id)
         return self.get_status(shipment_id)
 
     def update_queue(self, request: QueueUpdateRequest) -> dict:
@@ -177,6 +195,7 @@ class CheckInService:
         # truck is sitting in the yard, not moving yet -- WAITING is the one
         # TMS-facing status that covers all three without over-specifying.
         self.repository.update_shipment_status(request.shipment_id, "WAITING")
+        self._invalidate_checkin_caches(request.shipment_id)
         return self.repository.get_by_shipment(request.shipment_id)
 
     def mark_docked(self, request: DockInRequest) -> dict:
@@ -203,6 +222,7 @@ class CheckInService:
             request.shipment_id, request.dock_in_at.isoformat(), actual_dock_id=dock["dock_id"]
         )
         self.repository.update_shipment_status(request.shipment_id, "IN_DOCK")
+        self._invalidate_checkin_caches(request.shipment_id)
         return self.repository.get_by_shipment(request.shipment_id)
 
     def complete(self, request: CompleteRequest) -> dict:
@@ -217,6 +237,7 @@ class CheckInService:
         # manual Archive click just because check-in staff closed it out
         # instead of the driver.
         self.repository.update_shipment_status(request.shipment_id, "COMPLETED", archive=True)
+        self._invalidate_checkin_caches(request.shipment_id)
         return self.repository.get_by_shipment(request.shipment_id)
 
     def _require_record(self, shipment_id: str) -> dict:

@@ -12,6 +12,20 @@ from setuhaul.backend.dock_scheduler.repository import (
     DockSchedulerRepository,
 )
 from setuhaul.backend.dock_scheduler.service import DockSchedulerService
+from setuhaul.infrastructure import redis_client
+
+
+@pytest.fixture(autouse=True)
+def _no_real_redis_by_default(monkeypatch: pytest.MonkeyPatch):
+    """See tms/tests/conftest.py's fixture of the same name -- REDIS_URL in
+    .env points at a real shared instance; disable it by default so cached
+    results keyed by shipment/facility id (SHP_NORMAL etc. are reused
+    constants across many tests) can't leak between tests. test_caching.py's
+    `fake_redis` fixture opts back in per-test."""
+    redis_client.reset_client_cache()
+    monkeypatch.setattr(redis_client, "get_client", lambda: None)
+    yield
+    redis_client.reset_client_cache()
 
 FACILITY = "FAC-JAI-01"
 DOCK_STANDARD_1 = "DOCK-D1"

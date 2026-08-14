@@ -59,6 +59,33 @@ class Settings(BaseSettings):
     # chat_messages table in Supabase instead (slower, coarser, but never
     # loses data).
     redis_url: str | None = Field(default=None, alias="REDIS_URL")
+    # Discrete ElastiCache-style connection overrides -- when cache_host is
+    # set, infrastructure.redis_client builds the connection from these
+    # instead of parsing redis_url, so pointing production at a real
+    # ElastiCache endpoint is a .env/deployment-config change, not a code
+    # change. Unset by default: today's REDIS_URL (Redis Cloud) keeps
+    # working exactly as before.
+    cache_host: str | None = Field(default=None, alias="CACHE_HOST")
+    cache_port: int | None = Field(default=None, alias="CACHE_PORT")
+    cache_tls: bool = Field(default=True, alias="CACHE_TLS")
+    cache_username: str | None = Field(default=None, alias="CACHE_USERNAME")
+    # RBAC/password auth token (e.g. from AWS Secrets Manager at deploy
+    # time). NOT an IAM credential -- see docs/deployment.md for why IAM
+    # auth is explicitly deferred rather than modeled as a static token.
+    cache_auth_token: str | None = Field(default=None, alias="CACHE_AUTH_TOKEN")
+    # AWS ElastiCache Serverless's single configuration endpoint speaks the
+    # Redis Cluster protocol (MOVED/ASK redirects, hash-slot sharding) -- a
+    # plain redis.Redis client cannot follow that, redis.cluster.RedisCluster
+    # is required instead. Explicit flag, not inferred from the hostname:
+    # guessing wrong silently is worse than requiring one setting.
+    cache_cluster_mode: bool = Field(default=False, alias="CACHE_CLUSTER_MODE")
+    # Shared secret the Supabase Database Webhook trigger (see
+    # supabase/migrations/*_cache_invalidation_webhook.sql) must present in
+    # the X-Webhook-Secret header for POST /api/v1/webhooks/supabase to
+    # accept a payload. Unset in dev by default -- the endpoint then rejects
+    # every request outright rather than accepting unauthenticated
+    # cache-invalidation calls from anyone who finds the URL.
+    webhook_secret: str | None = Field(default=None, alias="WEBHOOK_SECRET")
 
     # Twilio SMS notifications (check-in confirmation, driver assignment).
     # All three are optional -- when unset, setuhaul.infrastructure.sms simply
@@ -93,6 +120,13 @@ def get_settings() -> Settings:
             "GOOGLE_API_KEY": os.getenv("GOOGLE_API_KEY"),
             "DRIVER_CHAT_LLM_MODEL": os.getenv("DRIVER_CHAT_LLM_MODEL", "gemini-2.5-flash"),
             "REDIS_URL": os.getenv("REDIS_URL"),
+            "CACHE_HOST": os.getenv("CACHE_HOST"),
+            "CACHE_PORT": os.getenv("CACHE_PORT"),
+            "CACHE_TLS": os.getenv("CACHE_TLS", "true"),
+            "CACHE_USERNAME": os.getenv("CACHE_USERNAME"),
+            "CACHE_AUTH_TOKEN": os.getenv("CACHE_AUTH_TOKEN"),
+            "CACHE_CLUSTER_MODE": os.getenv("CACHE_CLUSTER_MODE", "false"),
+            "WEBHOOK_SECRET": os.getenv("WEBHOOK_SECRET"),
             "TWILIO_ACCOUNT_SID": os.getenv("TWILIO_ACCOUNT_SID"),
             "TWILIO_AUTH_TOKEN": os.getenv("TWILIO_AUTH_TOKEN"),
             "TWILIO_FROM_NUMBER": os.getenv("TWILIO_FROM_NUMBER"),
@@ -107,6 +141,13 @@ def get_settings() -> Settings:
         GOOGLE_API_KEY=os.getenv("GOOGLE_API_KEY"),
         DRIVER_CHAT_LLM_MODEL=os.getenv("DRIVER_CHAT_LLM_MODEL", "gemini-2.5-flash"),
         REDIS_URL=os.getenv("REDIS_URL"),
+        CACHE_HOST=os.getenv("CACHE_HOST"),
+        CACHE_PORT=os.getenv("CACHE_PORT"),
+        CACHE_TLS=os.getenv("CACHE_TLS", "true"),
+        CACHE_USERNAME=os.getenv("CACHE_USERNAME"),
+        CACHE_AUTH_TOKEN=os.getenv("CACHE_AUTH_TOKEN"),
+        CACHE_CLUSTER_MODE=os.getenv("CACHE_CLUSTER_MODE", "false"),
+        WEBHOOK_SECRET=os.getenv("WEBHOOK_SECRET"),
         TWILIO_ACCOUNT_SID=os.getenv("TWILIO_ACCOUNT_SID"),
         TWILIO_AUTH_TOKEN=os.getenv("TWILIO_AUTH_TOKEN"),
         TWILIO_FROM_NUMBER=os.getenv("TWILIO_FROM_NUMBER"),

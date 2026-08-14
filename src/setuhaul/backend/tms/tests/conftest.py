@@ -9,6 +9,24 @@ import pytest
 
 from setuhaul.backend.tms.models import ACTIVE_CONTEXT_STATUSES
 from setuhaul.backend.tms.service import TMSService
+from setuhaul.infrastructure import redis_client
+
+
+@pytest.fixture(autouse=True)
+def _no_real_redis_by_default(monkeypatch: pytest.MonkeyPatch):
+    """Settings.redis_url points at a real, shared Redis instance in this
+    repo's .env -- without this, every test that exercises a now-cached
+    service method would read/write that real Redis, and results cached by
+    one test (keyed only by shipment/facility/driver id, not by test
+    identity) would leak into the next test that reuses the same id. Tests
+    that specifically want to exercise caching opt back in via the
+    `fake_redis` fixture in test_caching.py, which patches
+    redis_client.get_client again (after this one) to point at an in-memory
+    FakeRedis instead."""
+    redis_client.reset_client_cache()
+    monkeypatch.setattr(redis_client, "get_client", lambda: None)
+    yield
+    redis_client.reset_client_cache()
 
 CARRIER_A = "CAR001"
 CARRIER_B = "CAR002"
@@ -204,6 +222,10 @@ class FakeRepository:
 
     def get_facility(self, facility_id: str):
         return deepcopy(self.facilities.get(facility_id))
+
+    def list_facilities(self, *, limit: int = 200, offset: int = 0):
+        rows = list(self.facilities.values())
+        return deepcopy(rows[offset:offset + limit])
 
     def get_staff_facility(self, staff_user_id: str):
         return deepcopy(self.staff_facility_assignments.get(staff_user_id))

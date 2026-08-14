@@ -14,6 +14,7 @@ from setuhaul.backend.driver_chat_eta.api import (
     router as driver_chat_eta_router,
 )
 from setuhaul.backend.tms.api import install_exception_handlers, router as tms_router
+from setuhaul.backend.webhooks.api import router as webhooks_router
 from setuhaul.infrastructure.logging import configure_logging
 from setuhaul.infrastructure.observability import RequestObservabilityMiddleware
 
@@ -37,6 +38,7 @@ app.include_router(dock_scheduler_router, prefix=api_prefix)
 app.include_router(checkin_portal_router, prefix=api_prefix)
 app.include_router(driver_chat_eta_router, prefix=api_prefix)
 install_driver_chat_eta_exception_handlers(app)
+app.include_router(webhooks_router, prefix=api_prefix)
 
 @app.get("/health", tags=["system"])
 def health() -> dict[str, str]:

@@ -77,13 +77,17 @@ import type {
 } from "../types/api";
 import DriversPortal from "../components/drivers/DriversPortal";
 import FacilitySetupForm from "../components/facility/FacilitySetupForm";
+import { SkeletonRows, SkeletonCard } from "../components/Skeleton";
+import { ErrorBanner } from "../components/ErrorBanner";
+import { useAsyncResource } from "../lib/useAsyncResource";
 
 export default function PortalWorkspace() {
   const { serviceId } = useParams();
   const service = getService(serviceId);
   const { isAuthed, sessions, logout } = useAuth();
-  const [checkin, setCheckin] = useState<CheckInRecord | null>(null);
-  const [shipments, setShipments] = useState<ShipmentSummary[]>([]);
+  const checkinResource = useAsyncResource<CheckInRecord | null>({ isEmpty: (data) => data === null });
+  const tmsShipments = useAsyncResource<ShipmentSummary[]>();
+  const wmsBoard = useAsyncResource<DockSlot[]>();
   const [tmsDrivers, setTmsDrivers] = useState<TmsDriver[]>([]);
   const [tmsVehicles, setTmsVehicles] = useState<TmsVehicle[]>([]);
   const [tmsFacilities, setTmsFacilities] = useState<TmsFacility[]>([]);
@@ -92,7 +96,6 @@ export default function PortalWorkspace() {
     product_categories: [],
   });
   const [createOpen, setCreateOpen] = useState(false);
-  const [dockBoard, setDockBoard] = useState<DockSlot[]>([]);
   const [selectedSlotId, setSelectedSlotId] = useState<string>("");
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<string>("");
@@ -170,7 +173,7 @@ export default function PortalWorkspace() {
   }, [service.id]);
 
   async function refreshTms() {
-    try {
+    await tmsShipments.run(async () => {
       const [items, drivers, vehicles, facilities, referenceData] = await Promise.all([
         listShipments(),
         listDrivers(),
@@ -178,14 +181,12 @@ export default function PortalWorkspace() {
         listFacilities(),
         getShipmentReferenceData(),
       ]);
-      setShipments(items);
       setTmsDrivers(drivers);
       setTmsVehicles(vehicles);
       setTmsFacilities(facilities);
       setShipmentReferenceData(referenceData);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to load shipments.");
-    }
+      return items;
+    });
   }
 
   async function handleAssignDriver(shipmentId: string, driverId: string) {
@@ -282,12 +283,7 @@ export default function PortalWorkspace() {
   async function refreshDockBoard() {
     setError("");
     setSelectedSlotId("");
-    try {
-      const items = await getDockBoard(activeShipmentId);
-      setDockBoard(items);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to load the dock board.");
-    }
+    await wmsBoard.run(() => getDockBoard(activeShipmentId));
   }
 
   async function handleReserveSlot() {
@@ -312,17 +308,17 @@ export default function PortalWorkspace() {
   async function refreshCheckin() {
     if (!activeShipmentId) return;
     setError("");
-    try {
-      const current = await fetchCheckInStatus(activeShipmentId);
-      setCheckin(current);
-    } catch (err) {
-      const apiError = err as ApiClientError;
-      if (apiError.status === 404) {
-        setCheckin(null);
-      } else {
-        setError(apiError.message);
+    await checkinResource.run(async () => {
+      try {
+        return await fetchCheckInStatus(activeShipmentId);
+      } catch (err) {
+        // No check-in record yet is a normal, expected state for a shipment
+        // that hasn't arrived -- not a failure -- so it resolves to an
+        // "empty" result rather than throwing into the error status.
+        if (err instanceof ApiClientError && err.status === 404) return null;
+        throw err;
       }
-    }
+    });
   }
 
   async function mutateCheckin(action: () => Promise<CheckInRecord>, successText: string) {
@@ -330,7 +326,7 @@ export default function PortalWorkspace() {
     setError("");
     try {
       const record = await action();
-      setCheckin(record);
+      await checkinResource.run(async () => record);
       setMessage(successText);
       await refreshCheckin();
     } catch (err) {
@@ -348,6 +344,7 @@ export default function PortalWorkspace() {
   // is null), which is real and directly actionable via the assign-driver control below.
   const tmsStats = useMemo(() => {
     if (service.id !== "tms") return null;
+    const shipments = tmsShipments.data ?? [];
     const total = shipments.length;
     const unassigned = shipments.filter((s) => !s.driver_id).length;
     const onTrack = shipments.filter((s) => s.current_status && s.current_status !== "CANCELLED").length;
@@ -357,7 +354,7 @@ export default function PortalWorkspace() {
       { value: String(unassigned), label: "unassigned loads" },
       { value: total > 0 ? `${onTrackPct}%` : "—", label: "shipments on track" },
     ];
-  }, [service.id, shipments]);
+  }, [service.id, tmsShipments.data]);
 
   // Real WMS stats derived from the full dock board already fetched via
   // GET /dock-scheduler/board for the selected shipment. There's no
@@ -365,6 +362,7 @@ export default function PortalWorkspace() {
   // currently selected above rather than a facility-wide summary.
   const wmsStats = useMemo(() => {
     if (service.id !== "wms") return null;
+    const dockBoard = wmsBoard.data ?? [];
     const available = dockBoard.filter((s) => s.availability_status === "AVAILABLE");
     const docks = new Set(dockBoard.map((s) => s.dock_code)).size;
     const earliest = [...available].sort((a, b) => a.start.localeCompare(b.start))[0]?.start;
@@ -376,7 +374,7 @@ export default function PortalWorkspace() {
         label: "earliest option",
       },
     ];
-  }, [service.id, dockBoard]);
+  }, [service.id, wmsBoard.data]);
 
   return (
     <div className="mx-auto max-w-[1400px] px-4 py-8 sm:px-6">
@@ -442,7 +440,9 @@ export default function PortalWorkspace() {
         transition={{ delay: 0.15 }}
         className="mt-6 rounded-3xl border border-line bg-white p-6"
       >
-        {error && <div className="mb-4 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div>}
+        {(error || (service.id === "tms" && tmsShipments.error)) && (
+          <ErrorBanner className="mb-4">{error || tmsShipments.error}</ErrorBanner>
+        )}
         <AnimatePresence>
           {message && service.id !== "wms" && (
             <FloatingToast key="portal-toast" text={message} tone="success" onDismiss={() => setMessage("")} />
@@ -456,10 +456,14 @@ export default function PortalWorkspace() {
             />
           )}
         </AnimatePresence>
-        {service.id === "tms" && (
+        {service.id === "tms" &&
+          (tmsShipments.status === "idle" || (tmsShipments.status === "loading" && !tmsShipments.data)) && (
+            <SkeletonRows color={service.color} colorSoft={service.colorSoft} icon={service.icon} label="Loading shipments…" />
+          )}
+        {service.id === "tms" && (tmsShipments.status !== "loading" || tmsShipments.data) && tmsShipments.status !== "idle" && (
           <TmsPanel
             color={service.color}
-            shipments={shipments}
+            shipments={tmsShipments.data ?? []}
             drivers={tmsDrivers}
             vehicles={tmsVehicles}
             facilities={tmsFacilities}
@@ -476,9 +480,7 @@ export default function PortalWorkspace() {
           />
         )}
         {service.id === "wms" && facilityLoading && (
-          <div className="flex items-center justify-center gap-2 py-10 text-sm text-ink-soft">
-            <Loader2 className="h-4 w-4 animate-spin" /> Loading your facility assignment...
-          </div>
+          <SkeletonCard color={service.color} colorSoft={service.colorSoft} icon={service.icon} label="Loading your facility assignment…" />
         )}
         {service.id === "wms" && !facilityLoading && !wmsFacility && (
           <FacilitySetupForm
@@ -488,10 +490,13 @@ export default function PortalWorkspace() {
             onComplete={setWmsFacility}
           />
         )}
-        {service.id === "wms" && !facilityLoading && wmsFacility && (
+        {service.id === "wms" && !facilityLoading && wmsFacility && wmsBoard.status === "loading" && !wmsBoard.data && (
+          <SkeletonRows color={service.color} colorSoft={service.colorSoft} icon={service.icon} label="Loading dock board…" rows={4} columns={4} />
+        )}
+        {service.id === "wms" && !facilityLoading && wmsFacility && (wmsBoard.status !== "loading" || wmsBoard.data) && (
           <WmsPanel
             color={service.color}
-            board={dockBoard}
+            board={wmsBoard.data ?? []}
             shipments={wmsShipments}
             selectedShipmentId={activeShipmentId}
             onSelectShipment={setActiveShipmentId}
@@ -504,9 +509,7 @@ export default function PortalWorkspace() {
           />
         )}
         {service.id === "checkin" && facilityLoading && (
-          <div className="flex items-center justify-center gap-2 py-10 text-sm text-ink-soft">
-            <Loader2 className="h-4 w-4 animate-spin" /> Loading your facility assignment...
-          </div>
+          <SkeletonCard color={service.color} colorSoft={service.colorSoft} icon={service.icon} label="Loading your facility assignment…" />
         )}
         {service.id === "checkin" && !facilityLoading && !checkinFacility && (
           <FacilitySetupForm
@@ -516,10 +519,20 @@ export default function PortalWorkspace() {
             onComplete={setCheckinFacility}
           />
         )}
-        {service.id === "checkin" && !facilityLoading && checkinFacility && (
+        {service.id === "checkin" &&
+          !facilityLoading &&
+          checkinFacility &&
+          checkinResource.status === "loading" &&
+          checkinResource.data === null && (
+            <SkeletonCard color={service.color} colorSoft={service.colorSoft} icon={service.icon} label="Loading check-in status…" />
+          )}
+        {service.id === "checkin" &&
+          !facilityLoading &&
+          checkinFacility &&
+          (checkinResource.status !== "loading" || checkinResource.data !== null) && (
           <CheckinPanel
             color={service.color}
-            record={checkin}
+            record={checkinResource.data ?? null}
             busy={busy}
             shipments={checkinShipments}
             selectedShipmentId={activeShipmentId}
