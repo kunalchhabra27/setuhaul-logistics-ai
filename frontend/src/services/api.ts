@@ -2,6 +2,34 @@ import { getAccessToken, refreshAccessToken } from "../auth/authService";
 
 const baseUrl = (import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "") ?? "") + "/api/v1";
 
+// FastAPI's own validation errors (422) put `detail` as an ARRAY of
+// {msg, loc, type} objects, not a string -- the old code did
+// `String(payload.detail)` unconditionally, which for an array of objects
+// produces the literal text "[object Object]" (Array.prototype.toString
+// stringifies each element, and a plain object's default toString is
+// "[object Object]"). That's the "[object Object]" toast drivers could see
+// on a malformed/failed request. This handles every shape our backend (or
+// FastAPI itself) can send: a plain string detail, a FastAPI validation
+// array, our own {error:{message}} shape, or anything else.
+function extractErrorMessage(payload: unknown): string {
+  if (typeof payload !== "object" || payload === null) return "Request failed";
+  if ("detail" in payload) {
+    const detail = (payload as { detail?: unknown }).detail;
+    if (typeof detail === "string") return detail;
+    if (Array.isArray(detail)) {
+      const msgs = detail
+        .map((item) => (typeof item === "object" && item && "msg" in item ? String((item as { msg?: unknown }).msg) : null))
+        .filter((m): m is string => !!m);
+      if (msgs.length) return msgs.join("; ");
+    }
+  }
+  if ("error" in payload) {
+    const error = (payload as { error?: { message?: unknown } }).error;
+    if (error && typeof error === "object" && "message" in error) return String(error.message ?? "Request failed");
+  }
+  return "Request failed";
+}
+
 export class ApiClientError extends Error {
   status: number;
   payload: unknown;
@@ -49,12 +77,7 @@ export function createApiClient(serviceId: string) {
         if (refreshed) return request<T>(path, init, true);
       }
 
-      const message =
-        typeof payload === "object" && payload && "detail" in payload
-          ? String((payload as { detail?: unknown }).detail)
-          : typeof payload === "object" && payload && "error" in payload
-            ? String((payload as { error?: { message?: unknown } }).error?.message ?? "Request failed")
-            : "Request failed";
+      const message = extractErrorMessage(payload);
       throw new ApiClientError(message, response.status, payload);
     }
 
