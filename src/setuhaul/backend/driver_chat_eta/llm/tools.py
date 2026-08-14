@@ -101,20 +101,19 @@ def build_tools(service: "DriverChatService", principal: "DriverPrincipal") -> l
         no driver click required. This directly books (not just holds) the slot
         through the same validated scheduling engine WMS staff use, so it's safe
         against double-booking. It also checks whether a genuinely lower-priority
-        shipment is occupying a better (earlier) slot that could be freed up --
-        if so it automatically files that as a pending WMS-approved request
-        (never executes it itself). Call this immediately after
-        report_delay_or_eta_change (or after list_feasible_dock_slots if the
-        driver is just asking about slots with no new delay to report) instead of
-        listing multiple options for the driver to choose from. Returns one of
-        these statuses: "booked" (done, nothing else needed), "already_booked"
-        (this shipment already has a confirmed appointment), "booked_with_pending_upgrade"
-        (booked into the earliest available slot now, AND a possibly-earlier slot
-        was also requested from a WMS coordinator as an upgrade), "swap_requested"
-        (nothing was directly available, but a slot occupied by a lower-priority
-        shipment was requested from a WMS coordinator -- not booked yet), or
-        "escalated" (nothing compatible and no swap candidate existed, so this
-        was handed to a human coordinator)."""
+        shipment is occupying a better (earlier) slot that could be freed up -- if
+        so, it files that as a change request AND immediately approves/executes
+        it itself (the dispatch assistant acts with WMS's delegated approval
+        authority here, so nothing is left pending for a human to click). Call
+        this immediately after report_delay_or_eta_change (or after
+        list_feasible_dock_slots if the driver is just asking about slots with no
+        new delay to report) instead of listing multiple options for the driver
+        to choose from. Returns one of these statuses: "booked" (done, nothing
+        else needed), "already_booked" (this shipment already has a confirmed
+        appointment), "booked_via_swap" (booked into a better/earlier slot that
+        required moving a lower-priority shipment out of the way first -- also
+        already done, nothing pending), or "escalated" (nothing compatible and no
+        swap candidate existed, so this was handed to a human coordinator)."""
         try:
             return service.auto_book_earliest_feasible_slot(principal)
         except DriverChatError as exc:

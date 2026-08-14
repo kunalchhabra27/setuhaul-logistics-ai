@@ -157,6 +157,23 @@ def tables() -> dict:
     return _base_tables()
 
 
+@pytest.fixture(autouse=True)
+def _no_redis_cache(monkeypatch):
+    # repository.py's get_facility/list_docks now cache through
+    # redis_cache.py, whose client() is a real connection to whatever
+    # REDIS_URL is in .env (this codebase's settings loader reads .env even
+    # under pytest, via load_dotenv(usecwd=True) -- see infrastructure/
+    # settings.py). Without this, unit tests would read/write a real,
+    # shared Redis instance keyed by the fixtures' constant facility_id
+    # ("FAC-1"), so one test run's cached row could leak into a later test
+    # (in this run or a future one, for up to the TTL) instead of each test
+    # getting a clean FakeSupabaseClient. Force every test onto the "Redis
+    # unavailable" cache-miss path instead -- this is a fast, isolated unit
+    # test suite; it should never depend on or pollute a real Redis
+    # instance.
+    monkeypatch.setattr("setuhaul.backend.driver_chat_eta.redis_cache.client", lambda: None)
+
+
 @pytest.fixture()
 def service(tables: dict) -> DriverChatService:
     # See dock_scheduler/tests/conftest.py -- ensure_future_slots() caches

@@ -15,7 +15,16 @@ from typing import Any, TYPE_CHECKING
 
 from postgrest.exceptions import APIError
 
+from setuhaul.backend.driver_chat_eta import redis_cache
 from setuhaul.backend.driver_chat_eta.exceptions import ConflictError, PersistenceError
+
+# TTLs for the reference-data cache (see redis_cache.py's module docstring
+# for why only these two, display-only lookups are cached, not anything
+# booking-critical). Facilities change essentially never (name/hours/
+# timezone); docks a little more often (dock_status can flip for
+# maintenance), hence the shorter TTL.
+_FACILITY_CACHE_TTL_SECONDS = 300
+_DOCKS_CACHE_TTL_SECONDS = 120
 
 if TYPE_CHECKING:
     from supabase import Client
@@ -129,17 +138,37 @@ class DriverChatRepository:
         return rows[0] if rows else None
 
     def get_facility(self, facility_id: str) -> dict[str, Any] | None:
+        # Redis-cached (see redis_cache.py) -- facility rows (name, open/
+        # close hours, timezone) are read on essentially every snapshot/chat
+        # turn but change almost never, and this is purely display data (not
+        # used to decide what's bookable), so a short-lived cache is safe.
+        cache_key = f"driver_chat_eta:facility:{facility_id}"
+        cached = redis_cache.get_json(cache_key)
+        if cached is not None:
+            return cached
         try:
             rows = self._rows(
                 self.client.table("facilities").select("*").eq("facility_id", facility_id).limit(1).execute()
             )
         except APIError as exc:
             self._raise_persistence(exc)
-        return rows[0] if rows else None
+        result = rows[0] if rows else None
+        if result is not None:
+            redis_cache.set_json(cache_key, result, _FACILITY_CACHE_TTL_SECONDS)
+        return result
 
     def list_docks(self, facility_id: str) -> list[dict[str, Any]]:
+        # Redis-cached, same reasoning as get_facility above -- this list is
+        # only used for the driver-facing dock summary display
+        # (DriverChatService._build_snapshot's `docks` field), never for
+        # deciding what's actually bookable (that's dock_scheduler's own,
+        # uncached, always-live compatible_slots()/appointment_slots query).
+        cache_key = f"driver_chat_eta:docks:{facility_id}"
+        cached = redis_cache.get_json(cache_key)
+        if cached is not None:
+            return cached
         try:
-            return self._rows(
+            result = self._rows(
                 self.client.table("docks")
                 .select("*")
                 .eq("facility_id", facility_id)
@@ -148,6 +177,8 @@ class DriverChatRepository:
             )
         except APIError as exc:
             self._raise_persistence(exc)
+        redis_cache.set_json(cache_key, result, _DOCKS_CACHE_TTL_SECONDS)
+        return result
 
     # -- shipments --------------------------------------------------------
 

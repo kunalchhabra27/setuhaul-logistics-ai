@@ -495,21 +495,57 @@ class DriverChatService:
                     shipment_row.get("shipment_id"),
                 )
 
-        agent_text = self._compose_agent_reply(
-            driver_name=driver.driver_name,
-            facility_name=facility_row.get("facility_name") if facility_row else None,
-            declared_eta=declared_eta,
-            options=options,
-        )
+        # Actually book the earliest compatible slot here too -- not just
+        # list options -- so a driver never loses the auto-booking behavior
+        # just because this turn landed on the fallback (LLM not configured,
+        # or a transient/persistent LLM failure, e.g. Google's AQ.-key
+        # rollout issue affecting langchain_google_genai as of Aug 2026; see
+        # llm/agent.py). This used to only ever compose a "here are your
+        # options, reply to hold one" message and stop -- since the
+        # Hold/Confirm chat buttons were removed from ChatPanel.tsx when
+        # auto-booking replaced them, that left this fallback path unable to
+        # ever actually book anything. Wrapped defensively: any unexpected
+        # failure here falls back to the old list-only reply rather than
+        # breaking the whole chat turn.
+        booking_result: dict | None = None
+        try:
+            booking_result = self.auto_book_earliest_feasible_slot(principal)
+        except DriverChatError:
+            import logging
 
-        compatible = [opt for opt in options if opt.is_compatible]
-        if compatible:
-            self.repository.update_exception(exception_row["exception_id"], {"exception_status": "SLOT_OPTIONS_SHARED"})
-            exception_row["exception_status"] = "SLOT_OPTIONS_SHARED"
+            logging.getLogger(__name__).exception(
+                "driver_chat_eta: auto-book failed in the regex fallback path for shipment %s.",
+                shipment_row.get("shipment_id"),
+            )
+
+        if booking_result is not None:
+            agent_text = self._compose_autobook_reply(booking_result)
+            if booking_result.get("status") in ("booked", "already_booked", "booked_with_pending_upgrade"):
+                exception_row["exception_status"] = "RESOLVED"
+            # auto_book_earliest_feasible_slot / escalate() already wrote the
+            # real status transition to Supabase themselves -- re-read it so
+            # the response reflects the current DB state. A resolved
+            # exception is no longer "active", so this can come back None;
+            # keep the locally-stamped copy above in that case rather than
+            # crashing on a None exception in the response below.
+            refreshed = self.repository.get_active_exception_for_driver(principal.user_id)
+            if refreshed:
+                exception_row = refreshed
         else:
-            self.repository.update_exception(exception_row["exception_id"], {"exception_status": "ESCALATED"})
-            self.repository.update_thread(thread_row["thread_id"], {"thread_status": "ESCALATED"})
-            exception_row["exception_status"] = "ESCALATED"
+            agent_text = self._compose_agent_reply(
+                driver_name=driver.driver_name,
+                facility_name=facility_row.get("facility_name") if facility_row else None,
+                declared_eta=declared_eta,
+                options=options,
+            )
+            compatible = [opt for opt in options if opt.is_compatible]
+            if compatible:
+                self.repository.update_exception(exception_row["exception_id"], {"exception_status": "SLOT_OPTIONS_SHARED"})
+                exception_row["exception_status"] = "SLOT_OPTIONS_SHARED"
+            else:
+                self.repository.update_exception(exception_row["exception_id"], {"exception_status": "ESCALATED"})
+                self.repository.update_thread(thread_row["thread_id"], {"thread_status": "ESCALATED"})
+                exception_row["exception_status"] = "ESCALATED"
 
         agent_row = self.repository.insert_chat_message(
             {
@@ -559,6 +595,21 @@ class DriverChatService:
         except ValueError:
             return None
 
+    @staticmethod
+    def _fits_eta_window(
+        start: datetime, end: datetime, after_dt: datetime, max_leave_dt: datetime | None
+    ) -> tuple[bool, bool]:
+        """(is_after_eta, within_leave_constraint) for a slot window against a
+        driver's current declared ETA / must-leave-by constraint. Shared by
+        `_feasible_slots` (computing SlotOption.is_compatible for every open
+        slot) and `auto_book_earliest_feasible_slot`'s already-booked check
+        (re-validating whether the shipment's EXISTING confirmed slot still
+        satisfies a newly-declared ETA) so the two never drift apart.
+        """
+        is_after_eta = start >= after_dt - timedelta(minutes=15)
+        within_leave_constraint = max_leave_dt is None or end <= max_leave_dt
+        return is_after_eta, within_leave_constraint
+
     def _feasible_slots(
         self,
         *,
@@ -593,8 +644,7 @@ class DriverChatService:
             if start is None or end is None:
                 continue
 
-            is_after_eta = start >= after_dt - timedelta(minutes=15)
-            within_leave_constraint = max_leave_dt is None or end <= max_leave_dt
+            is_after_eta, within_leave_constraint = self._fits_eta_window(start, end, after_dt, max_leave_dt)
             availability = row.get("availability_status")
             held_by_me = availability == "HELD" and row.get("held_shipment_id") == shipment_id
             booked_by_me = availability == "OCCUPIED" and row.get("shipment_id") == shipment_id
@@ -838,6 +888,41 @@ class DriverChatService:
         lines.append("Reply to hold one of these, or ask me for other options.")
         return "\n".join(lines)
 
+    @staticmethod
+    def _compose_autobook_reply(result: dict) -> str:
+        """Plain-language version of what the LLM tool-calling agent would
+        have said about an auto_book_earliest_feasible_slot() result --
+        used by the regex fallback so a driver gets a clear answer about
+        what actually happened, not just a list of slots. Mirrors the
+        status values documented on the book_next_available_dock_slot tool
+        in llm/tools.py.
+        """
+        status = result.get("status")
+        if status in ("booked", "already_booked", "booked_via_swap"):
+            dock = result.get("dock_code") or result.get("slot_id")
+            start = result.get("start_time", "")
+            end = result.get("end_time", "")
+            start_str = start[11:16] if isinstance(start, str) and len(start) >= 16 else start
+            end_str = end[11:16] if isinstance(end, str) and len(end) >= 16 else end
+            if status == "already_booked":
+                return f"This shipment already has a confirmed dock appointment at {dock}, {start_str}-{end_str} -- no need to book another."
+            if status == "booked_via_swap":
+                return (
+                    f"Booked dock slot {result.get('slot_id')} at {dock}, {start_str}-{end_str}. To fit you in "
+                    f"earlier, shipment {result.get('displaced_shipment_id')} was moved to its next available "
+                    "compatible slot -- this was auto-approved on WMS's behalf, no manual review needed."
+                )
+            return f"Booked dock slot {result.get('slot_id')} at {dock}, {start_str}-{end_str}. You're all set."
+        # "escalated" or anything unrecognized -- there is no more
+        # "swap_requested"/"booked_with_pending_upgrade" status: priority
+        # swaps are now auto-approved and executed the moment they're found
+        # (see auto_book_earliest_feasible_slot), so a swap either lands as
+        # "booked_via_swap" above or fails silently back to a direct booking
+        # or escalation, never a separate pending state.
+        return result.get("message") or (
+            "No compatible dock slot was found for your declared ETA, so this has been escalated to a human coordinator."
+        )
+
     # -- slot hold / confirm ------------------------------------------------
 
     def hold_slot(self, principal: DriverPrincipal, slot_id: str) -> SlotActionResponse:
@@ -901,23 +986,39 @@ class DriverChatService:
         and RLS scoping are unchanged. Only the driver-facing UX changes: no
         manual click, no waiting on a 5-minute hold timer.
 
+        Re-evaluates from scratch on every call, even when the shipment
+        already has a confirmed appointment: if the driver's currently
+        declared ETA/must-leave-by no longer fits that appointment's window,
+        or a genuinely EARLIER compatible slot has opened up since it was
+        booked, the shipment is moved onto the better slot instead of just
+        confirming "you're already booked". Only short-circuits as
+        already-booked when the existing appointment is both still feasible
+        for the current ETA and already the earliest such option -- see the
+        `already`/`better_slot_available` handling below.
+
         Also considers whether a *better* (earlier) slot could be freed up
         by displacing a genuinely lower-priority shipment -- see
         `_best_priority_swap`, which reuses `DeterministicReschedulingEngine`
         (the same engine `suggest_slots`/the WMS "suggest" endpoint use) to
-        find a PRIORITY_SWAP candidate. This method never executes a swap
-        itself -- moving another shipment's confirmed appointment always
-        goes through `dock_slot_change_requests` for a WMS coordinator to
-        approve first (see `DockSchedulerService.decide_change_request`'s
-        swap-aware branch), the same human-in-the-loop guarantee the
-        existing driver/TMS "request a slot change" flow already has.
-        - If a swap would be earlier than the best directly available slot
-          (or nothing is directly available at all), it's filed as a
-          pending change request.
-        - If a direct slot is also available, it's booked immediately as a
-          guaranteed fallback while the (possibly better) swap request is
-          pending -- the driver is never left without an appointment just
-          because a theoretically-better one might get approved later.
+        find a PRIORITY_SWAP candidate. The dispatch assistant is delegated
+        WMS's approval authority for these: it files the change request via
+        `dock_scheduler.create_change_request` and immediately approves it
+        itself via `DockSchedulerService.decide_change_request(approve=True)`
+        -- the exact same swap-execution code path a human WMS coordinator's
+        approval click runs (move the displaced shipment first, then rebook
+        the requester), just triggered without a person in the loop. Every
+        auto-approved swap is still fully audited: the `decided_by_user_id`/
+        `decision_note` on the row make it clear it was the assistant, not a
+        human, and the WMS change-requests view will simply never show it as
+        pending (it goes PENDING -> APPROVED in one call).
+        - The swap is attempted BEFORE any direct booking, not after --
+          the displaced occupant's own replacement slot is sometimes the
+          very same slot this shipment could book directly (small
+          facilities especially), so booking that slot first would steal
+          it out from under the swap and make it fail every time. If a
+          direct slot is also available, it's only booked as a fallback
+          once the swap attempt is known to have failed (or wasn't
+          attempted), so the driver never ends up with nothing.
         - If neither a direct slot nor a swap candidate exists, this
           escalates to a human coordinator exactly as before.
 
@@ -939,30 +1040,91 @@ class DriverChatService:
             or shipment_row.get("original_eta_ts")
         )
         max_leave_at = (exception_row or {}).get("latest_acceptable_ts")
+        after_dt = _parse_dt(after) or datetime.utcnow()
+        max_leave_dt = _parse_dt(max_leave_at)
         options = self._feasible_slots(shipment_row=shipment_row, after=after, max_leave_at=max_leave_at)
 
         already = next((opt for opt in options if opt.is_booked_by_me), None)
-        if already:
-            return {
-                "status": "already_booked",
-                "slot_id": already.slot_id,
-                "dock_code": already.dock_code,
-                "start_time": already.start_time.isoformat(),
-                "end_time": already.end_time.isoformat(),
-                "message": "This shipment already has a confirmed dock appointment -- no need to book another.",
-            }
-
         compatible = [opt for opt in options if opt.is_compatible]
         best_direct = compatible[0] if compatible else None
+
+        # Only short-circuit on "already booked" if that existing confirmed
+        # appointment (a) still satisfies the driver's CURRENT declared ETA/
+        # must-leave-by constraint, AND (b) is already the earliest such fit
+        # -- i.e. nothing genuinely better has opened up. Every other case
+        # falls through and re-evaluates the booking from scratch, same as
+        # if nothing were booked yet:
+        #   - Bug fix: `already` used to be returned unconditionally the
+        #     moment ANY confirmed appointment existed for this shipment,
+        #     even when the driver had just reported a fresh delay that
+        #     pushed their ETA past the existing slot's start time (e.g.
+        #     "I am getting delayed by 1 day" after already having a
+        #     same-day 19:00-20:00 appointment) -- SlotOption.is_compatible
+        #     can never catch this itself, because `bookable` in
+        #     `_feasible_slots` deliberately excludes OCCUPIED slots
+        #     (including the shipment's own current one), so the existing
+        #     appointment's own is_compatible flag is always False
+        #     regardless of whether its time window still fits. Re-checking
+        #     the window directly here (same predicate `_feasible_slots`
+        #     uses for every other slot, via `_fits_eta_window`) is what
+        #     lets a newly-reported delay correctly fall through to picking
+        #     a new/later slot instead of getting stuck on the stale one.
+        #   - Behavior change (requested explicitly): a driver reporting
+        #     ANY new delay/ETA should make the assistant re-check for a
+        #     better-fitting slot, not just bail out the moment the old one
+        #     is still technically compatible. If a genuinely EARLIER
+        #     compatible slot exists than the one already booked (capacity
+        #     freed up, an earlier dock opened, etc.), move the appointment
+        #     there instead of leaving the driver parked on a
+        #     later-than-necessary slot just because "it still works".
+        #     Never rebooks to the *same* slot it's already on -- that
+        #     would just be a pointless cancel+recreate.
+        if already:
+            still_fits, still_within_leave = self._fits_eta_window(
+                already.start_time, already.end_time, after_dt, max_leave_dt
+            )
+            fits_current_eta = still_fits and still_within_leave
+            better_slot_available = best_direct is not None and best_direct.start_time < already.start_time
+            if fits_current_eta and not better_slot_available:
+                return {
+                    "status": "already_booked",
+                    "slot_id": already.slot_id,
+                    "dock_code": already.dock_code,
+                    "start_time": already.start_time.isoformat(),
+                    "end_time": already.end_time.isoformat(),
+                    "message": "This shipment already has a confirmed dock appointment -- no need to book another.",
+                }
+            # Either the existing appointment no longer fits (the driver's
+            # new ETA is after the slot's start, or a new must-leave-by
+            # constraint now excludes it) or a strictly earlier compatible
+            # slot has opened up -- fall through and treat this exactly like
+            # any other booking attempt. `already`'s own slot never appears
+            # in `compatible` above (booked_by_me implies availability ==
+            # "OCCUPIED", which `_feasible_slots` never marks bookable), so
+            # `best_direct` is guaranteed to be a genuinely different,
+            # currently-open slot; `book_after_acceptance` (used by
+            # `_commit_direct_booking`/the swap path) already knows how to
+            # move a shipment off a CONFIRMED appointment onto a new slot --
+            # it cancels the stale one and books the new one atomically.
         best_swap = self._best_priority_swap(
             shipment_id=shipment_id,
-            after_dt=_parse_dt(after) or datetime.utcnow(),
-            max_leave_dt=_parse_dt(max_leave_at),
+            after_dt=after_dt,
+            max_leave_dt=max_leave_dt,
         )
 
         swap_is_better = best_swap is not None and (best_direct is None or best_swap.start < best_direct.start_time)
 
         if swap_is_better:
+            # Try the swap BEFORE the direct booking, not after -- best_swap's
+            # displaced_to_slot_id is, in the smallest facilities, sometimes
+            # the very same slot as best_direct (the displaced occupant's
+            # only other compatible slot IS the one this shipment could book
+            # directly). Booking best_direct first would steal that slot out
+            # from under the displaced shipment and make decide_change_request
+            # fail every time in that situation. Attempting the swap while
+            # best_direct is still genuinely open avoids that self-inflicted
+            # collision; the direct slot is only used as a fallback below if
+            # the swap doesn't land.
             request = None
             try:
                 request = self.dock_scheduler.create_change_request(
@@ -981,33 +1143,74 @@ class DriverChatService:
                     "driver_chat_eta: failed to file a priority-swap change request for shipment %s.", shipment_id
                 )
 
-            if request and best_direct is None:
-                return {
-                    "status": "swap_requested",
-                    "slot_id": best_swap.slot_id,
-                    "dock_code": best_swap.dock_code,
-                    "start_time": best_swap.start.isoformat(),
-                    "end_time": best_swap.end.isoformat(),
-                    "swap_change_request_id": request["change_request_id"],
-                    "message": (
-                        f"No dock slot is open right now, but slot {best_swap.slot_id} at "
-                        f"{best_swap.dock_code or best_swap.slot_id} could be freed up for you. I've requested it "
-                        "from a WMS coordinator and this shipment will be booked automatically once it's approved."
-                    ),
-                }
+            if request is not None:
+                try:
+                    self.dock_scheduler.decide_change_request(
+                        request["change_request_id"],
+                        approve=True,
+                        decided_by_user_id="DISPATCH-ASSISTANT",
+                        note=(
+                            "Auto-approved by the dispatch assistant, acting on WMS's delegated authority: "
+                            f"{best_swap.reason}"
+                        ),
+                    )
+                    appointment_row = self.dock_scheduler.repository.current_appointment(shipment_id)
+                    if appointment_row and appointment_row.get("slot_id") == best_swap.slot_id:
+                        if exception_row:
+                            self.repository.update_exception(exception_row["exception_id"], {"exception_status": "RESOLVED"})
+                            if exception_row.get("thread_id"):
+                                self.repository.update_thread(
+                                    exception_row["thread_id"],
+                                    {"thread_status": "RESOLVED", "closed_at": _now_iso()},
+                                )
+                                self.repository.insert_chat_message(
+                                    {
+                                        "chat_message_id": _new_id("MSG"),
+                                        "thread_id": exception_row["thread_id"],
+                                        "sender_type": "SYSTEM",
+                                        "message_text": (
+                                            f"Appointment auto-booked for slot {best_swap.slot_id} via priority "
+                                            f"swap (shipment {best_swap.displaced_shipment_id} moved to make room, "
+                                            "auto-approved on WMS's behalf). Driver notified."
+                                        ),
+                                        "message_ts": _now_iso(),
+                                    }
+                                )
+                        return {
+                            "status": "booked_via_swap",
+                            "slot_id": best_swap.slot_id,
+                            "dock_code": best_swap.dock_code,
+                            "start_time": best_swap.start.isoformat(),
+                            "end_time": best_swap.end.isoformat(),
+                            "displaced_shipment_id": best_swap.displaced_shipment_id,
+                            "swap_change_request_id": request["change_request_id"],
+                            "message": (
+                                f"Booked dock slot {best_swap.slot_id} at "
+                                f"{best_swap.dock_code or best_swap.slot_id}, "
+                                f"{best_swap.start.strftime('%H:%M')}-{best_swap.end.strftime('%H:%M')}. "
+                                f"To fit you in earlier, shipment {best_swap.displaced_shipment_id} was moved to "
+                                "its next available compatible slot."
+                            ),
+                        }
+                    # Approved but the appointment doesn't reflect the swap slot for
+                    # some reason -- treat as unresolved and fall through below.
+                except DockSchedulerError:
+                    import logging
 
-            if request and best_direct is not None:
-                result = self._commit_direct_booking(shipment_id, best_direct, exception_row)
-                result["status"] = "booked_with_pending_upgrade"
-                result["swap_slot_id"] = best_swap.slot_id
-                result["swap_change_request_id"] = request["change_request_id"]
-                result["message"] += (
-                    f" I've also requested an earlier slot ({best_swap.slot_id}) from a WMS coordinator -- "
-                    "you'll be notified if that gets approved instead."
-                )
-                return result
-            # Swap filing failed -- fall through to the direct/escalate path below exactly
-            # as if no swap had been found at all.
+                    logging.getLogger(__name__).exception(
+                        "driver_chat_eta: failed to auto-execute priority-swap change request %s for shipment %s.",
+                        request["change_request_id"],
+                        shipment_id,
+                    )
+
+            if best_direct is not None:
+                # Swap wasn't filed, or auto-approval failed, or didn't
+                # verifiably land -- fall back to booking the direct slot so
+                # the driver isn't left with nothing just because the
+                # (better) swap didn't work out.
+                return self._commit_direct_booking(shipment_id, best_direct, exception_row)
+            # No direct booking and the swap didn't land -- fall through to
+            # the escalate path below exactly as if no swap had been found.
 
         if best_direct is None:
             self.escalate(principal, "No feasible dock slot was found matching the driver's declared ETA.")

@@ -61,12 +61,30 @@ never hard-fails just because the LLM isn't configured yet.
   `DeterministicReschedulingEngine`'s `PRIORITY_SWAP` suggestions (see
   `dock_scheduler/scheduler.py`) -- if so it files a
   `dock_slot_change_requests` row (with `displaced_shipment_id`/
-  `displaced_to_slot_id` set) for a WMS coordinator to approve, exactly like
-  the existing driver/TMS "request a slot change" flow. It never executes a
-  swap itself. If a direct slot is also available, that's booked immediately
-  as a guaranteed fallback while the swap request is pending; if nothing is
-  directly available, the driver just gets the pending-swap status instead
-  of a bare escalation.
+  `displaced_to_slot_id` set) via `create_change_request`, then immediately
+  approves and executes it itself via `DockSchedulerService.
+  decide_change_request(approve=True)` -- the same swap-execution code path
+  (move the displaced shipment first, then rebook the requester) a human WMS
+  coordinator's approval click runs, just triggered by the assistant instead
+  of a person. The assistant is deliberately delegated WMS's approval
+  authority for this specific case (a decision made explicitly, since it
+  reverses the safer "always queue for a human" default the swap feature
+  originally shipped with); every auto-approved swap is still fully
+  audited -- `decided_by_user_id="DISPATCH-ASSISTANT"` and a `decision_note`
+  explaining why are written to the row, and it never sits PENDING (WMS's
+  approval-queue view will never show one). The swap is attempted BEFORE
+  any direct booking -- the displaced occupant's own replacement slot is
+  sometimes the very same slot this shipment could book directly (small
+  facilities especially), so booking that first would steal it out from
+  under the swap and make it fail every time. A direct slot, if one
+  exists, is only booked as a fallback once the swap is known to have
+  failed or wasn't attempted -- so the driver never ends up with nothing.
+  If neither works out, this escalates to a human coordinator exactly as
+  before. Manual,
+  human-initiated slot-change requests (the driver/TMS "request a slot
+  change" button in the UI) are unaffected by this and still queue for a
+  human WMS approval -- only the chatbot's own automatic swap consideration
+  auto-approves.
 - `llm/prompts.py` -- builds the system prompt fresh every turn from a live
   snapshot (shipment/exception/slot state), so the model is grounded in the
   current database rather than stale memory.
@@ -96,6 +114,24 @@ opening a chat thread. If the LLM stack raises anything unexpected at
 runtime (network error, bad response, missing package), `service.py`
 catches it and falls back to the regex parser rather than returning a 500
 to the driver.
+
+The regex fallback (`service._handle_chat_message_regex`) also calls
+`auto_book_earliest_feasible_slot` itself, same as the LLM tool does --
+it's not just a "list options" degrade. This matters in practice: Google
+began issuing a new "auth key" (`AQ.`-prefixed) format for Gemini API keys
+in mid-2026 that, as of this writing, is rejected by the REST endpoint
+`langchain_google_genai` calls (`401 ACCESS_TOKEN_TYPE_UNSUPPORTED`) for
+many accounts/projects -- see
+https://ai.google.dev/gemini-api/docs/api-key and
+https://discuss.ai.google.dev/t/new-api-keys-generated-with-aq-prefix-dont-work-with-rest-endpoint/176177.
+When that happens, `is_configured()` still returns true (a key is set) but
+every `run_chat_turn` call fails at the `chain.invoke(...)` calls in
+`agent.py`, so every turn silently lands on this fallback. Without the
+fallback auto-booking, that made the chatbot look like it could no longer
+book slots at all, not just lose its multilingual understanding. If you
+hit this, get a key from the Google Cloud Console's Credentials page
+instead of AI Studio and restrict it to the Generative Language API --
+Google's docs say restricted Standard (`AIzaSy...`) keys still work.
 
 ## RLS on `drivers`
 
