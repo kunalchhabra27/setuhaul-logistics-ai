@@ -1,15 +1,21 @@
-"""Gemini tool-calling conversational agent for driver_chat_eta.
+"""Open-weights tool-calling conversational agent for driver_chat_eta.
 
 Architecture
 ------------
-Free-text driver messages are handled by a small tool-calling loop, in the
-same shape as the LangChain + Gemini pattern: a Pydantic schema per tool,
-``ChatGoogleGenerativeAI(...).bind_tools(...)``, and a loop that keeps
-invoking tools and feeding their JSON results back to the model until it
-stops requesting tool calls.
+Free-text driver messages are handled by a small tool-calling loop: a
+Pydantic schema per tool, ``ChatHuggingFace(...).bind_tools(...)``, and a
+loop that keeps invoking tools and feeding their JSON results back to the
+model until it stops requesting tool calls. The model itself is served via
+Hugging Face Inference Providers (``HuggingFaceEndpoint`` with
+``provider="auto"`` by default, see ``settings.driver_chat_llm_provider``)
+rather than a locally-hosted model -- ``ChatHuggingFace`` talks to whichever
+provider (Together, Fireworks, Novita, Cerebras, ...) is currently hosting
+``settings.driver_chat_llm_model`` over an OpenAI-compatible chat-completions
+API that supports the same ``tools``/``tool_choice`` semantics this loop
+already relies on.
 
 - ``driver_chat_eta.llm.schemas`` -- Pydantic input schema per tool (what
-  Gemini is allowed to fill in for a tool call).
+  the model is allowed to fill in for a tool call).
 - ``driver_chat_eta.llm.tools`` -- the actual tools, each a thin wrapper
   around an existing ``DriverChatService`` method. The LLM never touches
   Supabase directly and never bypasses the caller-scoped, RLS-respecting
@@ -23,12 +29,30 @@ stops requesting tool calls.
   to reconstructing a coarser memory from the permanent ``chat_messages``
   table when Redis isn't configured or is unreachable.
 
-This module is only imported (and ``ChatGoogleGenerativeAI``/``redis`` are
-only imported inside functions, not at module scope) when
+This module is only imported (and ``ChatHuggingFace``/``redis`` are only
+imported inside functions, not at module scope) when
 ``service.handle_chat_message`` decides an LLM turn is possible -- see
 ``is_configured()``. That keeps the regex fallback in ``service.py`` fully
 usable even in environments where these optional dependencies aren't
 installed.
+
+Open models are generally weaker than frontier hosted models (Claude,
+Gemini, GPT) at strict, CONDITIONAL tool-calling -- reliably calling
+book_next_available_dock_slot only when actually asked to book/change a
+slot, and answering everything else in plain text with no tool call at all.
+``llm/prompts.py``'s rules 1 and 3 exist specifically to keep that behavior
+in check; if this model starts over-triggering tools again, that prompt is
+the first place to look, and swapping ``DRIVER_CHAT_LLM_MODEL`` to a larger
+model (or a different provider) is the next lever.
+
+Voice-note transcription (``transcribe_audio`` below) is the one exception
+to "everything runs on the HF-hosted model": there's no equivalent native
+audio-input path through HF's routed chat-completions API, so that one call
+still goes to Gemini (see ``transcription_is_configured()``, gated
+independently of the main chat agent by ``GOOGLE_API_KEY`` rather than
+``HUGGINGFACEHUB_API_TOKEN``). The resulting transcript is plain text by the
+time it reaches the tool-calling loop above, so this split is invisible to
+everything else in the pipeline.
 """
 
 from __future__ import annotations
@@ -72,7 +96,20 @@ STATE_CHANGING_TOOLS = {
 
 
 def is_configured() -> bool:
-    """Whether GOOGLE_API_KEY is set, i.e. whether the LLM path should be tried."""
+    """Whether HUGGINGFACEHUB_API_TOKEN is set, i.e. whether the main
+    HF-hosted tool-calling chat agent should be tried. Does NOT gate
+    voice-note transcription -- see transcription_is_configured() for that,
+    since the two now depend on different API keys/providers."""
+    return bool(get_settings().huggingface_api_token)
+
+
+def transcription_is_configured() -> bool:
+    """Whether GOOGLE_API_KEY is set, i.e. whether transcribe_audio() can
+    run. Voice notes are a separate, optional capability from the main chat
+    agent (gated by is_configured()/HUGGINGFACEHUB_API_TOKEN above) -- a
+    deployment can have one key, both, or neither; an unset key here just
+    means the driver has to type instead of using the mic, it never fails
+    the main chat path."""
     return bool(get_settings().google_api_key)
 
 
@@ -87,13 +124,17 @@ def transcribe_audio(audio_base64: str, mime_type: str) -> str:
     message becomes a regular chat message the instant it has a transcript.
     Raises on any failure; callers should catch and surface a clear error
     rather than let a raw SDK exception reach the driver.
+
+    Still Gemini, not the HF-hosted model -- see the module docstring on why
+    this one call is the exception to "everything runs on the open model"
+    above.
     """
     from langchain_core.messages import HumanMessage
     from langchain_google_genai import ChatGoogleGenerativeAI
 
     settings = get_settings()
     llm = ChatGoogleGenerativeAI(
-        model=settings.driver_chat_llm_model,
+        model=settings.driver_chat_transcription_model,
         google_api_key=settings.google_api_key,
         temperature=0,
     )
@@ -115,7 +156,7 @@ def transcribe_audio(audio_base64: str, mime_type: str) -> str:
 
 
 def run_chat_turn(service: "DriverChatService", principal: "DriverPrincipal", text: str) -> ChatResponse:
-    """Handle one driver chat message with the Gemini tool-calling agent."""
+    """Handle one driver chat message with the HF-hosted tool-calling agent."""
     driver = service.get_my_profile(principal)  # raises DriverProfileNotFoundError if missing
     snapshot = service.snapshot(principal)
 
@@ -154,16 +195,23 @@ def run_chat_turn(service: "DriverChatService", principal: "DriverPrincipal", te
 
     from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
     from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-    from langchain_google_genai import ChatGoogleGenerativeAI
+    from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
 
     settings = get_settings()
     tools = build_tools(service, principal)
     tool_map = {t.name: t for t in tools}
-    llm = ChatGoogleGenerativeAI(
-        model=settings.driver_chat_llm_model,
-        google_api_key=settings.google_api_key,
-        temperature=0,
+    # temperature=0 is rejected/undefined behavior on some HF-routed
+    # providers (a holdover from TGI-style backends) -- 0.01 gets the same
+    # near-deterministic behavior every other provider in this file uses
+    # temperature=0 for, without risking that edge case.
+    endpoint = HuggingFaceEndpoint(
+        repo_id=settings.driver_chat_llm_model,
+        provider=settings.driver_chat_llm_provider,
+        huggingfacehub_api_token=settings.huggingface_api_token,
+        temperature=0.01,
+        max_new_tokens=1024,
     )
+    llm = ChatHuggingFace(llm=endpoint)
     llm_with_tools = llm.bind_tools(tools)
 
     system_prompt = build_system_prompt(driver, snapshot)

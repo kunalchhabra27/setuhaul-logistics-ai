@@ -30,16 +30,35 @@ pip install -e .
 uvicorn setuhaul.main:app --reload --port 8000
 ```
 
-## Chatbot: Gemini tool-calling agent
+## Chatbot: open-weights tool-calling agent (Hugging Face)
 
-`POST /driver-chat-eta/chat` is handled by `llm/agent.py` when `GOOGLE_API_KEY`
-is set in `.env`, falling back to a small deterministic regex parser
-(`service._handle_chat_message_regex`) when it isn't -- so the endpoint
-never hard-fails just because the LLM isn't configured yet.
+`POST /driver-chat-eta/chat` is handled by `llm/agent.py` when
+`HUGGINGFACEHUB_API_TOKEN` is set in `.env`, falling back to a small
+deterministic regex parser (`service._handle_chat_message_regex`) when it
+isn't -- so the endpoint never hard-fails just because the LLM isn't
+configured yet. The model itself (`DRIVER_CHAT_LLM_MODEL`, default
+`meta-llama/Llama-3.3-70B-Instruct`) is served over Hugging Face Inference
+Providers via `langchain-huggingface`'s `ChatHuggingFace`/
+`HuggingFaceEndpoint` -- `DRIVER_CHAT_LLM_PROVIDER` (default `auto`) picks
+which routed provider (Together, Fireworks, Novita, Cerebras, ...) actually
+hosts it. Open models are generally weaker than Claude/Gemini at strict,
+conditional tool-calling; `llm/prompts.py` rules 1 and 3 exist specifically
+to keep that in check, and swapping in a different/larger model via
+`DRIVER_CHAT_LLM_MODEL` is the first lever if it starts over-triggering
+tools.
+
+Voice notes (`POST /driver-chat-eta/chat/voice`) are the one exception: they
+still transcribe via Gemini (`GOOGLE_API_KEY`), since there's no equivalent
+native audio-input path through HF's routed chat-completions API -- see
+`llm/agent.py`'s module docstring. This is an independent, optional
+capability from the main chat agent (`llm/agent.py`'s
+`transcription_is_configured()` vs `is_configured()`) -- you can run with
+just `HUGGINGFACEHUB_API_TOKEN` set and the driver simply won't have the mic
+option, or with both.
 
 - `llm/schemas.py` -- Pydantic input schema per tool call (these become the
-  JSON schema Gemini sees; field descriptions are written as instructions
-  to the model).
+  JSON schema the model sees; field descriptions are written as instructions
+  to it).
 - `llm/tools.py` -- five tools, each a thin wrapper around an existing
   `DriverChatService` method: `report_delay_or_eta_change` (wraps
   `service.report_exception`), `list_feasible_dock_slots` (wraps
@@ -99,13 +118,19 @@ never hard-fails just because the LLM isn't configured yet.
   Redis is configured.
 - `llm/agent.py` -- the tool-calling loop itself (`run_chat_turn`): binds
   the tools, sends the system prompt + conversation history to
-  `ChatGoogleGenerativeAI`, and keeps executing tool calls and feeding
-  their JSON results back to the model (up to 5 rounds) until it replies
-  with plain text instead of another tool call.
+  `ChatHuggingFace` (wrapping a `HuggingFaceEndpoint` routed through HF
+  Inference Providers), and keeps executing tool calls and feeding their
+  JSON results back to the model (up to 5 rounds) until it replies with
+  plain text instead of another tool call. `transcribe_audio` (voice notes)
+  is the one function in this module still on `ChatGoogleGenerativeAI`.
 
-Env vars (see `.env`): `GOOGLE_API_KEY` (required to enable the LLM path),
-`DRIVER_CHAT_LLM_MODEL` (defaults to `gemini-2.5-flash`), `REDIS_URL`
-(optional).
+Env vars (see `.env`): `HUGGINGFACEHUB_API_TOKEN` (required to enable the
+main chat agent -- free to create at
+https://huggingface.co/settings/tokens), `DRIVER_CHAT_LLM_MODEL` (defaults
+to `meta-llama/Llama-3.3-70B-Instruct`), `DRIVER_CHAT_LLM_PROVIDER`
+(defaults to `auto`), `GOOGLE_API_KEY` (optional, enables voice-note
+transcription only), `DRIVER_CHAT_TRANSCRIPTION_MODEL` (defaults to
+`gemini-2.5-flash`), `REDIS_URL` (optional).
 
 If a driver has no active shipment assigned yet, `agent.py` skips the LLM
 call entirely (every tool requires a shipment, so there's nothing useful
@@ -116,22 +141,25 @@ catches it and falls back to the regex parser rather than returning a 500
 to the driver.
 
 The regex fallback (`service._handle_chat_message_regex`) also calls
-`auto_book_earliest_feasible_slot` itself, same as the LLM tool does --
-it's not just a "list options" degrade. This matters in practice: Google
+`auto_book_earliest_feasible_slot` itself, same as the LLM tool does -- it's
+not just a "list options" degrade, so a driver whose turn lands here (main
+chat agent unconfigured, or `chain.invoke(...)` raising at runtime for any
+reason) doesn't lose the ability to get a request filed, just the
+multilingual/free-text understanding.
+
+Historical note, now only relevant to the Gemini transcription call: Google
 began issuing a new "auth key" (`AQ.`-prefixed) format for Gemini API keys
-in mid-2026 that, as of this writing, is rejected by the REST endpoint
+in mid-2026 that was, at the time, rejected by the REST endpoint
 `langchain_google_genai` calls (`401 ACCESS_TOKEN_TYPE_UNSUPPORTED`) for
 many accounts/projects -- see
 https://ai.google.dev/gemini-api/docs/api-key and
 https://discuss.ai.google.dev/t/new-api-keys-generated-with-aq-prefix-dont-work-with-rest-endpoint/176177.
-When that happens, `is_configured()` still returns true (a key is set) but
-every `run_chat_turn` call fails at the `chain.invoke(...)` calls in
-`agent.py`, so every turn silently lands on this fallback. Without the
-fallback auto-booking, that made the chatbot look like it could no longer
-book slots at all, not just lose its multilingual understanding. If you
-hit this, get a key from the Google Cloud Console's Credentials page
+If voice-note transcription (`transcription_is_configured()`) fails with
+that error, get a key from the Google Cloud Console's Credentials page
 instead of AI Studio and restrict it to the Generative Language API --
-Google's docs say restricted Standard (`AIzaSy...`) keys still work.
+Google's docs say restricted Standard (`AIzaSy...`) keys still work. This no
+longer affects the main chat agent at all, since that's on the HF-hosted
+model now.
 
 ## RLS on `drivers`
 

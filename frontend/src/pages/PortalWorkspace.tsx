@@ -55,6 +55,7 @@ import {
   confirmBooking,
   decideChangeRequest,
   getDockBoard,
+  getDockBoardUnavailableReason,
   getMyWmsFacility,
   holdSlot,
   listFacilitiesForRegistration as listFacilitiesForWmsRegistration,
@@ -167,6 +168,14 @@ export default function PortalWorkspace() {
   useEffect(() => {
     if (service.id !== "tms") return;
     void refreshTms();
+    // Same polling pattern as the WMS change-requests header below --
+    // without this, a status change from another portal (a driver
+    // checking in, WMS approving a dock-slot change) only shows up here
+    // after a dispatcher leaves and re-enters the TMS tab, since refreshTms
+    // was previously only called on tab-entry and after this panel's own
+    // mutations.
+    const interval = setInterval(() => void refreshTms(), 15_000);
+    return () => clearInterval(interval);
   }, [service.id]);
 
   async function refreshTms() {
@@ -1750,6 +1759,29 @@ function WmsPanel({
 
   const selectedSlot = board.find((s) => s.slot_id === selectedSlotId) ?? null;
 
+  // Only fetched when the board is actually empty -- avoids a second
+  // round trip on every normal (non-empty) board load. Re-fetched whenever
+  // the empty shipment changes so switching shipments doesn't show a stale
+  // reason from the previous one.
+  const [emptyReason, setEmptyReason] = useState<string | null>(null);
+  useEffect(() => {
+    if (docks.length > 0 || !selectedShipmentId) {
+      setEmptyReason(null);
+      return;
+    }
+    let cancelled = false;
+    getDockBoardUnavailableReason(selectedShipmentId)
+      .then((res) => {
+        if (!cancelled) setEmptyReason(res.reason);
+      })
+      .catch(() => {
+        if (!cancelled) setEmptyReason(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [docks.length, selectedShipmentId]);
+
   return (
     <div>
       <WmsChangeRequestsHeader color={color} shipments={shipments} onDecided={onDecided} onMessage={onMessage} />
@@ -1773,7 +1805,9 @@ function WmsPanel({
       </div>
 
       {docks.length === 0 && (
-        <p className="mt-4 text-sm text-ink-soft">No compatible docks or slots for this shipment right now.</p>
+        <p className="mt-4 text-sm text-ink-soft">
+          {emptyReason ?? "No compatible docks or slots for this shipment right now."}
+        </p>
       )}
 
       <div className="mt-5 flex flex-wrap gap-3">

@@ -57,6 +57,10 @@ class AutoBookSlotInput(BaseModel):
     """No arguments needed -- the agent picks the earliest compatible slot itself."""
 
 
+class CheckRequestStatusInput(BaseModel):
+    """No arguments needed -- looks up the driver's own active shipment's latest request."""
+
+
 class SlotIdInput(BaseModel):
     slot_id: str = Field(
         description=(
@@ -79,3 +83,13 @@ class UpdateCheckinInput(BaseModel):
 
 class EscalateInput(BaseModel):
     reason: str = Field(description="Why a human dispatch coordinator needs to take over this conversation.")
+
+
+class FlagEmergencyInput(BaseModel):
+    reason: str = Field(
+        description=(
+            "A short, one-sentence summary of the safety-critical situation the driver "
+            "reported (e.g. 'Engine failure on the highway', 'Minor collision, driver "
+            "unhurt', 'Hazmat spill from the load')."
+        )
+    )

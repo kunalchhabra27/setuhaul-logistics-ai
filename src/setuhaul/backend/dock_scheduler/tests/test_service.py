@@ -8,6 +8,7 @@ from setuhaul.backend.dock_scheduler.models import ChangeRequestRole, Suggestion
 from setuhaul.backend.dock_scheduler.repository import DockSchedulerRepository
 from setuhaul.backend.dock_scheduler.service import DockSchedulerService
 from setuhaul.backend.dock_scheduler.tests.conftest import (
+    DOCK_REEFER,
     DOCK_STANDARD_1,
     FACILITY,
     SHP_NORMAL,
@@ -161,6 +162,38 @@ def test_dock_board_excludes_slots_outside_facility_operating_hours(service, tab
     )
     board = service.dock_board(SHP_NORMAL)
     assert "SLOT-D1-2200" not in {s.slot_id for s in board}
+
+
+def test_dock_board_unavailable_reason_explains_dock_type_mismatch(service, tables):
+    # Remove the only REEFER dock -- SHP_REEFER needs one, so the board is
+    # empty, and the reason must name the actual blocker (dock type), not a
+    # generic "nothing here". Mutated in place (slice assignment), not
+    # reassigned -- FakeSupabaseClient captures a reference to this exact
+    # list object at construction time, so `tables["docks"] = [...]` would
+    # rebind the dict key without the fake client ever seeing the change.
+    tables["docks"][:] = [d for d in tables["docks"] if d["dock_id"] != DOCK_REEFER]
+    assert service.dock_board(SHP_REEFER) == []
+    reason = service.dock_board_unavailable_reason(SHP_REEFER)
+    assert reason is not None
+    assert "REEFER" in reason
+    assert "STANDARD" in reason  # still lists what IS available, for context
+
+
+def test_dock_board_unavailable_reason_explains_no_active_docks(service, tables):
+    for dock in tables["docks"]:
+        dock["dock_status"] = "OUT_OF_SERVICE"
+    assert service.dock_board(SHP_NORMAL) == []
+    reason = service.dock_board_unavailable_reason(SHP_NORMAL)
+    assert reason == "Every dock at this facility is currently inactive or out of service."
+
+
+def test_dock_board_unavailable_reason_explains_weight_capacity(service, tables):
+    for dock in tables["docks"]:
+        dock["max_vehicle_weight_kg"] = 1000  # below every shipment's load_weight_kg (10000)
+    assert service.dock_board(SHP_NORMAL) == []
+    reason = service.dock_board_unavailable_reason(SHP_NORMAL)
+    assert reason is not None
+    assert "exceeds the weight capacity" in reason
 
 
 def test_hold_slot_accepts_any_compatible_slot_not_just_top_ranked(service):

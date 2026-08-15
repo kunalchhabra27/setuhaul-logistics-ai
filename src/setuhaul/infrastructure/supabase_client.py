@@ -37,7 +37,7 @@ after one call.
   auth header. Reusing `create_public_client`'s singleton here would leak
   one driver's token onto another driver's requests, so this gets its own
   separate cache, keyed by the access token itself
-  (`@lru_cache(maxsize=256)`) -- each distinct token gets its own client
+  (`@lru_cache(maxsize=512)`) -- each distinct token gets its own client
   instance, reused only across that same caller's subsequent requests. The
   bound keeps memory flat even as many drivers log in/refresh tokens over a
   long-running process; a stale cached entry for an expired token isn't a
@@ -82,7 +82,7 @@ def create_public_client(settings: Settings) -> Client:
     return _cached_public_client(settings.supabase_url, settings.supabase_publishable_key)
 
 
-@lru_cache(maxsize=256)
+@lru_cache(maxsize=512)
 def _cached_caller_client(url: str, key: str, access_token: str) -> Client:
     client = create_client(url, key, options=ClientOptions(auto_refresh_token=False, persist_session=False))
     client.postgrest.auth(access_token)

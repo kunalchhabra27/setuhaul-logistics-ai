@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   Sparkles,
   AlertCircle,
+  AlertTriangle,
   X,
   Maximize2,
   Minimize2,
@@ -49,6 +50,8 @@ export default function ChatPanel({
   onClose,
   isExpanded,
   onToggleExpand,
+  emergencyAvailable,
+  onEmergencyAlert,
 }: {
   color: string;
   messages: DriverChatMessageSummary[];
@@ -59,11 +62,17 @@ export default function ChatPanel({
   onClose?: () => void;
   isExpanded?: boolean;
   onToggleExpand?: () => void;
+  // True once the assistant has flagged a safety-critical situation
+  // (accident, engine failure, etc.) this session -- see
+  // DriversPortal.tsx's derivation from snapshot.exception.severity_code.
+  emergencyAvailable?: boolean;
+  onEmergencyAlert?: () => Promise<void>;
 }) {
   const [inputText, setInputText] = useState("");
   const [isRecording, setIsRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [micError, setMicError] = useState<string | null>(null);
+  const [sendingAlert, setSendingAlert] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
@@ -152,6 +161,16 @@ export default function ChatPanel({
     else void startRecording();
   };
 
+  const handleEmergencyAlert = async () => {
+    if (!onEmergencyAlert || sendingAlert) return;
+    setSendingAlert(true);
+    try {
+      await onEmergencyAlert();
+    } finally {
+      setSendingAlert(false);
+    }
+  };
+
   return (
     <div className="flex h-full w-full flex-col overflow-hidden rounded-3xl border border-line bg-white shadow-pop">
       <div
@@ -179,6 +198,16 @@ export default function ChatPanel({
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {emergencyAvailable && onEmergencyAlert && (
+            <button
+              onClick={() => void handleEmergencyAlert()}
+              disabled={sendingAlert}
+              className="flex animate-pulse items-center gap-1.5 rounded-xl border border-rose-300 bg-rose-600 px-3 py-2 text-xs font-bold text-white shadow-sm transition hover:bg-rose-700 active:scale-95 disabled:opacity-60"
+            >
+              <AlertTriangle className="h-4 w-4" />
+              <span className="hidden sm:inline">{sendingAlert ? "Sending alert..." : "Send Emergency Alert"}</span>
+            </button>
+          )}
           <button
             onClick={() => void onEscalate("Driver requested manual coordinator support")}
             className="hidden items-center gap-1.5 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-bold text-rose-600 transition hover:bg-rose-100 active:scale-95 sm:flex"

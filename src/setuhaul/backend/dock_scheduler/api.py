@@ -19,6 +19,7 @@ from setuhaul.backend.dock_scheduler.models import (
     ConfirmResponse,
     CreateChangeRequest,
     DecideChangeRequest,
+    DockBoardReasonResponse,
     DockSlot,
     DriverConstraints,
     HoldRequest,
@@ -81,6 +82,26 @@ def dock_board(shipment_id: str, service: DockSchedulerService = Depends(get_ser
         return service.dock_board(shipment_id)
     except DockSchedulerError as exc:
         raise _handle_error(exc) from exc
+
+
+@router.get("/board/reason", response_model=DockBoardReasonResponse)
+def dock_board_unavailable_reason(
+    shipment_id: str, service: DockSchedulerService = Depends(get_service)
+) -> DockBoardReasonResponse:
+    """Why GET /board came back empty for this shipment -- called by the
+    frontend only when the board is already known to be empty, to explain
+    the specific blocker (no active docks, dock-type/refrigeration/weight
+    mismatch, or no slots within operating hours) instead of a bare "no
+    slots" message.
+
+    Example:
+    `GET /dock-scheduler/board/reason?shipment_id=SHP1006`
+    """
+    try:
+        reason = service.dock_board_unavailable_reason(shipment_id)
+    except DockSchedulerError as exc:
+        raise _handle_error(exc) from exc
+    return DockBoardReasonResponse(reason=reason)
 
 
 @router.post("/hold", response_model=HoldResponse)

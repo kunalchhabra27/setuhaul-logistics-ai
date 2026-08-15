@@ -17,6 +17,16 @@ export function getDockBoard(shipmentId: string) {
   return api.request<DockSlot[]>(`/dock-scheduler/board?shipment_id=${encodeURIComponent(shipmentId)}`);
 }
 
+// Called only when getDockBoard() above comes back empty -- explains the
+// specific reason (no active docks, dock-type/refrigeration/weight
+// mismatch, or no slots within operating hours) instead of leaving the
+// board silently blank.
+export function getDockBoardUnavailableReason(shipmentId: string) {
+  return api.request<{ reason: string | null }>(
+    `/dock-scheduler/board/reason?shipment_id=${encodeURIComponent(shipmentId)}`
+  );
+}
+
 export function holdSlot(input: { shipment_id: string; slot_id: string; ttl_minutes?: number }) {
   return api.request<{ hold_id: string; slot_id: string; shipment_id: string; expires_at: string }>(
     "/dock-scheduler/hold",

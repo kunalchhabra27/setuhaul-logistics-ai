@@ -87,6 +87,87 @@ class DockSchedulerService:
             for row in slots
         ]
 
+    def dock_board_unavailable_reason(self, shipment_id: str) -> str | None:
+        """Explain why dock_board() came back empty for this shipment.
+
+        The frontend only calls this when the board is already known to be
+        empty, so it re-derives the answer by walking the exact same filter
+        chain dock_board()/compatible_slots() apply -- docks at the facility
+        -> ACTIVE docks -> dock-type match -> refrigeration match -> weight
+        capacity match -> operating-hours overlap -- and returns a message
+        for the FIRST stage that eliminates every candidate. That's the
+        actual blocker; later stages are moot once an earlier one has
+        already zeroed out the list. Returns None only if nothing here can
+        explain it (e.g. a transient data issue) -- callers should fall back
+        to a generic "no slots right now" message in that case.
+        """
+        try:
+            target = self.repository.shipment(shipment_id)
+        except DockSchedulerError:
+            return None
+
+        facility_id = target.get("destination_facility_id")
+        if not facility_id:
+            return "This shipment has no destination facility assigned yet, so no dock board can be shown."
+
+        try:
+            facility = self.repository.facility(facility_id)
+        except DockSchedulerError:
+            facility = None
+
+        all_docks = self.repository.docks_for_facility(facility_id)
+        if not all_docks:
+            return "This facility has no docks configured yet."
+
+        active_docks = [d for d in all_docks if d.get("dock_status") == "ACTIVE"]
+        if not active_docks:
+            return "Every dock at this facility is currently inactive or out of service."
+
+        required_dock_type = target.get("required_dock_type")
+        type_matches = [
+            d for d in active_docks if required_dock_type == "ANY" or d.get("dock_type") == required_dock_type
+        ]
+        if not type_matches:
+            available_types = sorted({d.get("dock_type") for d in active_docks if d.get("dock_type")})
+            return (
+                f"This shipment requires a {required_dock_type} dock, but no active dock at this "
+                f"facility is that type -- active dock types here: {', '.join(available_types) or 'none'}."
+            )
+
+        refrigeration_matches = type_matches
+        if target.get("temperature_control_required"):
+            refrigeration_matches = [d for d in type_matches if d.get("supports_refrigerated")]
+            if not refrigeration_matches:
+                return (
+                    f"This shipment needs a refrigerated dock, but no active {required_dock_type} dock "
+                    "at this facility supports refrigeration."
+                )
+
+        load_weight_kg = target.get("load_weight_kg")
+        weight_matches = refrigeration_matches
+        if load_weight_kg is not None:
+            weight_matches = [
+                d
+                for d in refrigeration_matches
+                if d.get("max_vehicle_weight_kg") is None or d.get("max_vehicle_weight_kg") >= load_weight_kg
+            ]
+            if not weight_matches:
+                heaviest = max((d.get("max_vehicle_weight_kg") or 0) for d in refrigeration_matches)
+                return (
+                    f"This shipment's load ({load_weight_kg:,} kg) exceeds the weight capacity of "
+                    f"every matching dock at this facility (highest capacity here: {heaviest:,} kg)."
+                )
+
+        hours_note = ""
+        if facility and facility.get("open_time") and facility.get("close_time"):
+            hours_note = f" ({facility['open_time']}–{facility['close_time']})"
+        dock_word = "dock" if len(weight_matches) == 1 else "docks"
+        return (
+            f"{len(weight_matches)} matching {dock_word} at this facility, but none currently have an "
+            f"open appointment slot within the facility's operating hours{hours_note} right now -- "
+            "try again shortly, or ask WMS to open more slots."
+        )
+
     def hold_slot(self, shipment_id: str, slot_id: str, ttl_minutes: int = 15) -> HoldResult:
         """Reserve a slot temporarily while the driver considers the option."""
         compatible = self.repository.compatible_slots(shipment_id)

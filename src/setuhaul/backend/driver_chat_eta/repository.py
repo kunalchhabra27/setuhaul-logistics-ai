@@ -379,6 +379,26 @@ class DriverChatRepository:
             self._raise_persistence(exc)
         return rows[0] if rows else None
 
+    # -- server-side snapshot bundle (perf) --------------------------------
+
+    def get_driver_snapshot_bundle(self, driver_id: str) -> dict[str, Any] | None:
+        """Single round trip replacing the ~7-9 separate calls
+        _build_snapshot otherwise makes (shipment/vehicle/facility/docks/
+        appointment/checkin/exception/chat_messages), via the
+        `driver_snapshot` Postgres function (see
+        supabase/migrations/20260815120000_driver_snapshot_rpc.sql).
+
+        Raises (does not swallow) if the RPC call itself fails -- e.g.
+        `PGRST202`/`42883` (function not found) when the migration hasn't
+        been applied yet, or any other PostgREST/network error. Callers
+        (DriverChatService._build_snapshot) are expected to catch broadly
+        and fall back to the original sequential per-table calls, so this
+        method's job is only to attempt the fast path and surface exactly
+        what went wrong if it isn't available.
+        """
+        response = self.client.rpc("driver_snapshot", {"p_driver_id": driver_id}).execute()
+        return response.data
+
     # -- chat threads & messages ------------------------------------------
 
     def get_open_thread_for_driver(self, driver_id: str) -> dict[str, Any] | None:

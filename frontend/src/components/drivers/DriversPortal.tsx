@@ -12,6 +12,7 @@ import {
   requestDriverDockSlotChange,
   sendDriverChatMessage,
   sendDriverVoiceMessage,
+  sendEmergencyAlert,
   updateDriverCheckin,
 } from "../../services/driverChatApi";
 import type { ArrivalUpdateChoice, DriverProfile, DriverSnapshot } from "../../types/driverChat";
@@ -242,6 +243,25 @@ export default function DriversPortal({ color }: { color: string }) {
     }
   };
 
+  // The assistant flags a safety-critical situation (accident, engine
+  // failure, etc.) via its flag_emergency_situation tool, which sets
+  // severity_code=CRITICAL on the active exception -- that alone (no extra
+  // field on ChatResponse needed) is what unlocks the "Send Emergency
+  // Alert" button in ChatPanel.
+  const emergencyAvailable = snapshot?.exception?.severity_code === "CRITICAL";
+
+  const handleEmergencyAlert = async () => {
+    try {
+      const res = await sendEmergencyAlert(snapshot?.exception?.description || "Driver-reported emergency");
+      showToast(
+        res.status === "sent" ? "Emergency alert sent to dispatch" : "Could not send SMS -- call your carrier's safety line directly",
+        res.status === "sent" ? "success" : "error"
+      );
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Could not send the emergency alert", "error");
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center gap-2 py-16 text-sm font-semibold text-ink-soft">
@@ -346,6 +366,8 @@ export default function DriversPortal({ color }: { color: string }) {
                 onSendMessage={handleSendMessage}
                 onSendVoiceMessage={handleSendVoiceMessage}
                 onEscalate={handleEscalate}
+                emergencyAvailable={emergencyAvailable}
+                onEmergencyAlert={handleEmergencyAlert}
                 onClose={() => setChatOpen(false)}
                 isExpanded={chatExpanded}
                 onToggleExpand={() => setChatExpanded((v) => !v)}

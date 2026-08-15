@@ -200,3 +200,12 @@ class DockSlot(BaseModel):
     availability_status: str
     occupant_shipment_id: str | None = None
     occupant_driver_name: str | None = None
+
+
+class DockBoardReasonResponse(BaseModel):
+    """Why GET /dock-scheduler/board came back empty for a shipment -- see
+    DockSchedulerService.dock_board_unavailable_reason. `reason` is None
+    when nothing could be determined (caller should show a generic
+    fallback message in that case)."""
+
+    reason: str | None = None

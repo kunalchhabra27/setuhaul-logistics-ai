@@ -85,6 +85,17 @@ export function escalateDriverException(reason: string) {
   );
 }
 
+// Only ever called from an explicit driver tap on the "Send Emergency
+// Alert" button (see ChatPanel.tsx) -- never automatically. Sends an SMS
+// via the backend's existing Twilio integration to a fixed emergency
+// contact with the driver's shipment/location details.
+export function sendEmergencyAlert(reason: string) {
+  return api.request<{ status: "sent" | "unavailable"; message_sid: string | null }>(
+    `${base}/emergency-alert`,
+    { method: "POST", body: JSON.stringify({ reason }) }
+  );
+}
+
 // -- dock-slot change requests -------------------------------------------
 //
 // A driver who already has a confirmed slot can ask for a different one --

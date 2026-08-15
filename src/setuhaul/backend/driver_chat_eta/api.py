@@ -180,6 +180,24 @@ def escalate(
         _raise_http(exc)
 
 
+@router.post("/emergency-alert", response_model=dict)
+def send_emergency_alert(
+    request: EscalateRequest,
+    principal: DriverPrincipal = Depends(get_current_driver),
+    service: DriverChatService = Depends(get_service),
+) -> dict:
+    """Send the actual emergency SMS to the fixed emergency contact -- only
+    ever called by the driver explicitly tapping the "Send Emergency Alert"
+    button the frontend shows once flag_emergency_situation has marked the
+    thread (see ContextBar.tsx / ChatPanel.tsx). Reuses EscalateRequest's
+    single `reason` field rather than a new request model.
+    """
+    try:
+        return service.send_emergency_alert(principal, request.reason)
+    except DriverChatError as exc:
+        _raise_http(exc)
+
+
 def install_exception_handlers(app: FastAPI) -> None:
     """Install a stable error envelope for DriverChatError.
 

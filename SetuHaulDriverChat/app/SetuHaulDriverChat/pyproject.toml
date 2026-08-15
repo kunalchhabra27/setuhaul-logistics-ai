@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "SetuHaulDriverChat"
+version = "0.1.0"
+description = "AgentCore Runtime Application using LangChain/LangGraph"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "aws-opentelemetry-distro",
+    "opentelemetry-instrumentation-langchain >= 0.59.0",
+    "langchain >= 1.0.3",
+    "bedrock-agentcore >= 1.8.0",
+    "botocore[crt] >= 1.35.0",
+    "langchain-google-genai >= 3.0.3",
+    "google-genai >= 1.0.0, < 2.0.0",
+    # Below: same runtime deps setuhaul/ (vendored copy of src/setuhaul, see
+    # main.py's docstring) needs to actually run -- kept in sync with the
+    # versions pinned in the repo root's pyproject.toml so behavior doesn't
+    # drift between the Vercel and AWS deployments.
+    "supabase==2.31.0",
+    "redis>=5.0",
+    "pydantic>=2.0",
+    "pydantic-settings==2.14.2",
+    "python-dotenv>=1.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
