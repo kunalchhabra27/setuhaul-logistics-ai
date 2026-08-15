@@ -1,0 +1,16 @@
+{
+  "run_id": "smoke-20260815142107",
+  "facility_id": "FAC-GGN-01",
+  "shipments": [
+    {
+      "shipment_id": "LT-CI-smoke-20260815142107-001",
+      "driver_id": "5d271e86-bfc3-4d7b-ba62-bb6809fccad6",
+      "vehicle_id": "VEH001",
+      "appointment_id": "APT-PND-3403C16C",
+      "slot_id": "DOCK-GGN-D1-202608160900",
+      "slot_start": "2026-08-16T09:00:00+05:30",
+      "timing_group": "EARLY",
+      "gate_in_at": "2026-08-16T08:30:00+05:30"
+    }
+  ]
+}

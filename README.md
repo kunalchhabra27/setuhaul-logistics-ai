@@ -1028,6 +1028,26 @@ Supabase provides
 
 All backend systems communicate with the same operational database while maintaining clear ownership boundaries over their respective tables.
 
+## Observability, Load Testing & Agent Runtime
+
+SetuHaul includes a local engineering harness that preserves normal API,
+authentication, scheduler, and state-machine ownership:
+
+- **Locust** provides local concurrency testing for public reads,
+  authenticated portal APIs, dedicated LT-only Check-in lifecycles, and the
+  local AgentCore conversation endpoint.
+- **OpenTelemetry** emits distributed traces, request and operation metrics,
+  and correlated structured logs from the existing FastAPI services.
+- **LangSmith** traces the Driver Chat LangChain, LLM, and tool path in project
+  `setuhaul` under run name `setuhaul.driver_chat`.
+- **AgentCore** runs the existing Driver Chat through a local runtime on port
+  `8090` with same-session continuity. AWS deployment has not been performed.
+- **Automatic harness authentication** obtains and refreshes a dedicated
+  test-user JWT from local Supabase credentials. `TEST_ACCESS_TOKEN` remains a
+  manual fallback; secrets remain in memory or gitignored local files.
+
+📘 [Harness & Observability Guide](docs/HARNESS.md)
+
 ---
 
 # Technology Stack
@@ -1042,8 +1062,8 @@ All backend systems communicate with the same operational database while maintai
 | Validation | Pydantic |
 | Testing | Pytest |
 | Load Testing | Locust |
-| Deployment *(Planned)* | AWS Bedrock AgentCore |
-| Observability *(Planned)* | LangSmith |
+| Agent Runtime | AWS Bedrock AgentCore (local ready; cloud not deployed) |
+| Observability | OpenTelemetry and LangSmith |
 | Monitoring *(Planned)* | Amazon CloudWatch |
 
 ---
@@ -1064,8 +1084,7 @@ All backend systems communicate with the same operational database while maintai
 
 ## Phase 3
 
-- AWS Bedrock AgentCore
-- LangSmith
+- AWS Bedrock AgentCore cloud deployment
 - CloudWatch
 
 ## Phase 4

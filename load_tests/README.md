@@ -1,94 +1,100 @@
-# SetuHaul Load-Test Harness
+# SetuHaul Load-Test Quick Start
 
-This directory is intentionally outside application code. It runs the same API
-workloads before and after Redis integration without changing business logic.
+The local Locust harness covers public API reads, authenticated Driver/TMS/WMS
+traffic, dedicated LT-only Check-in lifecycles, and read-only AgentCore
+conversations. See the complete [Harness & Observability Guide](../docs/HARNESS.md)
+for architecture, verified metrics, telemetry, troubleshooting, and safety.
 
-Install the optional harness dependencies once from the repository root:
+## Install
 
 ```sh
+cd /path/to/setuhaul-logistics-ai
+source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-## Safety
-
-- Set `LOCUST_HOST` and `TEST_ACCESS_TOKEN`; no credential is stored here.
-- Read-only traffic runs by default.
-- Set `LOAD_TEST_ALLOW_MUTATIONS=true` only against a controlled environment.
-- Every mutation requires a shipment ID starting with `LOAD_TEST_SHIPMENT_PREFIX`
-  (default `LT-`). Never point mutation scenarios at production data.
-- Check-in completion requires a confirmed WMS appointment for each prepared
-  shipment, exactly as the live API does.
-
-## Prepare the 100-shipment Check-in run
-
-Create 100 dedicated `LT-...` shipments at one test facility and give each a
-confirmed appointment. Export them as a comma-separated value:
+## Start FastAPI
 
 ```sh
-export LOCUST_HOST=http://localhost:8000
-export TEST_ACCESS_TOKEN=replace-with-a-test-user-token
-export LOAD_TEST_ALLOW_MUTATIONS=true
-export CHECKIN_TEST_FACILITY_ID=FAC-TEST
-export CHECKIN_SHIPMENT_IDS="LT-001,LT-002,...,LT-100"
-```
-
-Run the UI and start 100 users with a fast ramp:
-
-```sh
-locust -f load_tests/locustfile.py --host="$LOCUST_HOST"
-```
-
-Choose only `CheckinUser`, set users to `100`, and use a non-zero spawn rate.
-Each virtual user takes one shipment through gate, queue, dock, and completion,
-with staggered waits. Do not reuse those completed test shipments for another
-run; reseed them first.
-
-For headless results that can be compared before/after Redis:
-
-```sh
-locust -f load_tests/locustfile.py --host="$LOCUST_HOST" \
-  --headless -u 100 -r 10 -t 2m \
-  --csv=artifacts/locust-before-redis --html=artifacts/locust-before-redis.html
-```
-
-Repeat with the same users, ramp, duration, prepared data, and application
-configuration after Redis. Compare Locust request count, RPS, failures, median,
-p95, p99, and maximum latency from its CSV/HTML report.
-
-## Other scenarios
-
-- `DriverUser`: snapshot, current profile, and existing slot-options chat flow.
-- `TmsUser`: lists/reads shipments and assignment data. Optional creation reads
-  `TMS_CREATE_SHIPMENT_JSON`; optional assignment uses `TMS_TEST_SHIPMENT_ID`
-  and `TMS_ASSIGN_DRIVER_ID`. Both remain disabled until mutation opt-in.
-- `WmsUser`: dock board and deterministic suggestions. Optional hold/confirm
-  requires `WMS_TEST_SHIPMENT_ID` and `WMS_TEST_SLOT_ID` with mutation opt-in.
-  Optional slot-change requests additionally require `WMS_CHANGE_SLOT_ID`.
-
-## OTel, LangSmith, and CloudWatch
-
-```sh
+set -a
+source .env
+set +a
 export OTEL_ENABLED=true
-export OTEL_SERVICE_NAME=setuhaul-backend
-# Point this at an ADOT / CloudWatch Agent OTLP HTTP receiver when deployed.
-export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
-
-export LANGSMITH_TRACING=true
-export LANGSMITH_API_KEY=replace-with-langsmith-key
-export LANGSMITH_PROJECT=setuhaul-harness
+PYTHONPATH=src uvicorn setuhaul.main:app --host 127.0.0.1 --port 8000
 ```
 
-All values are optional. Missing packages, LangSmith credentials, OTLP
-connectivity, or a CloudWatch Agent only emit warnings; normal API behavior
-continues. LangSmith context is deliberately limited to Driver Chat's existing
-LangChain agent and captures its LLM/tool/final-response trace without recording
-full driver messages in custom telemetry attributes.
+## Configure authentication
 
-Create a CloudWatch dashboard from ADOT-exported spans/metrics with these views:
+`TEST_ACCESS_TOKEN` is supported as a manual fallback. Otherwise the harness
+logs into Supabase once per selected role and refreshes the in-memory session:
 
-- API: request count, p95/p99 latency, 4xx, and 5xx by route.
-- TMS: `tms.shipment.*` operation count/errors/latency.
-- Dock Scheduler: slot-search, hold, confirm, conflict/no-feasible-slot rates.
-- Check-in: gate, queue, dock, complete, and invalid-transition rates.
-- AI: `driver_chat.agent_execution` latency/errors, LangSmith tool-call and token
-  data where the provider supplies it, plus escalation counts from application logs.
+```sh
+export SUPABASE_URL=https://your-project.supabase.co
+export SUPABASE_PUBLISHABLE_KEY=replace-locally
+export LOAD_TEST_EMAIL=test-user@example.com
+export LOAD_TEST_PASSWORD=replace-locally
+```
+
+Optional role-specific pairs use `LOAD_TEST_DRIVER_*`, `LOAD_TEST_TMS_*`,
+`LOAD_TEST_WMS_*`, and `LOAD_TEST_CHECKIN_*`. Keep every value local; tokens and
+credentials must never be committed or printed.
+
+## Open the Locust UI
+
+```sh
+locust -f load_tests/locustfile.py --class-picker
+```
+
+Open `http://localhost:8089`, choose one class, set users and spawn rate, and
+start. Use 1 user for sanity, 5 for small concurrency, and 10 for a local
+baseline. The UI exposes:
+
+- `ReadOnlyUser`
+- `DriverUser`
+- `TmsUser`
+- `WmsUser`
+- `CheckinUser`
+- `AgentCoreDriverUser`
+
+Selected-class preflight validates configuration once before users spawn.
+
+## AgentCore
+
+Start the existing local runtime in another terminal:
+
+```sh
+set -a
+source .env
+set +a
+export PYTHONPATH=src
+agentcore dev --port 8090 --logs
+```
+
+Then choose only `AgentCoreDriverUser` in Locust. It targets
+`http://localhost:8090/invocations`, gives each virtual user a unique session,
+and sends a read-only status question followed by a same-session follow-up.
+
+## Check-in safety
+
+Check-in is mutation-capable and remains fail-closed:
+
+```sh
+export LOAD_TEST_ALLOW_MUTATIONS=true
+export CHECKIN_MANIFEST=load_tests/data/checkin-smoke.json
+export CHECKIN_STAGGER_SECONDS=0.05
+```
+
+Only dedicated shipment IDs beginning with `LOAD_TEST_SHIPMENT_PREFIX`
+(default `LT-`) are accepted. Use API-prepared manifests from
+`load_tests/seed_checkin.py`; never use normal application records.
+
+## Save results
+
+```sh
+locust -f load_tests/locustfile.py --headless -u 10 -r 2 -t 60s ReadOnlyUser \
+  --csv=load_tests/results/local-api-10 \
+  --html=load_tests/results/local-api-10.html
+```
+
+Store local results under `load_tests/results/` and compare identical workload,
+user, spawn-rate, and duration settings.

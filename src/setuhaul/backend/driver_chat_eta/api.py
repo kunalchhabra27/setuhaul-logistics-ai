@@ -29,6 +29,7 @@ from setuhaul.backend.driver_chat_eta.service import DriverChatService
 from setuhaul.infrastructure.settings import get_settings
 from setuhaul.infrastructure.metrics import emit_domain_event, increment
 from setuhaul.infrastructure.supabase_client import create_caller_client
+from setuhaul.infrastructure.telemetry import observe_operation
 
 router = APIRouter(prefix="/driver-chat-eta", tags=["driver-chat-eta"])
 
@@ -116,7 +117,11 @@ def send_chat_message(
     service: DriverChatService = Depends(get_service),
 ) -> ChatResponse:
     try:
-        return service.handle_chat_message(principal, request.message)
+        return observe_operation(
+            "driver_chat.request",
+            {"operation": "chat_request"},
+            lambda: service.handle_chat_message(principal, request.message),
+        )
     except DriverChatError as exc:
         _raise_http(exc)
 

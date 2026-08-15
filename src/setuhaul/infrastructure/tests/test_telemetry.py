@@ -2,9 +2,20 @@
 
 from __future__ import annotations
 
+import sys
+from contextlib import contextmanager
+from types import ModuleType
+
 from fastapi import FastAPI
 
-from setuhaul.infrastructure.telemetry import _otlp_trace_endpoint, _safe_log_attributes, initialize_telemetry, operation_span
+from setuhaul.infrastructure.telemetry import (
+    _otlp_trace_endpoint,
+    _safe_log_attributes,
+    initialize_telemetry,
+    langsmith_trace_context,
+    operation_span,
+    set_current_langsmith_metadata,
+)
 from setuhaul.infrastructure.metrics import safe_attributes
 
 
@@ -57,3 +68,61 @@ def test_otlp_log_attributes_preserve_request_correlation_without_unapproved_fie
         "setuhaul.request_id": "req-123",
         "setuhaul.shipment_id": "SHP-123",
     }
+
+
+def test_langsmith_context_uses_named_run_and_safe_metadata(monkeypatch) -> None:
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "test-key")
+    monkeypatch.setenv("LANGSMITH_PROJECT", "test-project")
+    captured: dict = {}
+
+    class FakeRun:
+        def add_metadata(self, metadata: dict) -> None:
+            captured["enriched"] = metadata
+
+    @contextmanager
+    def fake_tracing_context(**kwargs):
+        captured["context"] = kwargs
+        yield
+
+    @contextmanager
+    def fake_trace(name, **kwargs):
+        captured["name"] = name
+        captured["trace"] = kwargs
+        yield
+
+    fake_module = ModuleType("langsmith")
+    fake_module.tracing_context = fake_tracing_context
+    fake_module.trace = fake_trace
+    fake_module.get_current_run_tree = lambda: FakeRun()
+    monkeypatch.setitem(sys.modules, "langsmith", fake_module)
+
+    with langsmith_trace_context({"operation": "driver_chat", "driver_name": "private"}):
+        set_current_langsmith_metadata(
+            {"shipment_id": "SHP-1", "thread_id": "TH-1", "driver_name": "private"}
+        )
+
+    assert captured["name"] == "setuhaul.driver_chat"
+    assert captured["trace"]["project_name"] == "test-project"
+    assert captured["trace"]["metadata"] == {"operation": "driver_chat"}
+    assert captured["enriched"] == {"shipment_id": "SHP-1", "thread_id": "TH-1"}
+
+
+def test_langsmith_setup_failure_is_fail_open(monkeypatch) -> None:
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "test-key")
+
+    @contextmanager
+    def broken_context(**_kwargs):
+        raise RuntimeError("unavailable")
+        yield
+
+    fake_module = ModuleType("langsmith")
+    fake_module.tracing_context = broken_context
+    fake_module.trace = broken_context
+    monkeypatch.setitem(sys.modules, "langsmith", fake_module)
+
+    with langsmith_trace_context({"operation": "driver_chat"}):
+        result = "business-result"
+
+    assert result == "business-result"

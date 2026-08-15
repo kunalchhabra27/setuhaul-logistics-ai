@@ -8,11 +8,12 @@ from .common import API_PREFIX, bearer_headers, env
 
 
 class DriverUser(HttpUser):
+    host = env("LOCUST_HOST", "http://127.0.0.1:8000")
     wait_time = between(1, 3)
     weight = 3
 
     def on_start(self) -> None:
-        self.headers = bearer_headers()
+        self.headers = bearer_headers(role="driver")
         self.shipment_id = env("DRIVER_TEST_SHIPMENT_ID")
 
     @task(4)

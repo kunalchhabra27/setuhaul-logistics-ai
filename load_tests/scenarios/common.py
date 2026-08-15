@@ -6,19 +6,14 @@ import json
 import os
 from typing import Any
 
+from load_tests.auth import bearer_headers
+
 
 API_PREFIX = "/api/v1"
 
 
 def env(name: str, default: str = "") -> str:
     return os.getenv(name, default).strip()
-
-
-def bearer_headers() -> dict[str, str]:
-    token = env("TEST_ACCESS_TOKEN")
-    if not token:
-        raise RuntimeError("TEST_ACCESS_TOKEN is required for authenticated load-test scenarios.")
-    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
 
 def mutations_allowed() -> bool:

@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import os
 from copy import copy
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from typing import Any, Callable, Iterator, TypeVar
 
 from fastapi import FastAPI
@@ -255,7 +255,7 @@ def langsmith_trace_context(metadata: dict[str, Any] | None = None) -> Iterator[
         yield
         return
     try:
-        from langsmith import tracing_context
+        from langsmith import trace, tracing_context
 
         project = os.getenv("LANGSMITH_PROJECT", "setuhaul-harness")
     except Exception:  # noqa: BLE001 - LangSmith is optional
@@ -263,10 +263,59 @@ def langsmith_trace_context(metadata: dict[str, Any] | None = None) -> Iterator[
         yield
         return
 
-    with tracing_context(
-        enabled=True,
-        project_name=project,
-        tags=["driver-chat"],
-        metadata=_safe_attributes(metadata),
-    ):
+    safe_metadata = _safe_attributes(metadata)
+    stack = ExitStack()
+    try:
+        stack.enter_context(
+            tracing_context(
+                enabled=True,
+                project_name=project,
+                tags=["driver-chat"],
+                metadata=safe_metadata,
+            )
+        )
+        stack.enter_context(
+            trace(
+                "setuhaul.driver_chat",
+                run_type="chain",
+                inputs={"operation": "driver_chat"},
+                project_name=project,
+                tags=["driver-chat"],
+                metadata=safe_metadata,
+            )
+        )
+    except Exception:  # noqa: BLE001 - tracing setup must never affect chat
+        stack.close()
+        logger.warning("LangSmith setup failed; continuing without LangSmith tracing.", exc_info=True)
         yield
+        return
+
+    business_error: BaseException | None = None
+    try:
+        yield
+    except BaseException as exc:
+        business_error = exc
+        raise
+    finally:
+        try:
+            stack.__exit__(
+                type(business_error) if business_error else None,
+                business_error,
+                business_error.__traceback__ if business_error else None,
+            )
+        except Exception:  # noqa: BLE001 - tracing teardown is also fail-open
+            logger.warning("LangSmith teardown failed; continuing request normally.", exc_info=True)
+
+
+def set_current_langsmith_metadata(metadata: dict[str, Any] | None) -> None:
+    """Add safe identifiers to the active Driver Chat run, if one exists."""
+    if not langsmith_enabled() or not os.getenv("LANGSMITH_API_KEY"):
+        return
+    try:
+        from langsmith import get_current_run_tree
+
+        run = get_current_run_tree()
+        if run is not None:
+            run.add_metadata(_safe_attributes(metadata))
+    except Exception:  # noqa: BLE001 - enrichment is strictly best-effort
+        logger.warning("LangSmith metadata enrichment failed.", exc_info=True)

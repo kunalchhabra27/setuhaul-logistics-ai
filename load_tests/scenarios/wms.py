@@ -8,11 +8,12 @@ from .common import API_PREFIX, bearer_headers, dedicated_shipment_id, env, muta
 
 
 class WmsUser(HttpUser):
+    host = env("LOCUST_HOST", "http://127.0.0.1:8000")
     wait_time = between(1, 3)
     weight = 2
 
     def on_start(self) -> None:
-        self.headers = bearer_headers()
+        self.headers = bearer_headers(role="wms")
         self.shipment_id = env("WMS_TEST_SHIPMENT_ID")
         self.slot_id = env("WMS_TEST_SLOT_ID")
         self.change_slot_id = env("WMS_CHANGE_SLOT_ID")

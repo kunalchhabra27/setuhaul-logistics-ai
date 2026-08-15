@@ -8,11 +8,12 @@ from .common import API_PREFIX, bearer_headers, dedicated_shipment_id, env, json
 
 
 class TmsUser(HttpUser):
+    host = env("LOCUST_HOST", "http://127.0.0.1:8000")
     wait_time = between(1, 2)
     weight = 2
 
     def on_start(self) -> None:
-        self.headers = bearer_headers()
+        self.headers = bearer_headers(role="tms")
         self.shipment_id = env("TMS_TEST_SHIPMENT_ID")
         self.assign_driver_id = env("TMS_ASSIGN_DRIVER_ID")
 
