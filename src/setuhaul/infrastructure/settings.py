@@ -87,6 +87,17 @@ class Settings(BaseSettings):
     # loses data).
     redis_url: str | None = Field(default=None, alias="REDIS_URL")
 
+    # Optional observability harness configuration. These defaults keep local
+    # development and all existing flows unchanged unless explicitly enabled.
+    otel_enabled: bool = Field(default=False, alias="OTEL_ENABLED")
+    otel_exporter_otlp_endpoint: str | None = Field(default=None, alias="OTEL_EXPORTER_OTLP_ENDPOINT")
+    otel_exporter_otlp_protocol: str = Field(default="http/protobuf", alias="OTEL_EXPORTER_OTLP_PROTOCOL")
+    otel_service_name: str = Field(default="setuhaul-backend", alias="OTEL_SERVICE_NAME")
+    aws_region: str | None = Field(default=None, alias="AWS_REGION")
+    langsmith_tracing: bool = Field(default=False, alias="LANGSMITH_TRACING")
+    langsmith_api_key: str | None = Field(default=None, alias="LANGSMITH_API_KEY")
+    langsmith_project: str = Field(default="setuhaul-harness", alias="LANGSMITH_PROJECT")
+
     # Twilio SMS notifications (check-in confirmation, driver assignment).
     # All three are optional -- when unset, setuhaul.infrastructure.sms simply
     # skips sending and logs instead of failing the request. Never hardcode
@@ -143,6 +154,14 @@ def get_settings() -> Settings:
             "GOOGLE_API_KEY": os.getenv("GOOGLE_API_KEY"),
             "DRIVER_CHAT_TRANSCRIPTION_MODEL": os.getenv("DRIVER_CHAT_TRANSCRIPTION_MODEL", "gemini-2.5-flash"),
             "REDIS_URL": os.getenv("REDIS_URL"),
+            "OTEL_ENABLED": os.getenv("OTEL_ENABLED", "false"),
+            "OTEL_EXPORTER_OTLP_ENDPOINT": os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+            "OTEL_EXPORTER_OTLP_PROTOCOL": os.getenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf"),
+            "OTEL_SERVICE_NAME": os.getenv("OTEL_SERVICE_NAME", "setuhaul-backend"),
+            "AWS_REGION": os.getenv("AWS_REGION"),
+            "LANGSMITH_TRACING": os.getenv("LANGSMITH_TRACING", "false"),
+            "LANGSMITH_API_KEY": os.getenv("LANGSMITH_API_KEY"),
+            "LANGSMITH_PROJECT": os.getenv("LANGSMITH_PROJECT", "setuhaul-harness"),
             "TWILIO_ACCOUNT_SID": os.getenv("TWILIO_ACCOUNT_SID"),
             "TWILIO_AUTH_TOKEN": os.getenv("TWILIO_AUTH_TOKEN"),
             "TWILIO_FROM_NUMBER": os.getenv("TWILIO_FROM_NUMBER"),
@@ -163,6 +182,14 @@ def get_settings() -> Settings:
         GOOGLE_API_KEY=os.getenv("GOOGLE_API_KEY"),
         DRIVER_CHAT_TRANSCRIPTION_MODEL=os.getenv("DRIVER_CHAT_TRANSCRIPTION_MODEL", "gemini-2.5-flash"),
         REDIS_URL=os.getenv("REDIS_URL"),
+        OTEL_ENABLED=os.getenv("OTEL_ENABLED", "false"),
+        OTEL_EXPORTER_OTLP_ENDPOINT=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+        OTEL_EXPORTER_OTLP_PROTOCOL=os.getenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf"),
+        OTEL_SERVICE_NAME=os.getenv("OTEL_SERVICE_NAME", "setuhaul-backend"),
+        AWS_REGION=os.getenv("AWS_REGION"),
+        LANGSMITH_TRACING=os.getenv("LANGSMITH_TRACING", "false"),
+        LANGSMITH_API_KEY=os.getenv("LANGSMITH_API_KEY"),
+        LANGSMITH_PROJECT=os.getenv("LANGSMITH_PROJECT", "setuhaul-harness"),
         TWILIO_ACCOUNT_SID=os.getenv("TWILIO_ACCOUNT_SID"),
         TWILIO_AUTH_TOKEN=os.getenv("TWILIO_AUTH_TOKEN"),
         TWILIO_FROM_NUMBER=os.getenv("TWILIO_FROM_NUMBER"),

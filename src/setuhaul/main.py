@@ -16,11 +16,13 @@ from setuhaul.backend.driver_chat_eta.api import (
 from setuhaul.backend.tms.api import install_exception_handlers, router as tms_router
 from setuhaul.infrastructure.logging import configure_logging
 from setuhaul.infrastructure.observability import RequestObservabilityMiddleware
+from setuhaul.infrastructure.telemetry import initialize_telemetry
 
 configure_logging(os.getenv("LOG_LEVEL", "INFO"))
 
 app = FastAPI(title="SetuHaul Backend", version="0.1.0")
 app.add_middleware(RequestObservabilityMiddleware)
+initialize_telemetry(app)
 frontend_origin = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
 app.add_middleware(
     CORSMiddleware,

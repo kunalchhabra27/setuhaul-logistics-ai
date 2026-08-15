@@ -1,0 +1,61 @@
+# Append this file to the CloudWatch Agent configuration. The agent process
+# resolves AWS credentials through its normal IAM provider chain.
+receivers:
+  otlp/setuhaul:
+    protocols:
+      http:
+        endpoint: 127.0.0.1:4318
+
+processors:
+  memory_limiter/setuhaul:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
+  batch/setuhaul: {}
+
+exporters:
+  otlphttp/metrics_setuhaul:
+    metrics_endpoint: https://monitoring.${env:AWS_REGION}.amazonaws.com/v1/metrics
+    auth:
+      authenticator: sigv4auth/metrics_setuhaul
+  otlphttp/logs_setuhaul:
+    logs_endpoint: https://logs.${env:AWS_REGION}.amazonaws.com/v1/logs
+    headers:
+      x-aws-log-group: ${env:SETUHAUL_OTEL_LOG_GROUP}
+      x-aws-log-stream: ${env:SETUHAUL_OTEL_LOG_STREAM}
+    auth:
+      authenticator: sigv4auth/logs_setuhaul
+  otlphttp/traces_setuhaul:
+    traces_endpoint: https://xray.${env:AWS_REGION}.amazonaws.com/v1/traces
+    auth:
+      authenticator: sigv4auth/traces_setuhaul
+
+extensions:
+  sigv4auth/metrics_setuhaul:
+    region: ${env:AWS_REGION}
+    service: monitoring
+  sigv4auth/logs_setuhaul:
+    region: ${env:AWS_REGION}
+    service: logs
+  sigv4auth/traces_setuhaul:
+    region: ${env:AWS_REGION}
+    service: xray
+
+service:
+  extensions:
+    - sigv4auth/metrics_setuhaul
+    - sigv4auth/logs_setuhaul
+    - sigv4auth/traces_setuhaul
+  pipelines:
+    metrics/setuhaul:
+      receivers: [otlp/setuhaul]
+      processors: [memory_limiter/setuhaul, batch/setuhaul]
+      exporters: [otlphttp/metrics_setuhaul]
+    logs/setuhaul:
+      receivers: [otlp/setuhaul]
+      processors: [memory_limiter/setuhaul, batch/setuhaul]
+      exporters: [otlphttp/logs_setuhaul]
+    traces/setuhaul:
+      receivers: [otlp/setuhaul]
+      processors: [memory_limiter/setuhaul, batch/setuhaul]
+      exporters: [otlphttp/traces_setuhaul]
