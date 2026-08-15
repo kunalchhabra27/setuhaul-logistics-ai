@@ -118,7 +118,6 @@ class Settings(BaseSettings):
     # vars, ~/.aws/credentials, or an assumed role), not from this Settings
     # model.
     agentcore_runtime_arn: str | None = Field(default=None, alias="AGENTCORE_RUNTIME_ARN")
-    aws_region: str | None = Field(default=None, alias="AWS_REGION")
     # Seconds to wait for one AgentCore invocation before giving up and
     # falling back to the regex parser. Gemini calls have taken 20-40s+
     # under free-tier quota pressure in testing -- keep this generous, but
@@ -166,7 +165,6 @@ def get_settings() -> Settings:
             "TWILIO_AUTH_TOKEN": os.getenv("TWILIO_AUTH_TOKEN"),
             "TWILIO_FROM_NUMBER": os.getenv("TWILIO_FROM_NUMBER"),
             "AGENTCORE_RUNTIME_ARN": os.getenv("AGENTCORE_RUNTIME_ARN"),
-            "AWS_REGION": os.getenv("AWS_REGION"),
             "AGENTCORE_INVOKE_TIMEOUT_SECONDS": os.getenv("AGENTCORE_INVOKE_TIMEOUT_SECONDS", "45"),
         }
         return Settings.model_validate(data)  # type: ignore[attr-defined]
@@ -194,6 +192,5 @@ def get_settings() -> Settings:
         TWILIO_AUTH_TOKEN=os.getenv("TWILIO_AUTH_TOKEN"),
         TWILIO_FROM_NUMBER=os.getenv("TWILIO_FROM_NUMBER"),
         AGENTCORE_RUNTIME_ARN=os.getenv("AGENTCORE_RUNTIME_ARN"),
-        AWS_REGION=os.getenv("AWS_REGION"),
         AGENTCORE_INVOKE_TIMEOUT_SECONDS=os.getenv("AGENTCORE_INVOKE_TIMEOUT_SECONDS", "45"),
     )
