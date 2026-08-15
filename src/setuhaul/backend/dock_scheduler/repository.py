@@ -277,13 +277,27 @@ class DockSchedulerRepository:
             )
         return result
 
-    def compatible_slots(self, shipment_id: str) -> list[dict[str, Any]]:
-        cached = self._compatible_slots_cache.get(shipment_id)
-        if cached is not None:
-            return cached
-        target = self._operational_state(shipment_id)
+    def operational_state(self, shipment_id: str) -> dict[str, Any]:
+        """Public accessor for _operational_state -- used by
+        DockSchedulerService's cached compatible-slots composition (see
+        that module's compatible_slots_cached/facility_availability_cached),
+        which needs the shipment's compatibility requirements (dock type/
+        refrigeration/weight) and destination facility separately from the
+        facility-wide availability dataset below."""
+        return self._operational_state(shipment_id)
 
-        docks = self._select("docks", facility_id=target["destination_facility_id"], dock_status="ACTIVE")
+    def facility_dock_availability(self, facility_id: str) -> list[dict[str, Any]]:
+        """Facility-wide slot availability (which docks, which slots, who
+        currently occupies/holds each one) -- independent of any single
+        shipment's compatibility requirements, which compatible_slots()
+        applies afterward via filter_compatible_slots(). Split out so this
+        shipment-agnostic dataset can be cached and reused once per facility
+        (see DockSchedulerService.facility_availability_cached) instead of
+        being refetched from scratch for every different shipment shown on
+        the same facility's board -- measured at ~9 sequential Supabase
+        round trips (~3.5s) per call before this split existed.
+        """
+        docks = self._select("docks", facility_id=facility_id, dock_status="ACTIVE")
         docks_by_id = {d["dock_id"]: d for d in docks}
         if not docks_by_id:
             return []
@@ -300,7 +314,7 @@ class DockSchedulerRepository:
         # request URL eventually failed outright -- this is what was
         # crashing the driver chatbot with 500s.
         #
-        # This intentionally does NOT anchor on the shipment's own
+        # This intentionally does NOT anchor on any shipment's own
         # effective_eta_ts (an earlier version of this fix tried that): real
         # shipment ETA fields are themselves often stale demo data (the same
         # staleness that made ensure_future_slots necessary in the first
@@ -315,11 +329,17 @@ class DockSchedulerRepository:
             "appointment_slots",
             "slot_start_ts",
             (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
-            facility_id=target["destination_facility_id"],
+            facility_id=facility_id,
             dock_id=list(docks_by_id.keys()),
         )
-        enriched = self._slot_rows_with_availability(slots, docks_by_id)
+        return self._slot_rows_with_availability(slots, docks_by_id)
 
+    @staticmethod
+    def filter_compatible_slots(target: dict[str, Any], enriched: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Apply one shipment's compatibility requirements (dock type/
+        refrigeration/weight) to a facility-wide availability dataset --
+        cheap, in-memory, no Supabase calls. Shared by compatible_slots()
+        below and DockSchedulerService.compatible_slots_cached()."""
         required_dock_type = target["required_dock_type"]
         temperature_control_required = target["temperature_control_required"]
         max_weight_ok_load = target["load_weight_kg"]
@@ -332,6 +352,15 @@ class DockSchedulerRepository:
             and (row["max_vehicle_weight_kg"] is None or row["max_vehicle_weight_kg"] >= max_weight_ok_load)
         ]
         compatible.sort(key=lambda row: (row["slot_start_ts"], row["dock_code"]))
+        return compatible
+
+    def compatible_slots(self, shipment_id: str) -> list[dict[str, Any]]:
+        cached = self._compatible_slots_cache.get(shipment_id)
+        if cached is not None:
+            return cached
+        target = self._operational_state(shipment_id)
+        enriched = self.facility_dock_availability(target["destination_facility_id"])
+        compatible = self.filter_compatible_slots(target, enriched)
         self._compatible_slots_cache[shipment_id] = compatible
         return compatible
 

@@ -39,21 +39,22 @@ export function completeDriverProfile(body: DriverProfileCompleteRequest) {
   });
 }
 
-export function getDriverSnapshot() {
-  return api.request<DriverSnapshot>(`${base}/snapshot`);
+export function getDriverSnapshot(conversationId?: string) {
+  const query = conversationId ? `?conversation_id=${encodeURIComponent(conversationId)}` : "";
+  return api.request<DriverSnapshot>(`${base}/snapshot${query}`);
 }
 
-export function sendDriverChatMessage(message: string) {
+export function sendDriverChatMessage(message: string, conversationId?: string, newConversation = false) {
   return api.request<DriverChatResponse>(`${base}/chat`, {
     method: "POST",
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ message, conversation_id: conversationId ?? null, new_conversation: newConversation }),
   });
 }
 
-export function sendDriverVoiceMessage(audioBase64: string, mimeType: string) {
+export function sendDriverVoiceMessage(audioBase64: string, mimeType: string, conversationId?: string, newConversation = false) {
   return api.request<DriverChatResponse>(`${base}/chat/voice`, {
     method: "POST",
-    body: JSON.stringify({ audio_base64: audioBase64, mime_type: mimeType }),
+    body: JSON.stringify({ audio_base64: audioBase64, mime_type: mimeType, conversation_id: conversationId ?? null, new_conversation: newConversation }),
   });
 }
 

@@ -143,8 +143,9 @@ def _parse_dt(value: str | datetime | None) -> datetime | None:
 
 
 class DriverChatService:
-    def __init__(self, repository: DriverChatRepository):
+    def __init__(self, repository: DriverChatRepository, cache_scope: cache.CacheScope | None = None):
         self.repository = repository
+        self.cache_scope = cache_scope or cache.PUBLIC_SCOPE
         # Dock booking (feasibility, hold, confirm) goes through the same
         # validated WMS scheduling engine WMS staff use -- built from the
         # same caller-scoped Supabase client, so RLS is unchanged. This
@@ -169,12 +170,13 @@ class DriverChatService:
             ]
             return [c.model_dump(mode="json") for c in carriers]
 
-        rows = cache.get_or_set(cache.reference_key("carriers"), cache.TTL_REFERENCE, _fetch)
+        rows = cache.get_or_set_scoped(self.cache_scope, "reference", "carriers", {}, cache.TTL_REFERENCE, _fetch)
         return [CarrierSummary.model_validate(row) for row in rows]
 
     def list_home_base_cities(self) -> list[str]:
-        return cache.get_or_set(
-            cache.reference_key("home-base-cities"), cache.TTL_REFERENCE, self.repository.list_home_base_cities
+        return cache.get_or_set_scoped(
+            self.cache_scope, "reference", "home-base-cities", {}, cache.TTL_REFERENCE,
+            self.repository.list_home_base_cities,
         )
 
     def complete_profile(self, principal: DriverPrincipal, request: ProfileCompleteRequest) -> DriverProfile:
@@ -201,38 +203,64 @@ class DriverChatService:
                 )
             return row
 
-        row = cache.get_or_set(cache.driver_profile_key(principal.user_id), cache.TTL_SNAPSHOT_PART, _fetch)
+        row = cache.get_or_set_scoped(
+            self.cache_scope, "driver-profile", principal.user_id, {}, cache.TTL_SNAPSHOT_PART, _fetch
+        )
         return DriverProfile.model_validate(row)
 
     # -- snapshot -----------------------------------------------------------
 
-    def snapshot(self, principal: DriverPrincipal) -> DriverSnapshot:
+    def snapshot(self, principal: DriverPrincipal, conversation_id: str | None = None) -> DriverSnapshot:
         driver = self.get_my_profile(principal)
-        return self._build_snapshot(principal, driver)
+        thread_id = self._authorized_open_thread_id(principal, conversation_id)
+        if thread_id is None and conversation_id is None:
+            open_thread = self.repository.get_open_thread_for_driver(principal.user_id)
+            thread_id = open_thread.get("thread_id") if open_thread else None
+        return self._build_snapshot(principal, driver, thread_id)
+
+    def _authorized_open_thread_id(self, principal: DriverPrincipal, conversation_id: str | None) -> str | None:
+        if not conversation_id:
+            return None
+        row = self.repository.get_thread_for_driver(conversation_id, principal.user_id)
+        if row and row.get("thread_status") not in {"RESOLVED", "CLOSED"}:
+            return conversation_id
+        return None
 
     def _get_vehicle_cached(self, vehicle_id: str) -> dict | None:
         """Vehicle attributes rarely change mid-shipment -- cache by
         vehicle_id (a shared reference entity, not per-driver) so every
         driver/poll referencing the same vehicle benefits, not just this one."""
-        return cache.get_or_set(
-            cache.vehicle_key(vehicle_id), cache.TTL_SNAPSHOT_PART, lambda: self.repository.get_vehicle(vehicle_id)
+        return cache.get_or_set_scoped(
+            self.cache_scope, "vehicle", vehicle_id, {}, cache.TTL_SNAPSHOT_PART,
+            lambda: self.repository.get_vehicle(vehicle_id),
         )
 
     def _get_facility_cached(self, facility_id: str) -> dict | None:
-        return cache.get_or_set(
-            cache.facility_key(facility_id), cache.TTL_SNAPSHOT_PART, lambda: self.repository.get_facility(facility_id)
+        return cache.get_or_set_scoped(
+            self.cache_scope, "facility", facility_id, {}, cache.TTL_SNAPSHOT_PART,
+            lambda: self.repository.get_facility(facility_id),
         )
 
     def _list_docks_cached(self, facility_id: str) -> list[dict]:
         """Dock hardware/type rarely changes -- dock *availability* (the
         fast-changing part) comes from compatible_slots()/dock_board
         separately, never from here, so this is safe to cache."""
-        return cache.get_or_set(
-            cache.docks_key(facility_id), cache.TTL_SNAPSHOT_PART, lambda: self.repository.list_docks(facility_id)
+        return cache.get_or_set_scoped(
+            self.cache_scope, "docks", facility_id, {}, cache.TTL_SNAPSHOT_PART,
+            lambda: self.repository.list_docks(facility_id),
         )
 
-    def _build_snapshot(self, principal: DriverPrincipal, driver: DriverProfile) -> DriverSnapshot:
-        shipment_row = self.repository.get_active_shipment_for_driver(principal.user_id)
+    def _build_snapshot(
+        self, principal: DriverPrincipal, driver: DriverProfile, conversation_id: str | None = None
+    ) -> DriverSnapshot:
+        shipment_row = cache.get_or_set_scoped(
+            self.cache_scope,
+            "driver-active-shipment",
+            principal.user_id,
+            {},
+            cache.TTL_HOT,
+            lambda: self.repository.get_active_shipment_for_driver(principal.user_id),
+        )
         shipment = ShipmentSummary.model_validate(shipment_row) if shipment_row else None
 
         vehicle_row = None
@@ -255,7 +283,7 @@ class DriverChatService:
             # here must degrade to "no appointment shown", not break the
             # whole snapshot/chat turn.
             try:
-                appt_row = self.dock_scheduler.repository.current_appointment(shipment_row["shipment_id"])
+                appt_row = self.dock_scheduler.current_appointment_cached(shipment_row["shipment_id"])
             except Exception:  # noqa: BLE001 - deliberate broad fallback, see slot_options above
                 import logging
 
@@ -272,10 +300,11 @@ class DriverChatService:
         exception = DriverExceptionSummary.model_validate(exception_row) if exception_row else None
 
         chat_messages: list[ChatMessageSummary] = []
-        if exception_row and exception_row.get("thread_id"):
+        message_thread_id = conversation_id or (exception_row or {}).get("thread_id")
+        if message_thread_id:
             chat_messages = [
                 ChatMessageSummary.model_validate(row)
-                for row in self.repository.list_chat_messages(exception_row["thread_id"])
+                for row in self.repository.list_chat_messages(message_thread_id)
             ]
 
         # Dock slot booking must be available as soon as a shipment is
@@ -329,11 +358,15 @@ class DriverChatService:
             exception=exception,
             slot_options=slot_options,
             chat_messages=chat_messages,
+            conversation_id=conversation_id,
         )
 
     # -- chat / exception intake --------------------------------------------
 
-    def handle_voice_chat_message(self, principal: DriverPrincipal, audio_base64: str, mime_type: str) -> ChatResponse:
+    def handle_voice_chat_message(
+        self, principal: DriverPrincipal, audio_base64: str, mime_type: str,
+        conversation_id: str | None = None, new_conversation: bool = False,
+    ) -> ChatResponse:
         """Transcribe a recorded voice note, then handle it exactly like a typed message.
 
         Voice messages require the LLM path -- there's no deterministic way
@@ -357,9 +390,12 @@ class DriverChatService:
             ) from exc
         if not transcript:
             raise BusinessValidationError("I couldn't hear anything in that recording. Please try again.")
-        return self.handle_chat_message(principal, transcript)
+        return self.handle_chat_message(principal, transcript, conversation_id, new_conversation)
 
-    def handle_chat_message(self, principal: DriverPrincipal, text: str) -> ChatResponse:
+    def handle_chat_message(
+        self, principal: DriverPrincipal, text: str,
+        conversation_id: str | None = None, new_conversation: bool = False,
+    ) -> ChatResponse:
         """Handle one free-text driver chat message.
 
         Dispatches to the Gemini tool-calling agent when GOOGLE_API_KEY is
@@ -373,7 +409,7 @@ class DriverChatService:
             from setuhaul.backend.driver_chat_eta.llm import agent as llm_agent
 
             if llm_agent.is_configured():
-                return llm_agent.run_chat_turn(self, principal, text)
+                return llm_agent.run_chat_turn(self, principal, text, conversation_id, new_conversation)
         except DriverChatError:
             raise
         except Exception:  # noqa: BLE001 - deliberate broad fallback boundary
@@ -382,9 +418,12 @@ class DriverChatService:
             logging.getLogger(__name__).exception(
                 "driver_chat_eta: LLM chat agent failed, falling back to regex parser."
             )
-        return self._handle_chat_message_regex(principal, text)
+        return self._handle_chat_message_regex(principal, text, conversation_id, new_conversation)
 
-    def _handle_chat_message_regex(self, principal: DriverPrincipal, text: str) -> ChatResponse:
+    def _handle_chat_message_regex(
+        self, principal: DriverPrincipal, text: str,
+        conversation_id: str | None = None, new_conversation: bool = False,
+    ) -> ChatResponse:
         driver = self.get_my_profile(principal)
         shipment_row = self.repository.get_active_shipment_for_driver(principal.user_id)
         if shipment_row is None:
@@ -397,7 +436,7 @@ class DriverChatService:
             # Supabase) so the frontend, which renders snapshot.chat_messages
             # verbatim, actually shows this exchange instead of it silently
             # vanishing.
-            snapshot = self._build_snapshot(principal, driver)
+            snapshot = self._build_snapshot(principal, driver, conversation_id)
             driver_msg = ChatMessageSummary(
                 chat_message_id=_new_id("MSG"),
                 thread_id=None,
@@ -418,7 +457,10 @@ class DriverChatService:
                 message_ts=_now_iso(),
             )
             snapshot.chat_messages = [driver_msg, reply]
-            return ChatResponse(agent_message=reply, suggested_options=[], exception=None, snapshot=snapshot)
+            return ChatResponse(
+                conversation_id=conversation_id, agent_message=reply,
+                suggested_options=[], exception=None, snapshot=snapshot,
+            )
 
         delay_minutes = self._parse_delay_minutes(text)
 
@@ -443,18 +485,42 @@ class DriverChatService:
         self.repository.update_shipment(shipment_row["shipment_id"], {"latest_eta_ts": declared_eta.isoformat()})
         cache.invalidate_shipment(shipment_row["shipment_id"])
 
-        thread_row = self.repository.get_open_thread_for_driver(principal.user_id)
+        thread_row = None if new_conversation else (
+            self.repository.get_thread_for_driver(conversation_id, principal.user_id)
+            if conversation_id else self.repository.get_open_thread_for_driver(principal.user_id)
+        )
+        if thread_row and thread_row.get("thread_status") in {"RESOLVED", "CLOSED"}:
+            thread_row = None
         if thread_row is None:
-            thread_row = self.repository.create_thread(
-                {
-                    "thread_id": _new_id("TH"),
-                    "driver_id": principal.user_id,
-                    "shipment_id": shipment_row["shipment_id"],
-                    "opened_at": _now_iso(),
-                    "thread_status": "OPEN",
-                    "thread_intent": "REPORT_DELAY",
-                }
+            # See llm/agent.py's identical guard for why -- two near-
+            # simultaneous first messages could otherwise both create a
+            # thread. Best-effort: proceeds without the lock if it can't be
+            # acquired rather than blocking the driver's message.
+            from setuhaul.backend.driver_chat_eta.llm.session_store import (
+                acquire_thread_creation_lock,
+                release_thread_creation_lock,
             )
+
+            lock_token = acquire_thread_creation_lock(principal.user_id)
+            try:
+                if lock_token is not None and not conversation_id:
+                    thread_row = self.repository.get_open_thread_for_driver(principal.user_id)
+                    if thread_row and thread_row.get("thread_status") in {"RESOLVED", "CLOSED"}:
+                        thread_row = None
+                if thread_row is None:
+                    thread_row = self.repository.create_thread(
+                        {
+                            "thread_id": _new_id("TH"),
+                            "driver_id": principal.user_id,
+                            "shipment_id": shipment_row["shipment_id"],
+                            "opened_at": _now_iso(),
+                            "thread_status": "OPEN",
+                            "thread_intent": "REPORT_DELAY",
+                        }
+                    )
+            finally:
+                if lock_token is not None:
+                    release_thread_creation_lock(principal.user_id, lock_token)
 
         exception_row = self.repository.get_active_exception_for_driver(principal.user_id)
         severity = "HIGH" if delay_minutes >= 60 else "MEDIUM" if delay_minutes else "LOW"
@@ -553,8 +619,9 @@ class DriverChatService:
             }
         )
 
-        snapshot = self._build_snapshot(principal, driver)
+        snapshot = self._build_snapshot(principal, driver, thread_row["thread_id"])
         return ChatResponse(
+            conversation_id=thread_row["thread_id"],
             agent_message=ChatMessageSummary.model_validate(agent_row),
             suggested_options=options,
             exception=DriverExceptionSummary.model_validate(exception_row),
@@ -614,7 +681,7 @@ class DriverChatService:
 
         try:
             self.dock_scheduler.repository.ensure_future_slots_for_shipment(shipment_id)
-            rows = self.dock_scheduler.repository.compatible_slots(shipment_id)
+            rows = self.dock_scheduler.compatible_slots_cached(shipment_id)
         except DockSchedulerError as exc:
             raise PersistenceError(str(exc)) from exc
 
@@ -633,8 +700,15 @@ class DriverChatService:
             bookable = availability == "AVAILABLE" or held_by_me
 
             is_compatible = bool(bookable and is_after_eta and within_leave_constraint)
-            if booked_by_me:
+            if booked_by_me and is_after_eta:
                 reason = "Your confirmed dock appointment"
+            elif booked_by_me:
+                # Ownership alone doesn't mean it's still usable -- a driver-
+                # declared delay can push the ETA past this slot's start.
+                # is_compatible is already correctly False in that case (see
+                # `bookable` above); this just makes the reason text honest
+                # about *why*, instead of implying it's still fine.
+                reason = "Your confirmed appointment no longer fits your updated ETA"
             elif availability == "OCCUPIED":
                 reason = "Already booked by another shipment"
             elif availability == "HELD" and not held_by_me:
@@ -660,6 +734,7 @@ class DriverChatService:
                     estimated_wait_minutes=max(0, int((start - after_dt).total_seconds() // 60)),
                     is_held=held_by_me,
                     is_booked_by_me=booked_by_me,
+                    fits_declared_eta=bool(is_after_eta and within_leave_constraint),
                 )
             )
 
@@ -975,7 +1050,7 @@ class DriverChatService:
         options = self._feasible_slots(shipment_row=shipment_row, after=after, max_leave_at=max_leave_at)
 
         already = next((opt for opt in options if opt.is_booked_by_me), None)
-        if already:
+        if already and already.fits_declared_eta:
             return {
                 "status": "already_booked",
                 "slot_id": already.slot_id,
@@ -984,6 +1059,15 @@ class DriverChatService:
                 "end_time": already.end_time.isoformat(),
                 "message": "This shipment already has a confirmed dock appointment -- no need to book another.",
             }
+        # `already` may still be set here, but is no longer compatible (e.g.
+        # a driver-declared delay pushed the ETA past its start) -- fall
+        # through to the normal best-slot/swap/escalate logic below instead
+        # of blindly telling the driver the stale appointment "still
+        # stands". `_commit_direct_booking` -> confirm_booking ->
+        # book_after_acceptance already cancels a shipment's previous
+        # confirmed appointment when booking a different slot for it (see
+        # dock_scheduler/repository.py's book_after_acceptance), so no
+        # separate cancel step is needed here.
 
         compatible = [opt for opt in options if opt.is_compatible]
         best_direct = compatible[0] if compatible else None
@@ -1030,7 +1114,7 @@ class DriverChatService:
                 }
 
             if request and best_direct is not None:
-                result = self._commit_direct_booking(shipment_id, best_direct, exception_row)
+                result = self._commit_direct_booking(shipment_id, best_direct, exception_row, replacing=already)
                 result["status"] = "booked_with_pending_upgrade"
                 result["swap_slot_id"] = best_swap.slot_id
                 result["swap_change_request_id"] = request["change_request_id"]
@@ -1049,7 +1133,7 @@ class DriverChatService:
                 "message": "No compatible dock slot was found for the declared ETA, so this was escalated to a human coordinator.",
             }
 
-        return self._commit_direct_booking(shipment_id, best_direct, exception_row)
+        return self._commit_direct_booking(shipment_id, best_direct, exception_row, replacing=already)
 
     def _best_priority_swap(
         self, *, shipment_id: str, after_dt: datetime, max_leave_dt: datetime | None
@@ -1084,12 +1168,21 @@ class DriverChatService:
         shipment_id: str,
         best: SlotOption,
         exception_row: dict | None,
+        replacing: SlotOption | None = None,
     ) -> dict:
         """Hold then confirm `best` for `shipment_id` -- the same
         create_hold -> book_after_acceptance sequence hold_slot()/
         confirm_slot() below use, done back-to-back with no driver click in
         between. Shared by auto_book_earliest_feasible_slot's plain and
         swap-fallback paths.
+
+        `replacing`, when set, is the driver's previous appointment that a
+        newly-declared delay made infeasible (see
+        auto_book_earliest_feasible_slot's already_booked gating) --
+        `confirm_booking` -> `book_after_acceptance` already cancels it
+        automatically when booking a different slot for the same shipment;
+        this parameter only changes the driver-facing message so it reads
+        as a replacement instead of an unexplained fresh booking.
         """
         previous_hold = self.repository.get_active_hold_for_shipment(shipment_id)
         if previous_hold and previous_hold.get("slot_id") != best.slot_id:
@@ -1127,16 +1220,26 @@ class DriverChatService:
                     }
                 )
 
+        if replacing is not None:
+            message = (
+                f"Your earlier appointment at {replacing.dock_code or replacing.dock_id} "
+                f"({replacing.start_time.strftime('%H:%M')}-{replacing.end_time.strftime('%H:%M')}) no longer fits "
+                f"your updated ETA, so I moved you to {best.dock_code or best.dock_id}, "
+                f"{best.start_time.strftime('%H:%M')}-{best.end_time.strftime('%H:%M')}."
+            )
+        else:
+            message = (
+                f"Booked dock slot {best.slot_id} at {best.dock_code or best.dock_id}, "
+                f"{best.start_time.strftime('%H:%M')}-{best.end_time.strftime('%H:%M')}."
+            )
+
         return {
             "status": "booked",
             "slot_id": best.slot_id,
             "dock_code": best.dock_code,
             "start_time": best.start_time.isoformat(),
             "end_time": best.end_time.isoformat(),
-            "message": (
-                f"Booked dock slot {best.slot_id} at {best.dock_code or best.dock_id}, "
-                f"{best.start_time.strftime('%H:%M')}-{best.end_time.strftime('%H:%M')}."
-            ),
+            "message": message,
         }
 
     def confirm_slot(self, principal: DriverPrincipal, slot_id: str) -> ConfirmSlotResponse:

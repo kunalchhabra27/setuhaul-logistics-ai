@@ -1,5 +1,7 @@
 import { supabase, type SupabaseSession, type SupabaseUser } from "./supabaseClient";
 
+const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "") ?? "") + "/api/v1";
+
 type AuthStateListener = (session: SupabaseSession | null) => void;
 
 // Every piece of session state here is keyed by serviceId (drivers/tms/wms/checkin)
@@ -64,6 +66,25 @@ export async function signInWithEmail(serviceId: string, email: string, password
 }
 
 export async function signOut(serviceId: string) {
+  // Revoke our own Redis-cached session first, while the access token is
+  // still available -- this is what makes logout take effect immediately
+  // for the fast (cache-hit) auth path server-side, rather than waiting up
+  // to SESSION_TTL_SECONDS for it to expire on its own. Best-effort: a
+  // failure here (network blip, backend down) must never block sign-out
+  // itself, since Supabase's own signOut() below is what's actually
+  // authoritative for the session.
+  const token = getAccessToken(serviceId);
+  if (token) {
+    try {
+      await fetch(`${apiBaseUrl}/auth/logout`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+    } catch {
+      // Ignored -- see comment above.
+    }
+  }
+
   const { error } = await supabase.auth.signOut(serviceId);
   if (error) throw error;
   emit(serviceId, null);

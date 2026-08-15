@@ -32,8 +32,9 @@ def _now_iso() -> str:
 class DockSchedulerService:
     """Public service for proposing, holding, and confirming dock appointments."""
 
-    def __init__(self, repository: DockSchedulerRepository):
+    def __init__(self, repository: DockSchedulerRepository, cache_scope: cache.CacheScope | None = None):
         self.repository = repository
+        self.cache_scope = cache_scope or cache.PUBLIC_SCOPE
         self.engine = DeterministicReschedulingEngine(repository)
 
     def suggest_slots(
@@ -51,17 +52,85 @@ class DockSchedulerService:
         this is not limited/ranked -- it's meant to show the whole day's
         capacity across every dock the shipment could use.
         """
-        cache_key = cache.dock_board_key(shipment_id)
-        rows = cache.get_or_set(
-            cache_key,
-            cache.TTL_HOT,
+        rows = cache.get_or_set_scoped(
+            self.cache_scope, "dock-board", shipment_id, {}, cache.TTL_HOT,
             lambda: [slot.model_dump(mode="json") for slot in self._build_dock_board(shipment_id)],
         )
         return [DockSlot.model_validate(row) for row in rows]
 
+    def facility_availability_cached(self, facility_id: str) -> list[dict]:
+        """Cached read-through wrapper around
+        ``repository.facility_dock_availability`` -- the shipment-agnostic
+        (which docks, which slots, who occupies/holds each one) dataset
+        shared by every shipment shown on the same facility's board.
+
+        Measured: ~9 sequential Supabase round trips (~3.5s) per call before
+        this cache existed -- and since a WMS board shows *every* shipment
+        at a facility, each with its own ``compatible_slots_cached()`` call
+        below, that cost was paid **once per shipment shown**, not once per
+        facility, even though the underlying data barely differs between
+        them (only the compatibility filter is shipment-specific). Caching
+        it here, keyed by facility_id, means only the *first* shipment
+        viewed at a facility within TTL_HOT pays this cost -- every other
+        shipment at the same facility gets a Redis hit instead.
+        """
+        return cache.get_or_set_scoped(
+            self.cache_scope, "facility-dock-availability", facility_id, {}, cache.TTL_HOT,
+            lambda: self.repository.facility_dock_availability(facility_id),
+        )
+
+    def compatible_slots_cached(self, shipment_id: str) -> list[dict]:
+        """Cached read-through equivalent of ``repository.compatible_slots``.
+
+        Composes two independently-cached layers: the shipment's own
+        operational state (uncached -- a handful of round trips, invalidated
+        via ``cache.invalidate_shipment`` on mutation) determines its
+        compatibility requirements, then ``facility_availability_cached``
+        above supplies the (heavily shared, facility-scoped) availability
+        dataset those requirements filter cheaply in-memory. The whole
+        composed result is itself cached per-shipment too, so a repeat view
+        of the *same* shipment within TTL_HOT needs no Supabase calls at
+        all, not even the operational-state lookup.
+
+        Its only prior "cache" was ``DockSchedulerRepository.
+        _compatible_slots_cache``, a plain per-instance dict -- useless
+        across requests since a fresh repository is constructed on every
+        HTTP call, so every caller of the raw method paid the full cost on
+        every single call. ``dock_board()`` above avoids this for its own
+        (differently-shaped, filtered/joined) output; this does the
+        equivalent for the raw slot rows, so any other read-only caller
+        (e.g. driver_chat_eta's feasibility check, polled every 8s) gets the
+        same cross-request speedup instead of silently bypassing Redis.
+        Mutation-path callers (hold_slot, rebook_slot, create_change_request)
+        must keep calling ``repository.compatible_slots`` directly -- they
+        need the true current state to avoid double-booking, and they're
+        user-action triggered, not part of the polling hot path.
+        """
+
+        def _fetch() -> list[dict]:
+            target = self.repository.operational_state(shipment_id)
+            availability = self.facility_availability_cached(target["destination_facility_id"])
+            return self.repository.filter_compatible_slots(target, availability)
+
+        return cache.get_or_set_scoped(self.cache_scope, "dock-board-slots", shipment_id, {}, cache.TTL_HOT, _fetch)
+
+    def current_appointment_cached(self, shipment_id: str) -> dict | None:
+        """Cached read-through wrapper around ``repository.current_appointment``.
+
+        Three sequential round trips (~580ms measured) for data that only
+        changes on a booking mutation -- and every such mutation already
+        calls ``_invalidate_booking_caches`` -> ``cache.invalidate_shipment``,
+        which busts this key too (see that function). Safe to cache with no
+        new invalidation call sites needed.
+        """
+        return cache.get_or_set_scoped(
+            self.cache_scope, "current-appointment", shipment_id, {}, cache.TTL_HOT,
+            lambda: self.repository.current_appointment(shipment_id),
+        )
+
     def _build_dock_board(self, shipment_id: str) -> list[DockSlot]:
         self.repository.ensure_future_slots_for_shipment(shipment_id)
-        slots = self.repository.compatible_slots(shipment_id)
+        slots = self.compatible_slots_cached(shipment_id)
 
         # compatible_slots() has no notion of the facility's own operating
         # hours -- suggest_slots() already filtered by them via
@@ -143,6 +212,15 @@ class DockSchedulerService:
         tms/checkin_portal/driver_chat_eta)."""
         cache.invalidate_dock_boards()
         cache.invalidate_shipment(shipment_id)
+        # Correctly facility-scoped (unlike invalidate_dock_boards' own
+        # "global" sweep, which no per-facility key actually checks -- see
+        # that function's docstring) -- this is what makes the shared
+        # facility-availability cache other shipments at the same facility
+        # rely on (see DockSchedulerService.facility_availability_cached)
+        # actually bust promptly instead of only via its own TTL_HOT expiry.
+        facility_id = self.repository.facility_id_for_shipment(shipment_id)
+        if facility_id:
+            cache.invalidate_facility_board(facility_id)
 
     def rebook_slot(self, shipment_id: str, new_slot_id: str) -> str:
         """Directly move a shipment's appointment to a different slot.
@@ -219,8 +297,10 @@ class DockSchedulerService:
         return row
 
     def list_change_requests(self, status: str | None = None) -> list[dict]:
-        cache_key = cache.change_requests_key(status)
-        return cache.get_or_set(cache_key, cache.TTL_HOT, lambda: self.repository.list_change_requests(status))
+        return cache.get_or_set_scoped(
+            self.cache_scope, "change-requests", "global", {"status": status}, cache.TTL_HOT,
+            lambda: self.repository.list_change_requests(status),
+        )
 
     def decide_change_request(self, change_request_id: str, approve: bool, decided_by_user_id: str, note: str | None) -> dict:
         request = self.repository.get_change_request(change_request_id)

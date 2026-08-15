@@ -69,8 +69,8 @@ def test_valid_secret_with_shipments_update_invalidates_the_shipment(
 
     assert response.status_code == 200
     assert response.json() == {"status": "invalidated", "table": "shipments"}
-    assert cache.get_json(cache.shipment_key(shipment_id)) is None
-    assert cache.get_json(cache.shipment_context_key(shipment_id)) is None
+    assert fake_redis.get(cache._generation_key("shipment", shipment_id)) == "1"
+    assert fake_redis.get(cache._generation_key("shipment-context", shipment_id)) == "1"
 
 
 def test_delete_uses_old_record_since_record_is_null(configured_secret: None, fake_redis: FakeRedis) -> None:
@@ -82,7 +82,7 @@ def test_delete_uses_old_record_since_record_is_null(configured_secret: None, fa
     )
 
     assert response.status_code == 200
-    assert cache.get_json(cache.shipment_key(shipment_id)) is None
+    assert fake_redis.get(cache._generation_key("shipment", shipment_id)) == "1"
 
 
 def test_dock_state_tables_sweep_the_whole_dock_board(configured_secret: None, fake_redis: FakeRedis) -> None:
@@ -92,8 +92,7 @@ def test_dock_state_tables_sweep_the_whole_dock_board(configured_secret: None, f
     response = _post({"type": "UPDATE", "table": "appointment_slots", "record": {"slot_id": "SLOT1"}})
 
     assert response.status_code == 200
-    assert cache.get_json(cache.dock_board_key("SHP1")) is None
-    assert cache.get_json(cache.dock_board_key("SHP2")) is None
+    assert fake_redis.get(cache._generation_key("dock-board", "global")) == "1"
 
 
 def test_unrecognized_table_is_ignored_not_errored(configured_secret: None, fake_redis: FakeRedis) -> None:
@@ -112,17 +111,17 @@ def test_drivers_vehicles_facilities_docks_carriers_invalidate_their_own_entity(
     cache.set_json(cache.reference_key("carriers"), [{"a": 1}], 300)
 
     assert _post({"type": "UPDATE", "table": "drivers", "record": {"driver_id": "DRV1"}}).status_code == 200
-    assert cache.get_json(cache.driver_profile_key("DRV1")) is None
+    assert fake_redis.get(cache._generation_key("driver-profile", "DRV1")) == "1"
 
     assert _post({"type": "UPDATE", "table": "vehicles", "record": {"vehicle_id": "VEH1"}}).status_code == 200
-    assert cache.get_json(cache.vehicle_key("VEH1")) is None
+    assert fake_redis.get(cache._generation_key("vehicle", "VEH1")) == "1"
 
     assert _post({"type": "UPDATE", "table": "facilities", "record": {"facility_id": "FAC1"}}).status_code == 200
-    assert cache.get_json(cache.facility_key("FAC1")) is None
+    assert fake_redis.get(cache._generation_key("facility", "FAC1")) == "1"
 
     cache.set_json(cache.docks_key("FAC1"), [{"a": 1}], 30)
     assert _post({"type": "UPDATE", "table": "docks", "record": {"facility_id": "FAC1"}}).status_code == 200
-    assert cache.get_json(cache.docks_key("FAC1")) is None
+    assert fake_redis.get(cache._generation_key("facility", "FAC1")) == "2"
 
     assert _post({"type": "UPDATE", "table": "carriers", "record": {"carrier_id": "CAR1"}}).status_code == 200
-    assert cache.get_json(cache.reference_key("carriers")) is None
+    assert fake_redis.get(cache._generation_key("reference", "carriers")) == "1"

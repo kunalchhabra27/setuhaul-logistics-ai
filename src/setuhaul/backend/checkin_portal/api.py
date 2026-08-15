@@ -15,6 +15,7 @@ from setuhaul.backend.checkin_portal.models import (
 from setuhaul.backend.checkin_portal.repository import CheckInRepository
 from setuhaul.backend.checkin_portal.service import CheckInService
 from setuhaul.infrastructure.auth import Principal, require_admin, require_reader
+from setuhaul.infrastructure import cache
 from setuhaul.infrastructure.settings import get_settings
 from setuhaul.infrastructure.supabase_client import create_caller_client
 
@@ -24,7 +25,9 @@ router = APIRouter(prefix="/checkins", tags=["checkin-portal"])
 def get_service(principal: Principal = Depends(require_reader)) -> CheckInService:
     """Create a caller-scoped service whose repository is protected by RLS."""
     client = create_caller_client(get_settings(), principal.access_token)
-    return CheckInService(CheckInRepository(client))
+    return CheckInService(
+        CheckInRepository(client), cache_scope=cache.CacheScope.user(principal.user_id)
+    )
 
 
 def _handle_transition_error(exc: InvalidCheckInTransition) -> HTTPException:

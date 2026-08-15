@@ -87,6 +87,15 @@ class Settings(BaseSettings):
     # cache-invalidation calls from anyone who finds the URL.
     webhook_secret: str | None = Field(default=None, alias="WEBHOOK_SECRET")
 
+    # Redis-backed auth-session cache (infrastructure/auth_session.py) --
+    # separate namespace/lifecycle from both the app-data cache (cache.py)
+    # and the LLM chat scratchpad (driver_chat_eta/llm/session_store.py).
+    # Bounds how stale a cached role/account-status can be after a role
+    # change or forced sign-out; short on purpose (see that module's
+    # docstring). Refresh threshold avoids a Redis write on every request.
+    session_ttl_seconds: int = Field(default=300, alias="SESSION_TTL_SECONDS")
+    session_refresh_threshold_seconds: int = Field(default=60, alias="SESSION_REFRESH_THRESHOLD_SECONDS")
+
     # Twilio SMS notifications (check-in confirmation, driver assignment).
     # All three are optional -- when unset, setuhaul.infrastructure.sms simply
     # skips sending and logs instead of failing the request. Never hardcode
@@ -127,6 +136,8 @@ def get_settings() -> Settings:
             "CACHE_AUTH_TOKEN": os.getenv("CACHE_AUTH_TOKEN"),
             "CACHE_CLUSTER_MODE": os.getenv("CACHE_CLUSTER_MODE", "false"),
             "WEBHOOK_SECRET": os.getenv("WEBHOOK_SECRET"),
+            "SESSION_TTL_SECONDS": os.getenv("SESSION_TTL_SECONDS", "300"),
+            "SESSION_REFRESH_THRESHOLD_SECONDS": os.getenv("SESSION_REFRESH_THRESHOLD_SECONDS", "60"),
             "TWILIO_ACCOUNT_SID": os.getenv("TWILIO_ACCOUNT_SID"),
             "TWILIO_AUTH_TOKEN": os.getenv("TWILIO_AUTH_TOKEN"),
             "TWILIO_FROM_NUMBER": os.getenv("TWILIO_FROM_NUMBER"),
@@ -148,6 +159,8 @@ def get_settings() -> Settings:
         CACHE_AUTH_TOKEN=os.getenv("CACHE_AUTH_TOKEN"),
         CACHE_CLUSTER_MODE=os.getenv("CACHE_CLUSTER_MODE", "false"),
         WEBHOOK_SECRET=os.getenv("WEBHOOK_SECRET"),
+        SESSION_TTL_SECONDS=os.getenv("SESSION_TTL_SECONDS", "300"),
+        SESSION_REFRESH_THRESHOLD_SECONDS=os.getenv("SESSION_REFRESH_THRESHOLD_SECONDS", "60"),
         TWILIO_ACCOUNT_SID=os.getenv("TWILIO_ACCOUNT_SID"),
         TWILIO_AUTH_TOKEN=os.getenv("TWILIO_AUTH_TOKEN"),
         TWILIO_FROM_NUMBER=os.getenv("TWILIO_FROM_NUMBER"),

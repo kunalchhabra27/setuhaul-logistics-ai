@@ -47,6 +47,8 @@ export default function DriversPortal({ color }: { color: string }) {
   const [chatExpanded, setChatExpanded] = useState(false);
   const [hasUnread, setHasUnread] = useState(false);
   const lastSeenMessageId = useRef<string | null>(null);
+  const conversationIdRef = useRef<string | undefined>(undefined);
+  const newConversationRef = useRef(false);
 
   const showToast = (text: string, tone: "success" | "error" | "info" = "info") => {
     setToast({ text, tone });
@@ -79,7 +81,14 @@ export default function DriversPortal({ color }: { color: string }) {
     snapshotInFlight.current = true;
     try {
       await snapshotResource.run(async () => {
-        const data = await getDriverSnapshot();
+        const data = await getDriverSnapshot(conversationIdRef.current);
+        if (newConversationRef.current) {
+          return { ...data, conversation_id: null, chat_messages: [] };
+        }
+        if (data.conversation_id && !newConversationRef.current) {
+          conversationIdRef.current = data.conversation_id;
+          sessionStorage.setItem(`setuhaul.driver.chat.${data.driver.driver_id}`, data.conversation_id);
+        }
         setDriver(data.driver);
         // With no shipment assigned, chat replies are ephemeral (no
         // chat_threads row exists to persist to or reload from -- see
@@ -99,6 +108,12 @@ export default function DriversPortal({ color }: { color: string }) {
       snapshotInFlight.current = false;
     }
   }, [snapshotResource.run]);
+
+  useEffect(() => {
+    if (!driver) return;
+    const saved = sessionStorage.getItem(`setuhaul.driver.chat.${driver.driver_id}`);
+    conversationIdRef.current = saved || undefined;
+  }, [driver?.driver_id]);
 
   // The single entry point for "resolve who this driver is and what they're
   // hauling" -- used on mount and by the profile-fetch error's Retry button.
@@ -164,7 +179,12 @@ export default function DriversPortal({ color }: { color: string }) {
   const handleSendMessage = async (text: string) => {
     setIsSending(true);
     try {
-      const res = await sendDriverChatMessage(text);
+      const res = await sendDriverChatMessage(text, conversationIdRef.current, newConversationRef.current);
+      if (res.conversation_id) {
+        conversationIdRef.current = res.conversation_id;
+        if (driver) sessionStorage.setItem(`setuhaul.driver.chat.${driver.driver_id}`, res.conversation_id);
+      }
+      newConversationRef.current = false;
       await snapshotResource.run(async () => res.snapshot);
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Error communicating with the dispatch agent", "error");
@@ -176,13 +196,30 @@ export default function DriversPortal({ color }: { color: string }) {
   const handleSendVoiceMessage = async (audioBase64: string, mimeType: string) => {
     setIsSending(true);
     try {
-      const res = await sendDriverVoiceMessage(audioBase64, mimeType);
+      const res = await sendDriverVoiceMessage(audioBase64, mimeType, conversationIdRef.current, newConversationRef.current);
+      if (res.conversation_id) {
+        conversationIdRef.current = res.conversation_id;
+        if (driver) sessionStorage.setItem(`setuhaul.driver.chat.${driver.driver_id}`, res.conversation_id);
+      }
+      newConversationRef.current = false;
       await snapshotResource.run(async () => res.snapshot);
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Could not process that voice message", "error");
     } finally {
       setIsSending(false);
     }
+  };
+
+  const handleNewChat = () => {
+    conversationIdRef.current = undefined;
+    newConversationRef.current = true;
+    if (driver) sessionStorage.removeItem(`setuhaul.driver.chat.${driver.driver_id}`);
+    const current = snapshotResource.data;
+    if (current) {
+      void snapshotResource.run(async () => ({ ...current, conversation_id: null, chat_messages: [] }));
+    }
+    lastSeenMessageId.current = null;
+    setHasUnread(false);
   };
 
   const handleHoldSlot = async (slotId: string) => {
@@ -441,6 +478,7 @@ export default function DriversPortal({ color }: { color: string }) {
                 onClose={() => setChatOpen(false)}
                 isExpanded={chatExpanded}
                 onToggleExpand={() => setChatExpanded((v) => !v)}
+                onNewChat={handleNewChat}
               />
             </motion.div>
           )}

@@ -159,9 +159,11 @@ export interface DriverSnapshot {
   exception?: DriverExceptionSummary | null;
   slot_options: DriverSlotOption[];
   chat_messages: DriverChatMessageSummary[];
+  conversation_id?: string | null;
 }
 
 export interface DriverChatResponse {
+  conversation_id?: string | null;
   agent_message: DriverChatMessageSummary;
   suggested_options: DriverSlotOption[];
   exception?: DriverExceptionSummary | null;

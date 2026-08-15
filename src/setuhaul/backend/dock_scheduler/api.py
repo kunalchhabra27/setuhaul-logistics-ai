@@ -31,6 +31,7 @@ from setuhaul.backend.dock_scheduler.models import (
 from setuhaul.backend.dock_scheduler.repository import DockSchedulerRepository, parse_ts
 from setuhaul.backend.dock_scheduler.service import DockSchedulerService
 from setuhaul.infrastructure.auth import Principal, require_admin, require_reader
+from setuhaul.infrastructure import cache
 from setuhaul.infrastructure.settings import get_settings
 from setuhaul.infrastructure.supabase_client import create_caller_client
 
@@ -40,7 +41,9 @@ router = APIRouter(prefix="/dock-scheduler", tags=["dock-scheduler"])
 def get_service(principal: Principal = Depends(require_reader)) -> DockSchedulerService:
     """Create a caller-scoped service whose repository is protected by RLS."""
     client = create_caller_client(get_settings(), principal.access_token)
-    return DockSchedulerService(DockSchedulerRepository(client))
+    return DockSchedulerService(
+        DockSchedulerRepository(client), cache_scope=cache.CacheScope.user(principal.user_id)
+    )
 
 
 def _handle_error(exc: DockSchedulerError) -> HTTPException:

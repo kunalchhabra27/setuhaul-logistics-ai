@@ -47,28 +47,40 @@ logger = logging.getLogger(__name__)
 class TMSService:
     """Coordinate TMS persistence while preserving domain boundaries."""
 
-    def __init__(self, repository: TMSRepository):
+    def __init__(self, repository: TMSRepository, cache_scope: cache.CacheScope | None = None):
         self.repository = repository
+        self.cache_scope = cache_scope or cache.PUBLIC_SCOPE
 
     # -- drivers --------------------------------------------------------
 
     def get_driver(self, driver_id: str) -> DriverResponse:
-        row = self.repository.get_driver(driver_id)
+        row = cache.get_or_set_scoped(
+            self.cache_scope, "driver-read", "global", {"driver_id": driver_id}, cache.TTL_REFERENCE,
+            lambda: self.repository.get_driver(driver_id),
+        )
         if row is None:
             raise DriverNotFoundError(f"Driver {driver_id} was not found.")
         return DriverResponse.model_validate(row)
 
     def get_driver_by_phone(self, phone: str) -> DriverResponse:
-        row = self.repository.get_driver_by_phone(phone)
+        row = cache.get_or_set_scoped(
+            self.cache_scope, "driver-read", "global", {"phone": phone}, cache.TTL_REFERENCE,
+            lambda: self.repository.get_driver_by_phone(phone),
+        )
         if row is None:
             raise DriverNotFoundError(f"No driver was found for phone {phone}.")
         return DriverResponse.model_validate(row)
 
     def list_drivers(self, *, limit: int = 200, offset: int = 0) -> list[DriverResponse]:
-        return [DriverResponse.model_validate(row) for row in self.repository.list_drivers(limit=limit, offset=offset)]
+        rows = cache.get_or_set_scoped(
+            self.cache_scope, "driver-list", "global", {"limit": limit, "offset": offset}, cache.TTL_REFERENCE,
+            lambda: self.repository.list_drivers(limit=limit, offset=offset),
+        )
+        return [DriverResponse.model_validate(row) for row in rows]
 
     def create_driver(self, request: DriverCreate) -> DriverResponse:
         row = self.repository.create_driver(request.model_dump(mode="json"))
+        cache.invalidate_driver(row["driver_id"])
         return DriverResponse.model_validate(row)
 
     def update_driver(self, driver_id: str, request: DriverUpdate) -> DriverResponse:
@@ -82,16 +94,24 @@ class TMSService:
     # -- vehicles ---------------------------------------------------------
 
     def get_vehicle(self, vehicle_id: str) -> VehicleResponse:
-        row = self.repository.get_vehicle(vehicle_id)
+        row = cache.get_or_set_scoped(
+            self.cache_scope, "vehicle-read", "global", {"vehicle_id": vehicle_id}, cache.TTL_REFERENCE,
+            lambda: self.repository.get_vehicle(vehicle_id),
+        )
         if row is None:
             raise VehicleNotFoundError(f"Vehicle {vehicle_id} was not found.")
         return VehicleResponse.model_validate(row)
 
     def list_vehicles(self, *, limit: int = 200, offset: int = 0) -> list[VehicleResponse]:
-        return [VehicleResponse.model_validate(row) for row in self.repository.list_vehicles(limit=limit, offset=offset)]
+        rows = cache.get_or_set_scoped(
+            self.cache_scope, "vehicle-list", "global", {"limit": limit, "offset": offset}, cache.TTL_REFERENCE,
+            lambda: self.repository.list_vehicles(limit=limit, offset=offset),
+        )
+        return [VehicleResponse.model_validate(row) for row in rows]
 
     def create_vehicle(self, request: VehicleCreate) -> VehicleResponse:
         row = self.repository.create_vehicle(request.model_dump(mode="json"))
+        cache.invalidate_vehicle(row["vehicle_id"])
         return VehicleResponse.model_validate(row)
 
     def update_vehicle(self, vehicle_id: str, request: VehicleUpdate) -> VehicleResponse:
@@ -104,7 +124,10 @@ class TMSService:
     # -- shipments ----------------------------------------------------------
 
     def get_shipment(self, shipment_id: str) -> ShipmentResponse:
-        row = self.repository.get_shipment(shipment_id)
+        row = cache.get_or_set_scoped(
+            self.cache_scope, "shipment", shipment_id, {}, cache.TTL_MODERATE,
+            lambda: self.repository.get_shipment(shipment_id),
+        )
         if row is None:
             raise ShipmentNotFoundError(f"Shipment {shipment_id} was not found.")
         return ShipmentResponse.model_validate(row)
@@ -121,22 +144,18 @@ class TMSService:
         limit: int = 100,
         offset: int = 0,
     ) -> list[ShipmentResponse]:
-        fingerprint = "|".join(
-            str(part)
-            for part in (
-                driver_id,
-                status.value if status else None,
-                active_only,
-                unassigned_only,
-                include_archived,
-                limit,
-                offset,
-            )
-        )
-        cache_key = cache.shipments_list_key(destination_facility_id or "all", fingerprint)
-        rows = cache.get_or_set(
-            cache_key,
-            cache.TTL_MODERATE,
+        query = {
+            "driver_id": driver_id,
+            "destination_facility_id": destination_facility_id,
+            "status": status.value if status else None,
+            "active_only": active_only,
+            "unassigned_only": unassigned_only,
+            "include_archived": include_archived,
+            "limit": limit,
+            "offset": offset,
+        }
+        rows = cache.get_or_set_scoped(
+            self.cache_scope, "shipments-list", "global", query, cache.TTL_MODERATE,
             lambda: self.repository.list_shipments(
                 driver_id=driver_id,
                 destination_facility_id=destination_facility_id,
@@ -296,15 +315,17 @@ class TMSService:
     # -- facilities -----------------------------------------------------
 
     def list_facilities(self, *, limit: int = 200, offset: int = 0) -> list[FacilityResponse]:
-        cache_key = cache.reference_key(f"facilities:{limit}:{offset}")
-        rows = cache.get_or_set(
-            cache_key, cache.TTL_REFERENCE, lambda: self.repository.list_facilities(limit=limit, offset=offset)
+        rows = cache.get_or_set_scoped(
+            self.cache_scope, "facility-list", "global", {"limit": limit, "offset": offset}, cache.TTL_REFERENCE,
+            lambda: self.repository.list_facilities(limit=limit, offset=offset),
         )
         return [FacilityResponse.model_validate(row) for row in rows]
 
     def shipment_reference_data(self) -> ShipmentReferenceData:
-        cache_key = cache.reference_key("shipment-options")
-        data = cache.get_or_set(cache_key, cache.TTL_REFERENCE, self.repository.list_shipment_reference_data)
+        data = cache.get_or_set_scoped(
+            self.cache_scope, "reference", "shipment-options", {}, cache.TTL_REFERENCE,
+            self.repository.list_shipment_reference_data,
+        )
         return ShipmentReferenceData.model_validate(data)
 
     # -- staff facility assignments (WMS/Check-in facility scoping) -----
@@ -440,7 +461,9 @@ class TMSService:
         # Not found / not-yet-assigned raises out of _fetch before get_or_set
         # ever writes to the cache, so a missing shipment is never cached as
         # if it were a valid (empty) result.
-        cached = cache.get_or_set(cache.shipment_context_key(shipment_id), cache.TTL_MODERATE, _fetch)
+        cached = cache.get_or_set_scoped(
+            self.cache_scope, "shipment-context", shipment_id, {}, cache.TTL_MODERATE, _fetch
+        )
         return ShipmentContextResponse.model_validate(cached)
 
     @staticmethod

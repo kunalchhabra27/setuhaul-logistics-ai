@@ -37,6 +37,7 @@ from setuhaul.backend.tms.models import (
 from setuhaul.backend.tms.repository import TMSRepository
 from setuhaul.backend.tms.service import TMSService
 from setuhaul.infrastructure.auth import Principal, require_admin, require_reader
+from setuhaul.infrastructure import cache
 from setuhaul.infrastructure.settings import get_settings
 from setuhaul.infrastructure.supabase_client import create_caller_client
 
@@ -58,7 +59,7 @@ def get_service(
 ) -> TMSService:
     """Create a caller-scoped service whose repository is protected by RLS."""
     client = create_caller_client(get_settings(), principal.access_token)
-    return TMSService(TMSRepository(client))
+    return TMSService(TMSRepository(client), cache_scope=cache.CacheScope.role(principal.role.value))
 
 
 @router.get("/drivers", response_model=list[DriverResponse])

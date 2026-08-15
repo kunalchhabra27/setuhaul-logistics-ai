@@ -39,7 +39,12 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from setuhaul.backend.driver_chat_eta.llm.prompts import build_system_prompt
-from setuhaul.backend.driver_chat_eta.llm.session_store import load_history, save_history
+from setuhaul.backend.driver_chat_eta.llm.session_store import (
+    acquire_thread_creation_lock,
+    load_history,
+    release_thread_creation_lock,
+    save_history,
+)
 from setuhaul.backend.driver_chat_eta.llm.tools import build_tools
 from setuhaul.backend.driver_chat_eta.models import ChatMessageSummary, ChatResponse
 from setuhaul.backend.driver_chat_eta.service import _new_id, _now_iso
@@ -114,26 +119,57 @@ def transcribe_audio(audio_base64: str, mime_type: str) -> str:
     return _extract_text(response.content).strip()
 
 
-def run_chat_turn(service: "DriverChatService", principal: "DriverPrincipal", text: str) -> ChatResponse:
+def run_chat_turn(
+    service: "DriverChatService", principal: "DriverPrincipal", text: str,
+    conversation_id: str | None = None, new_conversation: bool = False,
+) -> ChatResponse:
     """Handle one driver chat message with the Gemini tool-calling agent."""
     driver = service.get_my_profile(principal)  # raises DriverProfileNotFoundError if missing
-    snapshot = service.snapshot(principal)
+    snapshot = service.snapshot(principal, conversation_id=None if new_conversation else conversation_id)
+    if new_conversation:
+        # snapshot() normally restores the driver's current open thread for a
+        # page reload. A deliberate New Chat must not seed the new LLM turn
+        # with that prior thread's visible context.
+        snapshot.chat_messages = []
+        snapshot.conversation_id = None
 
     if snapshot.shipment is None:
-        return _no_shipment_reply(driver, snapshot, text)
+        return _no_shipment_reply(driver, snapshot, text, conversation_id)
 
-    thread_row = service.repository.get_open_thread_for_driver(principal.user_id)
+    thread_row = None if new_conversation else (
+        service.repository.get_thread_for_driver(conversation_id, principal.user_id)
+        if conversation_id else service.repository.get_open_thread_for_driver(principal.user_id)
+    )
+    if thread_row and thread_row.get("thread_status") in {"RESOLVED", "CLOSED"}:
+        thread_row = None
     if thread_row is None:
-        thread_row = service.repository.create_thread(
-            {
-                "thread_id": _new_id("TH"),
-                "driver_id": principal.user_id,
-                "shipment_id": snapshot.shipment.shipment_id,
-                "opened_at": _now_iso(),
-                "thread_status": "OPEN",
-                "thread_intent": "GENERAL_QUESTION",
-            }
-        )
+        # Guard against two near-simultaneous first messages both seeing
+        # "no open thread" and both creating one -- see session_store's
+        # acquire_thread_creation_lock docstring. Best-effort: if the lock
+        # can't be acquired (Redis down, or another request holds it right
+        # now), fall through and create anyway rather than blocking the
+        # driver's message -- a rare resulting duplicate self-heals on the
+        # next turn via get_open_thread_for_driver's own ordering.
+        lock_token = acquire_thread_creation_lock(principal.user_id)
+        try:
+            if lock_token is not None and not conversation_id:
+                thread_row = service.repository.get_open_thread_for_driver(principal.user_id)
+                if thread_row and thread_row.get("thread_status") in {"RESOLVED", "CLOSED"}:
+                    thread_row = None
+            if thread_row is None:
+                thread_row = service.repository.create_thread(
+                    {
+                        "thread_id": _new_id("TH"),
+                        "driver_id": principal.user_id,
+                        "shipment_id": snapshot.shipment.shipment_id,
+                        "opened_at": _now_iso(),
+                        "thread_status": "OPEN",
+                        "thread_intent": "GENERAL_QUESTION",
+                    }
+                )
+        finally:
+            if lock_token is not None:
+                release_thread_creation_lock(principal.user_id, lock_token)
     thread_id = thread_row["thread_id"]
 
     # Hydrate working memory before writing today's message, so it isn't duplicated.
@@ -222,13 +258,15 @@ def run_chat_turn(service: "DriverChatService", principal: "DriverPrincipal", te
     # and re-fetching it was the literal cost behind "the chatbot keeps
     # checking dock status on every message" even for plain small talk.
     if called_tool_names & STATE_CHANGING_TOOLS:
-        fresh_snapshot = service._build_snapshot(principal, driver)
+        fresh_snapshot = service._build_snapshot(principal, driver, thread_id)
     else:
+        snapshot.conversation_id = thread_id
         fresh_snapshot = snapshot
     exception_row = service.repository.get_active_exception_for_driver(principal.user_id)
     from setuhaul.backend.driver_chat_eta.models import DriverExceptionSummary
 
     return ChatResponse(
+        conversation_id=thread_id,
         agent_message=ChatMessageSummary.model_validate(agent_row),
         suggested_options=fresh_snapshot.slot_options,
         exception=DriverExceptionSummary.model_validate(exception_row) if exception_row else None,
@@ -236,7 +274,7 @@ def run_chat_turn(service: "DriverChatService", principal: "DriverPrincipal", te
     )
 
 
-def _no_shipment_reply(driver, snapshot, driver_text: str) -> ChatResponse:
+def _no_shipment_reply(driver, snapshot, driver_text: str, conversation_id: str | None = None) -> ChatResponse:
     """No active shipment yet -- answer without a thread, without calling the LLM.
 
     There is nothing for a tool-calling agent to usefully do (every action
@@ -270,7 +308,11 @@ def _no_shipment_reply(driver, snapshot, driver_text: str) -> ChatResponse:
         message_ts=_now_iso(),
     )
     snapshot.chat_messages = [driver_msg, ephemeral]
-    return ChatResponse(agent_message=ephemeral, suggested_options=[], exception=None, snapshot=snapshot)
+    snapshot.conversation_id = conversation_id
+    return ChatResponse(
+        conversation_id=conversation_id,
+        agent_message=ephemeral, suggested_options=[], exception=None, snapshot=snapshot,
+    )
 
 
 def _hydrate_from_persisted(service: "DriverChatService", thread_id: str) -> list:

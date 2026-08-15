@@ -35,6 +35,33 @@ def test_handle_chat_message_propagates_driver_chat_errors_from_the_llm_path(ser
         service.handle_chat_message(principal, "hi")
 
 
+def test_chat_reuses_explicit_conversation_thread_across_turns(service, principal, tables, monkeypatch):
+    from setuhaul.backend.driver_chat_eta.llm import agent as llm_agent
+
+    monkeypatch.setattr(llm_agent, "is_configured", lambda: False)
+
+    first = service.handle_chat_message(principal, "I am 30 minutes late")
+    second = service.handle_chat_message(principal, "Please keep this conversation going", first.conversation_id)
+
+    assert first.conversation_id
+    assert second.conversation_id == first.conversation_id
+    assert len(tables["chat_threads"]) == 1
+    assert {row["thread_id"] for row in tables["chat_messages"]} == {first.conversation_id}
+    assert len(tables["chat_messages"]) == 4
+
+
+def test_new_conversation_explicitly_starts_a_separate_thread(service, principal, tables, monkeypatch):
+    from setuhaul.backend.driver_chat_eta.llm import agent as llm_agent
+
+    monkeypatch.setattr(llm_agent, "is_configured", lambda: False)
+    first = service.handle_chat_message(principal, "I am delayed")
+    second = service.handle_chat_message(principal, "Start fresh", first.conversation_id, True)
+
+    assert second.conversation_id
+    assert second.conversation_id != first.conversation_id
+    assert len(tables["chat_threads"]) == 2
+
+
 def test_get_current_feasible_slots_returns_open_compatible_slot(service, principal):
     options = service.get_current_feasible_slots(principal)
     slot_ids = {opt.slot_id for opt in options}
@@ -126,6 +153,36 @@ def test_auto_book_is_idempotent_once_a_confirmed_appointment_exists(service, pr
     # driver sends another message) must not create a second booking.
     confirmed = [a for a in tables["appointments"] if a["appointment_status"] == "CONFIRMED"]
     assert len(confirmed) == 1
+
+
+def test_auto_book_rebooks_when_a_new_delay_makes_the_existing_appointment_infeasible(service, principal, tables):
+    # Regression test: a driver reporting a delay that pushes them past
+    # their existing appointment's start must get rebooked onto a later
+    # compatible slot, not be told "your existing appointment stands" (the
+    # bug: auto_book_earliest_feasible_slot's already_booked short-circuit
+    # checked only slot ownership, never whether the slot was still
+    # feasible for the driver's newly-declared ETA).
+    first = service.auto_book_earliest_feasible_slot(principal)
+    assert first["status"] == "booked"
+    assert first["slot_id"] == "SLOT-1"  # starts at now+2h
+
+    # SLOT-1 starts at now+2h; a 45-minute delay pushes the declared ETA to
+    # now+2h45m, past SLOT-1's now+2h15m feasibility cutoff (15-minute
+    # grace window) but still within SLOT-2's now+3h start.
+    service.report_exception(principal, delay_minutes=45, note="Traffic jam")
+
+    result = service.auto_book_earliest_feasible_slot(principal)
+
+    assert result["status"] == "booked"
+    assert result["slot_id"] == "SLOT-2"
+    assert "no longer fits" in result["message"]
+
+    appointments = tables["appointments"]
+    cancelled = [a for a in appointments if a["appointment_status"] == "CANCELLED"]
+    confirmed = [a for a in appointments if a["appointment_status"] == "CONFIRMED"]
+    assert {a["slot_id"] for a in cancelled} == {"SLOT-1"}
+    assert len(confirmed) == 1
+    assert confirmed[0]["slot_id"] == "SLOT-2"
 
 
 def test_auto_book_escalates_when_nothing_is_compatible(service, principal, tables):

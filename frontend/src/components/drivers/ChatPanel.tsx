@@ -12,6 +12,7 @@ import {
   Minimize2,
   Mic,
   Square,
+  RotateCcw,
 } from "lucide-react";
 import type { DriverChatMessageSummary } from "../../types/driverChat";
 
@@ -49,6 +50,7 @@ export default function ChatPanel({
   onClose,
   isExpanded,
   onToggleExpand,
+  onNewChat,
 }: {
   color: string;
   messages: DriverChatMessageSummary[];
@@ -59,6 +61,7 @@ export default function ChatPanel({
   onClose?: () => void;
   isExpanded?: boolean;
   onToggleExpand?: () => void;
+  onNewChat?: () => void;
 }) {
   const [inputText, setInputText] = useState("");
   const [isRecording, setIsRecording] = useState(false);
@@ -209,6 +212,11 @@ export default function ChatPanel({
               className="flex h-9 w-9 items-center justify-center rounded-xl border border-line bg-white text-ink-soft transition hover:bg-line active:scale-95"
             >
               <X className="h-4 w-4" />
+            </button>
+          )}
+          {onNewChat && (
+            <button onClick={onNewChat} className="rounded-lg p-2 text-mist transition hover:bg-white/70 hover:text-ink" aria-label="Start a new chat" title="Start a new chat">
+              <RotateCcw className="h-4 w-4" />
             </button>
           )}
         </div>

@@ -60,10 +60,8 @@ def test_invalidate_shipment_clears_every_module_view(fake_redis: FakeRedis) -> 
 
     cache.invalidate_shipment(shipment_id)
 
-    assert cache.get_json(cache.shipment_key(shipment_id)) is None
-    assert cache.get_json(cache.shipment_context_key(shipment_id)) is None
-    assert cache.get_json(cache.dock_board_key(shipment_id)) is None
-    assert cache.get_json(cache.checkin_status_key(shipment_id)) is None
+    for family in ("shipment", "shipment-context", "dock-board", "checkin"):
+        assert fake_redis.get(cache._generation_key(family, shipment_id)) == "1"
 
 
 def test_invalidate_dock_boards_sweeps_every_shipment(fake_redis: FakeRedis) -> None:
@@ -73,8 +71,7 @@ def test_invalidate_dock_boards_sweeps_every_shipment(fake_redis: FakeRedis) -> 
 
     cache.invalidate_dock_boards()
 
-    assert cache.get_json(cache.dock_board_key("SHP1")) is None
-    assert cache.get_json(cache.dock_board_key("SHP2")) is None
+    assert fake_redis.get(cache._generation_key("dock-board", "global")) == "1"
     # Unrelated keys must survive the sweep.
     assert cache.get_json(cache.reference_key("facilities")) == [{"c": 1}]
 
@@ -85,14 +82,13 @@ def test_invalidate_shipments_lists_sweeps_every_scope_and_fingerprint(fake_redi
 
     cache.invalidate_shipments_lists()
 
-    assert cache.get_json(cache.shipments_list_key("all", "fp1")) is None
-    assert cache.get_json(cache.shipments_list_key("FAC-JAI-01", "fp2")) is None
+    assert fake_redis.get(cache._generation_key("shipments-list", "global")) == "1"
 
 
 def test_invalidate_vehicle(fake_redis: FakeRedis) -> None:
     cache.set_json(cache.vehicle_key("VEH1"), {"a": 1}, 30)
     cache.invalidate_vehicle("VEH1")
-    assert cache.get_json(cache.vehicle_key("VEH1")) is None
+    assert fake_redis.get(cache._generation_key("vehicle", "VEH1")) == "1"
 
 
 def test_invalidate_facility_sweeps_its_own_keys_and_every_facilities_list_page(fake_redis: FakeRedis) -> None:
@@ -104,10 +100,9 @@ def test_invalidate_facility_sweeps_its_own_keys_and_every_facilities_list_page(
 
     cache.invalidate_facility("FAC1")
 
-    assert cache.get_json(cache.facility_key("FAC1")) is None
-    assert cache.get_json(cache.docks_key("FAC1")) is None
-    assert cache.get_json(cache.reference_key("facilities:200:0")) is None
-    assert cache.get_json(cache.reference_key("facilities:50:100")) is None
+    assert fake_redis.get(cache._generation_key("facility", "FAC1")) == "1"
+    assert fake_redis.get(cache._generation_key("docks", "FAC1")) == "1"
+    assert fake_redis.get(cache._generation_key("facility-list", "global")) == "1"
     # Unrelated reference data must survive.
     assert cache.get_json(cache.reference_key("carriers")) == [{"e": 1}]
 
@@ -115,15 +110,14 @@ def test_invalidate_facility_sweeps_its_own_keys_and_every_facilities_list_page(
 def test_invalidate_carriers(fake_redis: FakeRedis) -> None:
     cache.set_json(cache.reference_key("carriers"), [{"a": 1}], 300)
     cache.invalidate_carriers()
-    assert cache.get_json(cache.reference_key("carriers")) is None
+    assert fake_redis.get(cache._generation_key("reference", "carriers")) == "1"
 
 
 def test_invalidate_change_requests(fake_redis: FakeRedis) -> None:
     cache.set_json(cache.change_requests_key(None), [{"a": 1}], 30)
     cache.set_json(cache.change_requests_key("PENDING"), [{"b": 1}], 30)
     cache.invalidate_change_requests()
-    assert cache.get_json(cache.change_requests_key(None)) is None
-    assert cache.get_json(cache.change_requests_key("PENDING")) is None
+    assert fake_redis.get(cache._generation_key("change-requests", "global")) == "1"
 
 
 class TestGetOrSet:
@@ -323,7 +317,7 @@ class TestCrossSlotSafety:
 
         cache.invalidate_shipment(shipment_id)  # must not raise CROSSSLOT
 
-        assert cache.get_json(cache.shipment_key(shipment_id)) is None
+        assert fake_cluster.get(cache._generation_key("shipment", shipment_id)) == "1"
 
     def test_invalidate_dock_boards_sweep_is_crossslot_safe(self, fake_cluster: FakeRedisCluster) -> None:
         for i in range(1, 30):
@@ -331,8 +325,7 @@ class TestCrossSlotSafety:
 
         cache.invalidate_dock_boards()  # must not raise CROSSSLOT
 
-        for i in range(1, 30):
-            assert cache.get_json(cache.dock_board_key(f"SHP{i}")) is None
+        assert fake_cluster.get(cache._generation_key("dock-board", "global")) == "1"
 
     def test_invalidate_shipments_lists_sweep_is_crossslot_safe(self, fake_cluster: FakeRedisCluster) -> None:
         for i in range(1, 30):
@@ -340,8 +333,7 @@ class TestCrossSlotSafety:
 
         cache.invalidate_shipments_lists()  # must not raise CROSSSLOT
 
-        for i in range(1, 30):
-            assert cache.get_json(cache.shipments_list_key(f"FAC{i}", "fp")) is None
+        assert fake_cluster.get(cache._generation_key("shipments-list", "global")) == "1"
 
     def test_invalidate_facility_sweep_is_crossslot_safe(self, fake_cluster: FakeRedisCluster) -> None:
         for i in range(1, 30):
@@ -380,3 +372,54 @@ class TestDeterministicTtlJitter:
         cache.set_json(cache.shipment_key("SHP1"), {"a": 1}, 20)
 
         assert captured["ex"] == 22
+
+
+def test_scopes_and_query_hashes_are_deterministic_and_non_identical(fake_redis: FakeRedis) -> None:
+    assert cache.canonical_query_hash({"limit": 10, "status": "OPEN"}) == cache.canonical_query_hash(
+        {"status": "OPEN", "limit": 10}
+    )
+    role_a = cache.CacheScope.role("ADMIN_1")
+    role_b = cache.CacheScope.role("AGENT_READER")
+    query_hash = cache.canonical_query_hash({"limit": 10})
+    key_a = cache._data_key(role_a, "shipments-list", "global", "0", query_hash)
+    key_b = cache._data_key(role_b, "shipments-list", "global", "0", query_hash)
+    assert key_a != key_b
+    assert "ADMIN_1" not in key_a
+    assert "AGENT_READER" not in key_b
+
+
+def test_none_results_are_not_negative_cached(fake_redis: FakeRedis) -> None:
+    scope = cache.CacheScope.user("driver-1")
+    assert cache.get_or_set_scoped(scope, "shipment", "missing", {}, 20, lambda: None) is None
+    assert not any(":data:" in key for key in fake_redis.raw())
+
+
+def test_generation_prevents_stale_reader_repopulation_after_invalidation(fake_redis: FakeRedis) -> None:
+    scope = cache.CacheScope.role("ADMIN_1")
+    started = threading.Event()
+    release = threading.Event()
+    result: list[dict[str, str]] = []
+
+    def stale_fetch() -> dict[str, str]:
+        started.set()
+        assert release.wait(1)
+        return {"version": "before-write"}
+
+    thread = threading.Thread(
+        target=lambda: result.append(cache.get_or_set_scoped(scope, "shipment", "SHP1", {}, 20, stale_fetch))
+    )
+    thread.start()
+    assert started.wait(1)
+    cache.invalidate_shipment("SHP1")
+    release.set()
+    thread.join(timeout=2)
+    assert result == [{"version": "before-write"}]
+
+    fresh_calls = {"count": 0}
+
+    def fresh_fetch() -> dict[str, str]:
+        fresh_calls["count"] += 1
+        return {"version": "after-write"}
+
+    assert cache.get_or_set_scoped(scope, "shipment", "SHP1", {}, 20, fresh_fetch) == {"version": "after-write"}
+    assert fresh_calls["count"] == 1

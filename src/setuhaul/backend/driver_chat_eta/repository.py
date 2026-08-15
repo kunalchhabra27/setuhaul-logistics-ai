@@ -365,6 +365,21 @@ class DriverChatRepository:
             self._raise_persistence(exc)
         return rows[0] if rows else None
 
+    def get_thread_for_driver(self, thread_id: str, driver_id: str) -> dict[str, Any] | None:
+        """Return a thread only when it belongs to the authenticated driver."""
+        try:
+            rows = self._rows(
+                self.client.table("chat_threads")
+                .select("*")
+                .eq("thread_id", thread_id)
+                .eq("driver_id", driver_id)
+                .limit(1)
+                .execute()
+            )
+        except APIError as exc:
+            self._raise_persistence(exc)
+        return rows[0] if rows else None
+
     def create_thread(self, payload: dict[str, Any]) -> dict[str, Any]:
         try:
             rows = self._rows(self.client.table("chat_threads").insert(payload).execute())

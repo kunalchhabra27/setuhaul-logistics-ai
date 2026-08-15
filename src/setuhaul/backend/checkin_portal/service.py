@@ -30,9 +30,10 @@ ON_TIME_TOLERANCE_MINUTES = 15
 class CheckInService:
     """Enforce valid state transitions for facility check-ins."""
 
-    def __init__(self, repository: CheckInRepository):
+    def __init__(self, repository: CheckInRepository, cache_scope: cache.CacheScope | None = None):
         """Initialize the service with its persistence boundary."""
         self.repository = repository
+        self.cache_scope = cache_scope or cache.PUBLIC_SCOPE
 
     def get_status(self, shipment_id: str) -> dict | None:
         """Return the current check-in record for a shipment, enriched with
@@ -58,7 +59,9 @@ class CheckInService:
         # get_or_set can't distinguish "cached None" from "no cache entry" --
         # a genuinely-absent check-in record is never cached and always
         # re-fetched, same as before this change.
-        return cache.get_or_set(cache.checkin_status_key(shipment_id), cache.TTL_MODERATE, _fetch)
+        return cache.get_or_set_scoped(
+            self.cache_scope, "checkin", shipment_id, {}, cache.TTL_MODERATE, _fetch
+        )
 
     @staticmethod
     def _invalidate_checkin_caches(shipment_id: str) -> None:

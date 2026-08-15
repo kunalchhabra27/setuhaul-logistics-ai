@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from setuhaul.backend.driver_chat_eta.auth import DriverPrincipal, get_current_driver
@@ -27,6 +27,7 @@ from setuhaul.backend.driver_chat_eta.models import (
 from setuhaul.backend.driver_chat_eta.repository import DriverChatRepository
 from setuhaul.backend.driver_chat_eta.service import DriverChatService
 from setuhaul.infrastructure.settings import get_settings
+from setuhaul.infrastructure import cache
 from setuhaul.infrastructure.supabase_client import create_caller_client
 
 router = APIRouter(prefix="/driver-chat-eta", tags=["driver-chat-eta"])
@@ -45,7 +46,9 @@ def health() -> dict[str, str]:
 def get_service(principal: DriverPrincipal = Depends(get_current_driver)) -> DriverChatService:
     """Build a caller-scoped service whose repository is protected by RLS."""
     client = create_caller_client(get_settings(), principal.access_token)
-    return DriverChatService(DriverChatRepository(client))
+    return DriverChatService(
+        DriverChatRepository(client), cache_scope=cache.CacheScope.user(principal.user_id)
+    )
 
 
 def _raise_http(exc: DriverChatError) -> None:
@@ -101,9 +104,10 @@ def complete_profile(
 def get_snapshot(
     principal: DriverPrincipal = Depends(get_current_driver),
     service: DriverChatService = Depends(get_service),
+    conversation_id: str | None = Query(default=None),
 ) -> DriverSnapshot:
     try:
-        return service.snapshot(principal)
+        return service.snapshot(principal, conversation_id=conversation_id)
     except DriverChatError as exc:
         _raise_http(exc)
 
@@ -115,7 +119,9 @@ def send_chat_message(
     service: DriverChatService = Depends(get_service),
 ) -> ChatResponse:
     try:
-        return service.handle_chat_message(principal, request.message)
+        return service.handle_chat_message(
+            principal, request.message, request.conversation_id, request.new_conversation
+        )
     except DriverChatError as exc:
         _raise_http(exc)
 
@@ -127,7 +133,10 @@ def send_voice_message(
     service: DriverChatService = Depends(get_service),
 ) -> ChatResponse:
     try:
-        return service.handle_voice_chat_message(principal, request.audio_base64, request.mime_type)
+        return service.handle_voice_chat_message(
+            principal, request.audio_base64, request.mime_type,
+            request.conversation_id, request.new_conversation,
+        )
     except DriverChatError as exc:
         _raise_http(exc)
 

@@ -9,8 +9,11 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from setuhaul.backend.tms.exceptions import AuthenticationError, AuthorizationError
 from setuhaul.backend.tms.models import TMSRole
+from setuhaul.infrastructure import auth_session
 from setuhaul.infrastructure.settings import get_settings
 from setuhaul.infrastructure.supabase_client import create_public_client
+
+PORTAL = "tms"
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -27,12 +30,27 @@ class Principal:
 def get_current_principal(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> Principal:
-    """Verify a bearer token with Supabase Auth and read secure app metadata."""
+    """Verify a bearer token, preferring a cached Redis session over a live
+    Supabase Auth call. See ``infrastructure.auth_session`` for the full
+    design -- in short: a cache hit skips Supabase entirely; a miss (first
+    request, expired, revoked, or Redis unreachable) always falls through to
+    the exact same full verification as before, so this never authenticates
+    anyone the pre-existing check wouldn't have.
+    """
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise AuthenticationError("A valid bearer token is required.")
 
+    settings = get_settings()
+    cached = auth_session.get_cached_session(credentials.credentials, settings)
+    if cached is not None and cached.portal == PORTAL:
+        try:
+            role = TMSRole(cached.role)
+        except (TypeError, ValueError):
+            role = TMSRole.ADMIN_1
+        return Principal(user_id=cached.user_id, role=role, access_token=credentials.credentials)
+
     try:
-        response = create_public_client(get_settings()).auth.get_user(credentials.credentials)
+        response = create_public_client(settings).auth.get_user(credentials.credentials)
         user = response.user
     except Exception as exc:
         raise AuthenticationError("The bearer token is invalid or expired.") from exc
@@ -52,6 +70,7 @@ def get_current_principal(
         # development. Reinstate real role checks before production use.
         role = TMSRole.ADMIN_1
 
+    auth_session.create_session(credentials.credentials, str(user.id), PORTAL, role.value, settings)
     return Principal(user_id=str(user.id), role=role, access_token=credentials.credentials)
 
 

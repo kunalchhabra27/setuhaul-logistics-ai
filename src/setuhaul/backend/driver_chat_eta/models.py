@@ -333,6 +333,14 @@ class SlotOption(BaseModel):
     estimated_wait_minutes: int
     is_held: bool = False
     is_booked_by_me: bool = False
+    # Purely "does this slot's time window fit the driver's currently
+    # declared ETA/must-leave-by constraint" -- independent of
+    # is_compatible, which also folds in whether the slot is *bookable*
+    # right now (an already-booked-by-me slot is never "bookable" again,
+    # so is_compatible is always False for it regardless of timing; this
+    # field is what auto_book_earliest_feasible_slot actually needs to
+    # decide whether an existing appointment is still usable).
+    fits_declared_eta: bool = True
 
 
 # --------------------------------------------------------------------------
@@ -342,6 +350,8 @@ class SlotOption(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1)
+    conversation_id: str | None = None
+    new_conversation: bool = False
 
 
 class VoiceChatRequest(BaseModel):
@@ -351,6 +361,8 @@ class VoiceChatRequest(BaseModel):
 
     audio_base64: str = Field(min_length=1, max_length=20_000_000, description="Base64-encoded audio clip (no data: URL prefix).")
     mime_type: str = Field(default="audio/webm", description="MIME type of the clip, e.g. audio/webm, audio/mp4, audio/ogg.")
+    conversation_id: str | None = None
+    new_conversation: bool = False
 
 
 class HoldSlotRequest(BaseModel):
@@ -394,9 +406,11 @@ class DriverSnapshot(BaseModel):
     exception: DriverExceptionSummary | None = None
     slot_options: list[SlotOption] = Field(default_factory=list)
     chat_messages: list[ChatMessageSummary] = Field(default_factory=list)
+    conversation_id: str | None = None
 
 
 class ChatResponse(BaseModel):
+    conversation_id: str | None = None
     agent_message: ChatMessageSummary
     suggested_options: list[SlotOption] = Field(default_factory=list)
     exception: DriverExceptionSummary | None = None

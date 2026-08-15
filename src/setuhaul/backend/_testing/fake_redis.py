@@ -44,6 +44,11 @@ class FakeRedis:
                 removed += 1
         return removed
 
+    def incr(self, key: str) -> int:
+        value = int(self._store.get(key, "0")) + 1
+        self._store[key] = str(value)
+        return value
+
     def scan_iter(self, match: str, count: int = 200):
         for key in list(self._store.keys()):
             if fnmatch.fnmatch(key, match):

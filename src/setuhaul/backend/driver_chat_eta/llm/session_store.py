@@ -31,12 +31,55 @@ from __future__ import annotations
 
 import json
 import logging
+from uuid import uuid4
 
 from setuhaul.infrastructure import redis_client
 
 logger = logging.getLogger(__name__)
 
 SESSION_TTL_SECONDS = 1800
+
+# Advisory lock guarding the rare read-then-create race in thread
+# resolution (get_open_thread_for_driver -> create_thread has no atomicity
+# of its own): two near-simultaneous first messages from the same driver
+# could otherwise both see "no open thread" and both create one. Held only
+# for the brief read-check-create sequence, never for a whole chat turn --
+# a separate concern from SESSION_TTL_SECONDS above (that's the working-
+# memory cache TTL, this is a lock). Best-effort like everything else here:
+# if Redis is unavailable, callers proceed without the lock (see
+# agent.py/service.py's own re-check-after-acquire) rather than blocking a
+# driver's first message on a dead cache.
+_THREAD_LOCK_TTL_SECONDS = 5
+
+
+def _thread_lock_key(driver_id: str) -> str:
+    return f"chat:setuhaul:lock:{driver_id}"
+
+
+def acquire_thread_creation_lock(driver_id: str) -> str | None:
+    """Best-effort lock token, or None if unavailable/already held -- callers
+    must treat None as "proceed without the guard", never as an error."""
+    client = redis_client.get_client()
+    if client is None:
+        return None
+    token = uuid4().hex
+    try:
+        acquired = bool(client.set(_thread_lock_key(driver_id), token, nx=True, ex=_THREAD_LOCK_TTL_SECONDS))
+    except Exception:  # noqa: BLE001
+        logger.warning("driver_chat_eta: thread-lock acquire failed, proceeding without it.", exc_info=True)
+        return None
+    return token if acquired else None
+
+
+def release_thread_creation_lock(driver_id: str, token: str) -> None:
+    client = redis_client.get_client()
+    if client is None:
+        return
+    try:
+        if client.get(_thread_lock_key(driver_id)) == token:
+            client.delete(_thread_lock_key(driver_id))
+    except Exception:  # noqa: BLE001
+        logger.warning("driver_chat_eta: thread-lock release failed; it will expire on its own TTL.", exc_info=True)
 
 
 def _redis_key(driver_id: str, thread_id: str) -> str:
