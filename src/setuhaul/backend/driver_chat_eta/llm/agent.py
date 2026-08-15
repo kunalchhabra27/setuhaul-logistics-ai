@@ -44,6 +44,8 @@ from setuhaul.backend.driver_chat_eta.llm.tools import build_tools
 from setuhaul.backend.driver_chat_eta.models import ChatMessageSummary, ChatResponse
 from setuhaul.backend.driver_chat_eta.service import _new_id, _now_iso
 from setuhaul.infrastructure.settings import get_settings
+from setuhaul.infrastructure.metrics import Duration, emit_domain_event, increment
+from setuhaul.infrastructure.telemetry import langsmith_trace_context, operation_span, set_current_span_attributes
 
 if TYPE_CHECKING:
     from setuhaul.backend.driver_chat_eta.auth import DriverPrincipal
@@ -115,6 +117,21 @@ def transcribe_audio(audio_base64: str, mime_type: str) -> str:
 
 
 def run_chat_turn(service: "DriverChatService", principal: "DriverPrincipal", text: str) -> ChatResponse:
+    """Run the existing LLM flow under optional, driver-chat-only tracing."""
+    increment("setuhaul.ai.calls", {"operation": "agent_run"})
+    emit_domain_event("agent_invoked", operation="agent_run")
+    try:
+        with Duration("ai", {"operation": "agent_run"}):
+            with operation_span("driver_chat.agent_execution", {"operation": "agent_execution"}):
+                with langsmith_trace_context({"operation": "driver_chat"}):
+                    return _run_chat_turn(service, principal, text)
+    except Exception:
+        increment("setuhaul.ai.errors", {"operation": "agent_run"})
+        emit_domain_event("agent_failed", operation="agent_run", result="error")
+        raise
+
+
+def _run_chat_turn(service: "DriverChatService", principal: "DriverPrincipal", text: str) -> ChatResponse:
     """Handle one driver chat message with the Gemini tool-calling agent."""
     driver = service.get_my_profile(principal)  # raises DriverProfileNotFoundError if missing
     snapshot = service.snapshot(principal)
@@ -135,6 +152,14 @@ def run_chat_turn(service: "DriverChatService", principal: "DriverPrincipal", te
             }
         )
     thread_id = thread_row["thread_id"]
+    set_current_span_attributes(
+        {
+            "shipment_id": snapshot.shipment.shipment_id,
+            "thread_id": thread_id,
+            "exception_id": snapshot.exception.exception_id if snapshot.exception else None,
+            "environment": get_settings().environment,
+        }
+    )
 
     # Hydrate working memory before writing today's message, so it isn't duplicated.
     history = load_history(principal.user_id, thread_id)
@@ -183,6 +208,8 @@ def run_chat_turn(service: "DriverChatService", principal: "DriverPrincipal", te
         rounds_used += 1
         for call in response.tool_calls:
             called_tool_names.add(call["name"])
+            increment("setuhaul.ai.tool_calls", {"operation": "agent_tool_call"})
+            emit_domain_event("agent_tool_called", operation="agent_tool_call")
             tool_fn = tool_map.get(call["name"])
             if tool_fn is None:
                 result: dict = {"error": "unknown_tool", "message": f"No such tool: {call['name']}"}

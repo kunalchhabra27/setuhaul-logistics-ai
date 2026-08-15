@@ -50,6 +50,7 @@ from setuhaul.backend.dock_scheduler.models import ChangeRequestRole, DriverCons
 from setuhaul.backend.dock_scheduler.repository import DockSchedulerRepository
 from setuhaul.backend.dock_scheduler.service import DockSchedulerService
 from setuhaul.backend.driver_chat_eta.auth import DriverPrincipal
+from setuhaul.infrastructure.metrics import emit_domain_event, increment
 from setuhaul.backend.driver_chat_eta.exceptions import (
     BusinessValidationError,
     DriverChatError,
@@ -780,6 +781,14 @@ class DriverChatService:
         exception_row["exception_status"] = new_status
         if new_status == "ESCALATED":
             self.repository.update_thread(thread_row["thread_id"], {"thread_status": "ESCALATED"})
+
+        increment("setuhaul.driver.delay_reports", {"result": new_status})
+        emit_domain_event(
+            "driver_delay_reported",
+            shipment_id=shipment_row["shipment_id"],
+            thread_id=thread_row["thread_id"],
+            result=new_status,
+        )
 
         return {
             "exception_id": exception_row["exception_id"],

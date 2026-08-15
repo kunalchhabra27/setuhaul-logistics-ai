@@ -27,6 +27,7 @@ from setuhaul.backend.driver_chat_eta.models import (
 from setuhaul.backend.driver_chat_eta.repository import DriverChatRepository
 from setuhaul.backend.driver_chat_eta.service import DriverChatService
 from setuhaul.infrastructure.settings import get_settings
+from setuhaul.infrastructure.metrics import emit_domain_event, increment
 from setuhaul.infrastructure.supabase_client import create_caller_client
 
 router = APIRouter(prefix="/driver-chat-eta", tags=["driver-chat-eta"])
@@ -139,7 +140,10 @@ def hold_slot(
     service: DriverChatService = Depends(get_service),
 ) -> SlotActionResponse:
     try:
-        return service.hold_slot(principal, request.slot_id)
+        response = service.hold_slot(principal, request.slot_id)
+        increment("setuhaul.driver.slot_requests")
+        emit_domain_event("slot_change_requested", result="held")
+        return response
     except DriverChatError as exc:
         _raise_http(exc)
 
@@ -151,7 +155,10 @@ def confirm_slot(
     service: DriverChatService = Depends(get_service),
 ) -> ConfirmSlotResponse:
     try:
-        return service.confirm_slot(principal, request.slot_id)
+        response = service.confirm_slot(principal, request.slot_id)
+        increment("setuhaul.driver.slot_requests")
+        emit_domain_event("slot_confirmed", result="success")
+        return response
     except DriverChatError as exc:
         _raise_http(exc)
 
