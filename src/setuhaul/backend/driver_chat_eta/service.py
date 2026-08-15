@@ -55,6 +55,7 @@ from setuhaul.backend.dock_scheduler.models import ChangeRequestRole, DriverCons
 from setuhaul.backend.dock_scheduler.repository import DockSchedulerRepository
 from setuhaul.backend.dock_scheduler.service import DockSchedulerService
 from setuhaul.backend.driver_chat_eta.auth import DriverPrincipal
+from setuhaul.infrastructure.metrics import emit_domain_event, increment
 from setuhaul.backend.driver_chat_eta.exceptions import (
     BusinessValidationError,
     DriverChatError,
@@ -87,6 +88,7 @@ from setuhaul.backend.driver_chat_eta.models import (
     VehicleSummary,
 )
 from setuhaul.backend.driver_chat_eta.repository import DriverChatRepository
+from setuhaul.infrastructure.telemetry import operation_span
 
 HOLD_MINUTES = 5
 # Fixed emergency-dispatch contact number for safety-critical situations a
@@ -304,7 +306,8 @@ class DriverChatService:
         """Original ~7-9-round-trip implementation -- kept as the fallback
         _build_snapshot uses when the driver_snapshot RPC isn't available.
         """
-        shipment_row = self.repository.get_active_shipment_for_driver(principal.user_id)
+        with operation_span("driver_chat.load_active_shipment", {"operation": "load_active_shipment"}):
+            shipment_row = self.repository.get_active_shipment_for_driver(principal.user_id)
         shipment = ShipmentSummary.model_validate(shipment_row) if shipment_row else None
 
         vehicle_row = None
@@ -314,14 +317,18 @@ class DriverChatService:
         checkin = None
 
         if shipment_row:
-            if shipment_row.get("vehicle_id"):
-                vehicle_row = self.repository.get_vehicle(shipment_row["vehicle_id"])
-            if shipment_row.get("destination_facility_id"):
-                facility_row = self.repository.get_facility(shipment_row["destination_facility_id"])
-                docks = [
-                    DockSummary.model_validate(row)
-                    for row in self.repository.list_docks(shipment_row["destination_facility_id"])
-                ]
+            with operation_span(
+                "driver_chat.load_shipment_context",
+                {"operation": "load_shipment_context", "shipment_id": shipment_row["shipment_id"]},
+            ):
+                if shipment_row.get("vehicle_id"):
+                    vehicle_row = self.repository.get_vehicle(shipment_row["vehicle_id"])
+                if shipment_row.get("destination_facility_id"):
+                    facility_row = self.repository.get_facility(shipment_row["destination_facility_id"])
+                    docks = [
+                        DockSummary.model_validate(row)
+                        for row in self.repository.list_docks(shipment_row["destination_facility_id"])
+                    ]
             # dock_scheduler.repository.current_appointment() joins in
             # dock_code/slot_start_ts/slot_end_ts (the raw appointments row
             # only has slot_id) -- lets the driver UI show a real "confirmed
@@ -329,21 +336,22 @@ class DriverChatService:
             # defensive fallback as the slot_options block above: a failure
             # here must degrade to "no appointment shown", not break the
             # whole snapshot/chat turn.
-            try:
-                appt_row = self.dock_scheduler.repository.current_appointment(shipment_row["shipment_id"])
-            except Exception:  # noqa: BLE001 - deliberate broad fallback, see slot_options above
-                import logging
+                try:
+                    appt_row = self.dock_scheduler.repository.current_appointment(shipment_row["shipment_id"])
+                except Exception:  # noqa: BLE001 - deliberate broad fallback, see slot_options above
+                    import logging
 
-                logging.getLogger(__name__).exception(
-                    "driver_chat_eta: failed to read current appointment for shipment %s.",
-                    shipment_row.get("shipment_id"),
-                )
-                appt_row = None
-            appointment = AppointmentSummary.model_validate(appt_row) if appt_row else None
-            checkin_row = self.repository.get_checkin_for_shipment(shipment_row["shipment_id"])
-            checkin = FacilityCheckinSummary.model_validate(checkin_row) if checkin_row else None
+                    logging.getLogger(__name__).exception(
+                        "driver_chat_eta: failed to read current appointment for shipment %s.",
+                        shipment_row.get("shipment_id"),
+                    )
+                    appt_row = None
+                appointment = AppointmentSummary.model_validate(appt_row) if appt_row else None
+                checkin_row = self.repository.get_checkin_for_shipment(shipment_row["shipment_id"])
+                checkin = FacilityCheckinSummary.model_validate(checkin_row) if checkin_row else None
 
-        exception_row = self.repository.get_active_exception_for_driver(principal.user_id)
+        with operation_span("driver_chat.load_exception_context", {"operation": "load_exception_context"}):
+            exception_row = self.repository.get_active_exception_for_driver(principal.user_id)
         exception = DriverExceptionSummary.model_validate(exception_row) if exception_row else None
 
         chat_messages: list[ChatMessageSummary] = []
@@ -365,15 +373,19 @@ class DriverChatService:
         slot_options: list[SlotOption] = []
         if shipment_row and shipment_row.get("destination_facility_id"):
             try:
-                slot_options = self._feasible_slots(
-                    shipment_row=shipment_row,
-                    after=(
-                        (exception_row or {}).get("declared_eta_ts")
-                        or shipment_row.get("latest_eta_ts")
-                        or shipment_row.get("original_eta_ts")
-                    ),
-                    max_leave_at=(exception_row or {}).get("latest_acceptable_ts"),
-                )
+                with operation_span(
+                    "driver_chat.prepare_slot_context",
+                    {"operation": "prepare_slot_context", "shipment_id": shipment_row["shipment_id"]},
+                ):
+                    slot_options = self._feasible_slots(
+                        shipment_row=shipment_row,
+                        after=(
+                            (exception_row or {}).get("declared_eta_ts")
+                            or shipment_row.get("latest_eta_ts")
+                            or shipment_row.get("original_eta_ts")
+                        ),
+                        max_leave_at=(exception_row or {}).get("latest_acceptable_ts"),
+                    )
             except Exception:  # noqa: BLE001 - deliberate broad fallback, see comment below
                 # _build_snapshot is on the critical path for the /snapshot
                 # endpoint, every chat turn (including the LLM path's
@@ -991,6 +1003,14 @@ class DriverChatService:
         exception_row["exception_status"] = new_status
         if new_status == "ESCALATED":
             self.repository.update_thread(thread_row["thread_id"], {"thread_status": "ESCALATED"})
+
+        increment("setuhaul.driver.delay_reports", {"result": new_status})
+        emit_domain_event(
+            "driver_delay_reported",
+            shipment_id=shipment_row["shipment_id"],
+            thread_id=thread_row["thread_id"],
+            result=new_status,
+        )
 
         return {
             "exception_id": exception_row["exception_id"],

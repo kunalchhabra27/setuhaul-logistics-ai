@@ -15,8 +15,10 @@ from setuhaul.backend.checkin_portal.models import (
 from setuhaul.backend.checkin_portal.repository import CheckInRepository
 from setuhaul.backend.checkin_portal.service import CheckInService
 from setuhaul.infrastructure.auth import Principal, require_admin, require_reader
+from setuhaul.infrastructure.metrics import emit_domain_event, increment
 from setuhaul.infrastructure.settings import get_settings
 from setuhaul.infrastructure.supabase_client import create_caller_client
+from setuhaul.infrastructure.telemetry import observe_operation
 
 router = APIRouter(prefix="/checkins", tags=["checkin-portal"])
 
@@ -63,8 +65,17 @@ def gate_check_in(
     ```
     """
     try:
-        return service.gate_check_in(request)
+        result = observe_operation(
+            "checkin.gate_in",
+            {"operation": "gate_check_in", "shipment_id": request.shipment_id, "facility_id": request.facility_id},
+            lambda: service.gate_check_in(request),
+        )
+        increment("setuhaul.checkin.gate_ins", {"shipment_id": request.shipment_id, "facility_id": request.facility_id})
+        emit_domain_event("gate_checkin", shipment_id=request.shipment_id, facility_id=request.facility_id, result="success")
+        return result
     except InvalidCheckInTransition as exc:
+        increment("setuhaul.checkin.invalid_transitions", {"shipment_id": request.shipment_id})
+        emit_domain_event("invalid_transition", shipment_id=request.shipment_id, result="rejected")
         raise _handle_transition_error(exc) from exc
 
 
@@ -83,7 +94,11 @@ def approve_gate_checkin(
     ```
     """
     try:
-        return service.approve_gate_checkin(request.shipment_id)
+        return observe_operation(
+            "checkin.gate_approval",
+            {"operation": "approve_gate_checkin", "shipment_id": request.shipment_id},
+            lambda: service.approve_gate_checkin(request.shipment_id),
+        )
     except InvalidCheckInTransition as exc:
         raise _handle_transition_error(exc) from exc
 
@@ -105,8 +120,17 @@ def update_queue(
     ```
     """
     try:
-        return service.update_queue(request)
+        result = observe_operation(
+            "checkin.queue_update",
+            {"operation": "update_queue", "shipment_id": request.shipment_id},
+            lambda: service.update_queue(request),
+        )
+        increment("setuhaul.checkin.queue_updates", {"shipment_id": request.shipment_id})
+        emit_domain_event("queue_updated", shipment_id=request.shipment_id, result="success")
+        return result
     except InvalidCheckInTransition as exc:
+        increment("setuhaul.checkin.invalid_transitions", {"shipment_id": request.shipment_id})
+        emit_domain_event("invalid_transition", shipment_id=request.shipment_id, result="rejected")
         raise _handle_transition_error(exc) from exc
 
 
@@ -127,8 +151,17 @@ def mark_docked(
     ```
     """
     try:
-        return service.mark_docked(request)
+        result = observe_operation(
+            "checkin.dock_in",
+            {"operation": "mark_docked", "shipment_id": request.shipment_id},
+            lambda: service.mark_docked(request),
+        )
+        increment("setuhaul.checkin.dock_ins", {"shipment_id": request.shipment_id})
+        emit_domain_event("truck_docked", shipment_id=request.shipment_id, result="success")
+        return result
     except InvalidCheckInTransition as exc:
+        increment("setuhaul.checkin.invalid_transitions", {"shipment_id": request.shipment_id})
+        emit_domain_event("invalid_transition", shipment_id=request.shipment_id, result="rejected")
         raise _handle_transition_error(exc) from exc
 
 
@@ -149,6 +182,15 @@ def complete(
     ```
     """
     try:
-        return service.complete(request)
+        result = observe_operation(
+            "checkin.complete",
+            {"operation": "complete", "shipment_id": request.shipment_id},
+            lambda: service.complete(request),
+        )
+        increment("setuhaul.checkin.completions", {"shipment_id": request.shipment_id})
+        emit_domain_event("unload_completed", shipment_id=request.shipment_id, result="success")
+        return result
     except InvalidCheckInTransition as exc:
+        increment("setuhaul.checkin.invalid_transitions", {"shipment_id": request.shipment_id})
+        emit_domain_event("invalid_transition", shipment_id=request.shipment_id, result="rejected")
         raise _handle_transition_error(exc) from exc

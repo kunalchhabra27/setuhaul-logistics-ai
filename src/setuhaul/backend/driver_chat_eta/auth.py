@@ -17,6 +17,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from setuhaul.backend.driver_chat_eta.exceptions import AuthenticationError
 from setuhaul.infrastructure.settings import get_settings
 from setuhaul.infrastructure.supabase_client import create_public_client
+from setuhaul.infrastructure.telemetry import operation_span
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -38,7 +39,8 @@ def get_current_driver(
         raise AuthenticationError("A valid bearer token is required.")
 
     try:
-        response = create_public_client(get_settings()).auth.get_user(credentials.credentials)
+        with operation_span("driver_chat.authenticate", {"operation": "authenticate"}):
+            response = create_public_client(get_settings()).auth.get_user(credentials.credentials)
         user = response.user
     except Exception as exc:  # noqa: BLE001 - Supabase raises its own error types
         raise AuthenticationError("The bearer token is invalid or expired.") from exc

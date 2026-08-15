@@ -1,0 +1,931 @@
+{
+  "run_id": "full-20260815151720",
+  "facility_id": "FAC-GGN-01",
+  "attempted": 100,
+  "shipments": [
+    {
+      "shipment_id": "LT-CI-full-20260815151720-002",
+      "driver_id": "bd5ed26a-3358-491a-8999-8125e8f94964",
+      "vehicle_id": "VEH003",
+      "appointment_id": "APT-PND-C26DC250",
+      "slot_id": "DOCK-GGN-D1-202608161500",
+      "slot_start": "2026-08-16T15:00:00+05:30",
+      "timing_group": "ON_TIME",
+      "gate_in_at": "2026-08-16T15:00:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-005",
+      "driver_id": "DRV001",
+      "vehicle_id": "VEH002",
+      "appointment_id": "APT-PND-DC2ABEB3",
+      "slot_id": "DOCK-GGN-D2-202608161500",
+      "slot_start": "2026-08-16T15:00:00+05:30",
+      "timing_group": "ON_TIME",
+      "gate_in_at": "2026-08-16T15:00:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-008",
+      "driver_id": "DRV004",
+      "vehicle_id": "VEH010",
+      "appointment_id": "APT-PND-5A54EE9D",
+      "slot_id": "DOCK-GGN-D1-202608171000",
+      "slot_start": "2026-08-17T10:00:00+05:30",
+      "timing_group": "ON_TIME",
+      "gate_in_at": "2026-08-17T10:00:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-009",
+      "driver_id": "DRV005",
+      "vehicle_id": "VEH006",
+      "appointment_id": "APT-PND-D5397F18",
+      "slot_id": "DOCK-GGN-D2-202608170900",
+      "slot_start": "2026-08-17T09:00:00+05:30",
+      "timing_group": "DELAYED",
+      "gate_in_at": "2026-08-17T09:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-011",
+      "driver_id": "DRV007",
+      "vehicle_id": "VEH008",
+      "appointment_id": "APT-PND-090A5124",
+      "slot_id": "DOCK-GGN-D1-202608161600",
+      "slot_start": "2026-08-16T16:00:00+05:30",
+      "timing_group": "ON_TIME",
+      "gate_in_at": "2026-08-16T16:00:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-012",
+      "driver_id": "DRV008",
+      "vehicle_id": "VEH012",
+      "appointment_id": "APT-PND-9E547D1F",
+      "slot_id": "DOCK-GGN-D2-202608161600",
+      "slot_start": "2026-08-16T16:00:00+05:30",
+      "timing_group": "DELAYED",
+      "gate_in_at": "2026-08-16T16:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-013",
+      "driver_id": "DRV009",
+      "vehicle_id": "VEH013",
+      "appointment_id": "APT-PND-E8C35B59",
+      "slot_id": "DOCK-GGN-D1-202608161700",
+      "slot_start": "2026-08-16T17:00:00+05:30",
+      "timing_group": "EARLY",
+      "gate_in_at": "2026-08-16T16:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-014",
+      "driver_id": "DRV010",
+      "vehicle_id": "VEH014",
+      "appointment_id": "APT-PND-1E8DC9FA",
+      "slot_id": "DOCK-GGN-D2-202608161700",
+      "slot_start": "2026-08-16T17:00:00+05:30",
+      "timing_group": "ON_TIME",
+      "gate_in_at": "2026-08-16T17:00:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-015",
+      "driver_id": "DRV011",
+      "vehicle_id": "VEH015",
+      "appointment_id": "APT-PND-448454DC",
+      "slot_id": "DOCK-GGN-D1-202608170900",
+      "slot_start": "2026-08-17T09:00:00+05:30",
+      "timing_group": "DELAYED",
+      "gate_in_at": "2026-08-17T09:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-016",
+      "driver_id": "5d271e86-bfc3-4d7b-ba62-bb6809fccad6",
+      "vehicle_id": "VEH001",
+      "appointment_id": "APT-PND-0921DC09",
+      "slot_id": "DOCK-GGN-D1-202608171300",
+      "slot_start": "2026-08-17T13:00:00+05:30",
+      "timing_group": "EARLY",
+      "gate_in_at": "2026-08-17T12:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-017",
+      "driver_id": "bd5ed26a-3358-491a-8999-8125e8f94964",
+      "vehicle_id": "VEH003",
+      "appointment_id": "APT-PND-27D0D34C",
+      "slot_id": "DOCK-GGN-D2-202608171300",
+      "slot_start": "2026-08-17T13:00:00+05:30",
+      "timing_group": "ON_TIME",
+      "gate_in_at": "2026-08-17T13:00:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-020",
+      "driver_id": "DRV001",
+      "vehicle_id": "VEH002",
+      "appointment_id": "APT-PND-02102CB1",
+      "slot_id": "DOCK-GGN-D2-202608171000",
+      "slot_start": "2026-08-17T10:00:00+05:30",
+      "timing_group": "ON_TIME",
+      "gate_in_at": "2026-08-17T10:00:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-021",
+      "driver_id": "DRV002",
+      "vehicle_id": "VEH009",
+      "appointment_id": "APT-PND-C48ADFF6",
+      "slot_id": "DOCK-GGN-D1-202608171100",
+      "slot_start": "2026-08-17T11:00:00+05:30",
+      "timing_group": "DELAYED",
+      "gate_in_at": "2026-08-17T11:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-022",
+      "driver_id": "DRV003",
+      "vehicle_id": "VEH004",
+      "appointment_id": "APT-PND-4A0C691E",
+      "slot_id": "DOCK-GGN-D2-202608171100",
+      "slot_start": "2026-08-17T11:00:00+05:30",
+      "timing_group": "EARLY",
+      "gate_in_at": "2026-08-17T10:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-023",
+      "driver_id": "DRV004",
+      "vehicle_id": "VEH010",
+      "appointment_id": "APT-PND-4144D4F9",
+      "slot_id": "DOCK-GGN-D1-202608171200",
+      "slot_start": "2026-08-17T12:00:00+05:30",
+      "timing_group": "ON_TIME",
+      "gate_in_at": "2026-08-17T12:00:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-024",
+      "driver_id": "DRV005",
+      "vehicle_id": "VEH006",
+      "appointment_id": "APT-PND-1CDABCFA",
+      "slot_id": "DOCK-GGN-D2-202608171200",
+      "slot_start": "2026-08-17T12:00:00+05:30",
+      "timing_group": "DELAYED",
+      "gate_in_at": "2026-08-17T12:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-025",
+      "driver_id": "DRV006",
+      "vehicle_id": "VEH011",
+      "appointment_id": "APT-PND-F3DF68D5",
+      "slot_id": "DOCK-GGN-D1-202608180900",
+      "slot_start": "2026-08-18T09:00:00+05:30",
+      "timing_group": "EARLY",
+      "gate_in_at": "2026-08-18T08:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-026",
+      "driver_id": "DRV007",
+      "vehicle_id": "VEH008",
+      "appointment_id": "APT-PND-DD040A08",
+      "slot_id": "DOCK-GGN-D1-202608171700",
+      "slot_start": "2026-08-17T17:00:00+05:30",
+      "timing_group": "ON_TIME",
+      "gate_in_at": "2026-08-17T17:00:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-027",
+      "driver_id": "DRV008",
+      "vehicle_id": "VEH012",
+      "appointment_id": "APT-PND-DCDC66D9",
+      "slot_id": "DOCK-GGN-D1-202608171400",
+      "slot_start": "2026-08-17T14:00:00+05:30",
+      "timing_group": "DELAYED",
+      "gate_in_at": "2026-08-17T14:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-028",
+      "driver_id": "DRV009",
+      "vehicle_id": "VEH013",
+      "appointment_id": "APT-PND-4B8CDD0E",
+      "slot_id": "DOCK-GGN-D2-202608181000",
+      "slot_start": "2026-08-18T10:00:00+05:30",
+      "timing_group": "EARLY",
+      "gate_in_at": "2026-08-18T09:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-029",
+      "driver_id": "DRV010",
+      "vehicle_id": "VEH014",
+      "appointment_id": "APT-PND-D4BB64D3",
+      "slot_id": "DOCK-GGN-D2-202608171400",
+      "slot_start": "2026-08-17T14:00:00+05:30",
+      "timing_group": "ON_TIME",
+      "gate_in_at": "2026-08-17T14:00:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-030",
+      "driver_id": "DRV011",
+      "vehicle_id": "VEH015",
+      "appointment_id": "APT-PND-56B33467",
+      "slot_id": "DOCK-GGN-D1-202608171500",
+      "slot_start": "2026-08-17T15:00:00+05:30",
+      "timing_group": "DELAYED",
+      "gate_in_at": "2026-08-17T15:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-031",
+      "driver_id": "5d271e86-bfc3-4d7b-ba62-bb6809fccad6",
+      "vehicle_id": "VEH001",
+      "appointment_id": "APT-PND-043FD560",
+      "slot_id": "DOCK-GGN-D2-202608171500",
+      "slot_start": "2026-08-17T15:00:00+05:30",
+      "timing_group": "EARLY",
+      "gate_in_at": "2026-08-17T14:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-032",
+      "driver_id": "bd5ed26a-3358-491a-8999-8125e8f94964",
+      "vehicle_id": "VEH003",
+      "appointment_id": "APT-PND-EFBF71EF",
+      "slot_id": "DOCK-GGN-D2-202608180900",
+      "slot_start": "2026-08-18T09:00:00+05:30",
+      "timing_group": "ON_TIME",
+      "gate_in_at": "2026-08-18T09:00:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-033",
+      "driver_id": "d3e4a8a2-206d-4c57-802e-76eb7dfedfa5",
+      "vehicle_id": "VEH007",
+      "appointment_id": "APT-PND-8726323E",
+      "slot_id": "DOCK-GGN-D1-202608171600",
+      "slot_start": "2026-08-17T16:00:00+05:30",
+      "timing_group": "DELAYED",
+      "gate_in_at": "2026-08-17T16:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-034",
+      "driver_id": "d7236bee-5e1d-4529-89a6-52b622788178",
+      "vehicle_id": "VEH005",
+      "appointment_id": "APT-PND-D3C46777",
+      "slot_id": "DOCK-GGN-D2-202608171600",
+      "slot_start": "2026-08-17T16:00:00+05:30",
+      "timing_group": "EARLY",
+      "gate_in_at": "2026-08-17T15:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-035",
+      "driver_id": "DRV001",
+      "vehicle_id": "VEH002",
+      "appointment_id": "APT-PND-0610D0E5",
+      "slot_id": "DOCK-GGN-D2-202608171700",
+      "slot_start": "2026-08-17T17:00:00+05:30",
+      "timing_group": "ON_TIME",
+      "gate_in_at": "2026-08-17T17:00:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-036",
+      "driver_id": "DRV002",
+      "vehicle_id": "VEH009",
+      "appointment_id": "APT-PND-0F2C4618",
+      "slot_id": "DOCK-GGN-D1-202608181000",
+      "slot_start": "2026-08-18T10:00:00+05:30",
+      "timing_group": "DELAYED",
+      "gate_in_at": "2026-08-18T10:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-038",
+      "driver_id": "DRV004",
+      "vehicle_id": "VEH010",
+      "appointment_id": "APT-PND-B67D2608",
+      "slot_id": "DOCK-GGN-D1-202608181400",
+      "slot_start": "2026-08-18T14:00:00+05:30",
+      "timing_group": "ON_TIME",
+      "gate_in_at": "2026-08-18T14:00:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-039",
+      "driver_id": "DRV005",
+      "vehicle_id": "VEH006",
+      "appointment_id": "APT-PND-D92D87CD",
+      "slot_id": "DOCK-GGN-D2-202608181400",
+      "slot_start": "2026-08-18T14:00:00+05:30",
+      "timing_group": "DELAYED",
+      "gate_in_at": "2026-08-18T14:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-040",
+      "driver_id": "DRV006",
+      "vehicle_id": "VEH011",
+      "appointment_id": "APT-PND-3E18268E",
+      "slot_id": "DOCK-GGN-D1-202608181100",
+      "slot_start": "2026-08-18T11:00:00+05:30",
+      "timing_group": "EARLY",
+      "gate_in_at": "2026-08-18T10:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-042",
+      "driver_id": "DRV008",
+      "vehicle_id": "VEH012",
+      "appointment_id": "APT-PND-38265D1F",
+      "slot_id": "DOCK-GGN-D2-202608181100",
+      "slot_start": "2026-08-18T11:00:00+05:30",
+      "timing_group": "DELAYED",
+      "gate_in_at": "2026-08-18T11:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-043",
+      "driver_id": "DRV009",
+      "vehicle_id": "VEH013",
+      "appointment_id": "APT-PND-04467A00",
+      "slot_id": "DOCK-GGN-D1-202608181200",
+      "slot_start": "2026-08-18T12:00:00+05:30",
+      "timing_group": "EARLY",
+      "gate_in_at": "2026-08-18T11:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-044",
+      "driver_id": "DRV010",
+      "vehicle_id": "VEH014",
+      "appointment_id": "APT-PND-FE36F7EE",
+      "slot_id": "DOCK-GGN-D2-202608181200",
+      "slot_start": "2026-08-18T12:00:00+05:30",
+      "timing_group": "ON_TIME",
+      "gate_in_at": "2026-08-18T12:00:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-046",
+      "driver_id": "5d271e86-bfc3-4d7b-ba62-bb6809fccad6",
+      "vehicle_id": "VEH001",
+      "appointment_id": "APT-PND-30625F3A",
+      "slot_id": "DOCK-GGN-D1-202608181300",
+      "slot_start": "2026-08-18T13:00:00+05:30",
+      "timing_group": "EARLY",
+      "gate_in_at": "2026-08-18T12:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-047",
+      "driver_id": "bd5ed26a-3358-491a-8999-8125e8f94964",
+      "vehicle_id": "VEH003",
+      "appointment_id": "APT-PND-3D4AA02E",
+      "slot_id": "DOCK-GGN-D2-202608181300",
+      "slot_start": "2026-08-18T13:00:00+05:30",
+      "timing_group": "ON_TIME",
+      "gate_in_at": "2026-08-18T13:00:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-048",
+      "driver_id": "d3e4a8a2-206d-4c57-802e-76eb7dfedfa5",
+      "vehicle_id": "VEH007",
+      "appointment_id": "APT-PND-6BAF366B",
+      "slot_id": "DOCK-GGN-D1-202608181500",
+      "slot_start": "2026-08-18T15:00:00+05:30",
+      "timing_group": "DELAYED",
+      "gate_in_at": "2026-08-18T15:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-049",
+      "driver_id": "d7236bee-5e1d-4529-89a6-52b622788178",
+      "vehicle_id": "VEH005",
+      "appointment_id": "APT-PND-EEFCF853",
+      "slot_id": "DOCK-GGN-D1-202608181700",
+      "slot_start": "2026-08-18T17:00:00+05:30",
+      "timing_group": "EARLY",
+      "gate_in_at": "2026-08-18T16:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-050",
+      "driver_id": "DRV001",
+      "vehicle_id": "VEH002",
+      "appointment_id": "APT-PND-01ED1956",
+      "slot_id": "DOCK-GGN-D2-202608181700",
+      "slot_start": "2026-08-18T17:00:00+05:30",
+      "timing_group": "ON_TIME",
+      "gate_in_at": "2026-08-18T17:00:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-051",
+      "driver_id": "DRV002",
+      "vehicle_id": "VEH009",
+      "appointment_id": "APT-PND-71ACF609",
+      "slot_id": "DOCK-GGN-D2-202608181500",
+      "slot_start": "2026-08-18T15:00:00+05:30",
+      "timing_group": "DELAYED",
+      "gate_in_at": "2026-08-18T15:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-052",
+      "driver_id": "DRV003",
+      "vehicle_id": "VEH004",
+      "appointment_id": "APT-PND-5256C3D3",
+      "slot_id": "DOCK-GGN-D1-202608181600",
+      "slot_start": "2026-08-18T16:00:00+05:30",
+      "timing_group": "EARLY",
+      "gate_in_at": "2026-08-18T15:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-054",
+      "driver_id": "DRV005",
+      "vehicle_id": "VEH006",
+      "appointment_id": "APT-PND-E9FF832F",
+      "slot_id": "DOCK-GGN-D2-202608181600",
+      "slot_start": "2026-08-18T16:00:00+05:30",
+      "timing_group": "DELAYED",
+      "gate_in_at": "2026-08-18T16:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-055",
+      "driver_id": "DRV006",
+      "vehicle_id": "VEH011",
+      "appointment_id": "APT-PND-4E32012D",
+      "slot_id": "DOCK-GGN-D1-202608190900",
+      "slot_start": "2026-08-19T09:00:00+05:30",
+      "timing_group": "EARLY",
+      "gate_in_at": "2026-08-19T08:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-056",
+      "driver_id": "DRV007",
+      "vehicle_id": "VEH008",
+      "appointment_id": "APT-PND-0C01F4F4",
+      "slot_id": "DOCK-GGN-D2-202608190900",
+      "slot_start": "2026-08-19T09:00:00+05:30",
+      "timing_group": "ON_TIME",
+      "gate_in_at": "2026-08-19T09:00:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-057",
+      "driver_id": "DRV008",
+      "vehicle_id": "VEH012",
+      "appointment_id": "APT-PND-68C1141F",
+      "slot_id": "DOCK-GGN-D1-202608191000",
+      "slot_start": "2026-08-19T10:00:00+05:30",
+      "timing_group": "DELAYED",
+      "gate_in_at": "2026-08-19T10:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-058",
+      "driver_id": "DRV009",
+      "vehicle_id": "VEH013",
+      "appointment_id": "APT-PND-2D59CB65",
+      "slot_id": "DOCK-GGN-D2-202608191000",
+      "slot_start": "2026-08-19T10:00:00+05:30",
+      "timing_group": "EARLY",
+      "gate_in_at": "2026-08-19T09:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-059",
+      "driver_id": "DRV010",
+      "vehicle_id": "VEH014",
+      "appointment_id": "APT-PND-CDB62D8C",
+      "slot_id": "DOCK-GGN-D1-202608191100",
+      "slot_start": "2026-08-19T11:00:00+05:30",
+      "timing_group": "ON_TIME",
+      "gate_in_at": "2026-08-19T11:00:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-060",
+      "driver_id": "DRV011",
+      "vehicle_id": "VEH015",
+      "appointment_id": "APT-PND-4CC139E3",
+      "slot_id": "DOCK-GGN-D2-202608191100",
+      "slot_start": "2026-08-19T11:00:00+05:30",
+      "timing_group": "DELAYED",
+      "gate_in_at": "2026-08-19T11:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-061",
+      "driver_id": "5d271e86-bfc3-4d7b-ba62-bb6809fccad6",
+      "vehicle_id": "VEH001",
+      "appointment_id": "APT-PND-7EC3918F",
+      "slot_id": "DOCK-GGN-D1-202608191200",
+      "slot_start": "2026-08-19T12:00:00+05:30",
+      "timing_group": "EARLY",
+      "gate_in_at": "2026-08-19T11:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-062",
+      "driver_id": "bd5ed26a-3358-491a-8999-8125e8f94964",
+      "vehicle_id": "VEH003",
+      "appointment_id": "APT-PND-8A62CEE5",
+      "slot_id": "DOCK-GGN-D2-202608191200",
+      "slot_start": "2026-08-19T12:00:00+05:30",
+      "timing_group": "ON_TIME",
+      "gate_in_at": "2026-08-19T12:00:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-063",
+      "driver_id": "d3e4a8a2-206d-4c57-802e-76eb7dfedfa5",
+      "vehicle_id": "VEH007",
+      "appointment_id": "APT-PND-3F118805",
+      "slot_id": "DOCK-GGN-D1-202608191300",
+      "slot_start": "2026-08-19T13:00:00+05:30",
+      "timing_group": "DELAYED",
+      "gate_in_at": "2026-08-19T13:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-064",
+      "driver_id": "d7236bee-5e1d-4529-89a6-52b622788178",
+      "vehicle_id": "VEH005",
+      "appointment_id": "APT-PND-58784707",
+      "slot_id": "DOCK-GGN-D2-202608191300",
+      "slot_start": "2026-08-19T13:00:00+05:30",
+      "timing_group": "EARLY",
+      "gate_in_at": "2026-08-19T12:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-065",
+      "driver_id": "DRV001",
+      "vehicle_id": "VEH002",
+      "appointment_id": "APT-PND-F4D0E990",
+      "slot_id": "DOCK-GGN-D1-202608191700",
+      "slot_start": "2026-08-19T17:00:00+05:30",
+      "timing_group": "ON_TIME",
+      "gate_in_at": "2026-08-19T17:00:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-066",
+      "driver_id": "DRV002",
+      "vehicle_id": "VEH009",
+      "appointment_id": "APT-PND-CA0AFF64",
+      "slot_id": "DOCK-GGN-D1-202608191600",
+      "slot_start": "2026-08-19T16:00:00+05:30",
+      "timing_group": "DELAYED",
+      "gate_in_at": "2026-08-19T16:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-067",
+      "driver_id": "DRV003",
+      "vehicle_id": "VEH004",
+      "appointment_id": "APT-PND-73E91699",
+      "slot_id": "DOCK-GGN-D1-202608191400",
+      "slot_start": "2026-08-19T14:00:00+05:30",
+      "timing_group": "EARLY",
+      "gate_in_at": "2026-08-19T13:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-068",
+      "driver_id": "DRV004",
+      "vehicle_id": "VEH010",
+      "appointment_id": "APT-PND-2830BBEE",
+      "slot_id": "DOCK-GGN-D2-202608191400",
+      "slot_start": "2026-08-19T14:00:00+05:30",
+      "timing_group": "ON_TIME",
+      "gate_in_at": "2026-08-19T14:00:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-069",
+      "driver_id": "DRV005",
+      "vehicle_id": "VEH006",
+      "appointment_id": "APT-PND-0C30E2C2",
+      "slot_id": "DOCK-GGN-D1-202608191500",
+      "slot_start": "2026-08-19T15:00:00+05:30",
+      "timing_group": "DELAYED",
+      "gate_in_at": "2026-08-19T15:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-070",
+      "driver_id": "DRV006",
+      "vehicle_id": "VEH011",
+      "appointment_id": "APT-PND-E7E86C96",
+      "slot_id": "DOCK-GGN-D2-202608191500",
+      "slot_start": "2026-08-19T15:00:00+05:30",
+      "timing_group": "EARLY",
+      "gate_in_at": "2026-08-19T14:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-071",
+      "driver_id": "DRV007",
+      "vehicle_id": "VEH008",
+      "appointment_id": "APT-PND-4841D1D5",
+      "slot_id": "DOCK-GGN-D2-202608191600",
+      "slot_start": "2026-08-19T16:00:00+05:30",
+      "timing_group": "ON_TIME",
+      "gate_in_at": "2026-08-19T16:00:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-072",
+      "driver_id": "DRV008",
+      "vehicle_id": "VEH012",
+      "appointment_id": "APT-PND-5B74A2FC",
+      "slot_id": "DOCK-GGN-D1-202608201100",
+      "slot_start": "2026-08-20T11:00:00+05:30",
+      "timing_group": "DELAYED",
+      "gate_in_at": "2026-08-20T11:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-073",
+      "driver_id": "DRV009",
+      "vehicle_id": "VEH013",
+      "appointment_id": "APT-PND-3E6CB41E",
+      "slot_id": "DOCK-GGN-D2-202608201200",
+      "slot_start": "2026-08-20T12:00:00+05:30",
+      "timing_group": "EARLY",
+      "gate_in_at": "2026-08-20T11:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-075",
+      "driver_id": "DRV011",
+      "vehicle_id": "VEH015",
+      "appointment_id": "APT-PND-F02732ED",
+      "slot_id": "DOCK-GGN-D2-202608191700",
+      "slot_start": "2026-08-19T17:00:00+05:30",
+      "timing_group": "DELAYED",
+      "gate_in_at": "2026-08-19T17:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-076",
+      "driver_id": "5d271e86-bfc3-4d7b-ba62-bb6809fccad6",
+      "vehicle_id": "VEH001",
+      "appointment_id": "APT-PND-D062DF18",
+      "slot_id": "DOCK-GGN-D1-202608200900",
+      "slot_start": "2026-08-20T09:00:00+05:30",
+      "timing_group": "EARLY",
+      "gate_in_at": "2026-08-20T08:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-077",
+      "driver_id": "bd5ed26a-3358-491a-8999-8125e8f94964",
+      "vehicle_id": "VEH003",
+      "appointment_id": "APT-PND-F935A6A3",
+      "slot_id": "DOCK-GGN-D2-202608201100",
+      "slot_start": "2026-08-20T11:00:00+05:30",
+      "timing_group": "ON_TIME",
+      "gate_in_at": "2026-08-20T11:00:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-078",
+      "driver_id": "d3e4a8a2-206d-4c57-802e-76eb7dfedfa5",
+      "vehicle_id": "VEH007",
+      "appointment_id": "APT-PND-5AD18A17",
+      "slot_id": "DOCK-GGN-D2-202608200900",
+      "slot_start": "2026-08-20T09:00:00+05:30",
+      "timing_group": "DELAYED",
+      "gate_in_at": "2026-08-20T09:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-079",
+      "driver_id": "d7236bee-5e1d-4529-89a6-52b622788178",
+      "vehicle_id": "VEH005",
+      "appointment_id": "APT-PND-75A650B9",
+      "slot_id": "DOCK-GGN-D1-202608201000",
+      "slot_start": "2026-08-20T10:00:00+05:30",
+      "timing_group": "EARLY",
+      "gate_in_at": "2026-08-20T09:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-080",
+      "driver_id": "DRV001",
+      "vehicle_id": "VEH002",
+      "appointment_id": "APT-PND-AF5EC54F",
+      "slot_id": "DOCK-GGN-D2-202608201000",
+      "slot_start": "2026-08-20T10:00:00+05:30",
+      "timing_group": "ON_TIME",
+      "gate_in_at": "2026-08-20T10:00:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-081",
+      "driver_id": "DRV002",
+      "vehicle_id": "VEH009",
+      "appointment_id": "APT-PND-B3404EEC",
+      "slot_id": "DOCK-GGN-D1-202608201200",
+      "slot_start": "2026-08-20T12:00:00+05:30",
+      "timing_group": "DELAYED",
+      "gate_in_at": "2026-08-20T12:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-082",
+      "driver_id": "DRV003",
+      "vehicle_id": "VEH004",
+      "appointment_id": "APT-PND-50EE7B00",
+      "slot_id": "DOCK-GGN-D2-202608210900",
+      "slot_start": "2026-08-21T09:00:00+05:30",
+      "timing_group": "EARLY",
+      "gate_in_at": "2026-08-21T08:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-083",
+      "driver_id": "DRV004",
+      "vehicle_id": "VEH010",
+      "appointment_id": "APT-PND-735098D3",
+      "slot_id": "DOCK-GGN-D1-202608201300",
+      "slot_start": "2026-08-20T13:00:00+05:30",
+      "timing_group": "ON_TIME",
+      "gate_in_at": "2026-08-20T13:00:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-084",
+      "driver_id": "DRV005",
+      "vehicle_id": "VEH006",
+      "appointment_id": "APT-PND-C7A64766",
+      "slot_id": "DOCK-GGN-D2-202608201300",
+      "slot_start": "2026-08-20T13:00:00+05:30",
+      "timing_group": "DELAYED",
+      "gate_in_at": "2026-08-20T13:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-085",
+      "driver_id": "DRV006",
+      "vehicle_id": "VEH011",
+      "appointment_id": "APT-PND-3D76284E",
+      "slot_id": "DOCK-GGN-D1-202608201400",
+      "slot_start": "2026-08-20T14:00:00+05:30",
+      "timing_group": "EARLY",
+      "gate_in_at": "2026-08-20T13:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-086",
+      "driver_id": "DRV007",
+      "vehicle_id": "VEH008",
+      "appointment_id": "APT-PND-9117089F",
+      "slot_id": "DOCK-GGN-D2-202608201400",
+      "slot_start": "2026-08-20T14:00:00+05:30",
+      "timing_group": "ON_TIME",
+      "gate_in_at": "2026-08-20T14:00:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-087",
+      "driver_id": "DRV008",
+      "vehicle_id": "VEH012",
+      "appointment_id": "APT-PND-177B9954",
+      "slot_id": "DOCK-GGN-D1-202608201500",
+      "slot_start": "2026-08-20T15:00:00+05:30",
+      "timing_group": "DELAYED",
+      "gate_in_at": "2026-08-20T15:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-088",
+      "driver_id": "DRV009",
+      "vehicle_id": "VEH013",
+      "appointment_id": "APT-PND-7F6CA608",
+      "slot_id": "DOCK-GGN-D2-202608201500",
+      "slot_start": "2026-08-20T15:00:00+05:30",
+      "timing_group": "EARLY",
+      "gate_in_at": "2026-08-20T14:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-089",
+      "driver_id": "DRV010",
+      "vehicle_id": "VEH014",
+      "appointment_id": "APT-PND-C839365F",
+      "slot_id": "DOCK-GGN-D1-202608201600",
+      "slot_start": "2026-08-20T16:00:00+05:30",
+      "timing_group": "ON_TIME",
+      "gate_in_at": "2026-08-20T16:00:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-090",
+      "driver_id": "DRV011",
+      "vehicle_id": "VEH015",
+      "appointment_id": "APT-PND-42F01EEB",
+      "slot_id": "DOCK-GGN-D2-202608201600",
+      "slot_start": "2026-08-20T16:00:00+05:30",
+      "timing_group": "DELAYED",
+      "gate_in_at": "2026-08-20T16:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-091",
+      "driver_id": "5d271e86-bfc3-4d7b-ba62-bb6809fccad6",
+      "vehicle_id": "VEH001",
+      "appointment_id": "APT-PND-8508F123",
+      "slot_id": "DOCK-GGN-D1-202608201700",
+      "slot_start": "2026-08-20T17:00:00+05:30",
+      "timing_group": "EARLY",
+      "gate_in_at": "2026-08-20T16:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-092",
+      "driver_id": "bd5ed26a-3358-491a-8999-8125e8f94964",
+      "vehicle_id": "VEH003",
+      "appointment_id": "APT-PND-4838ADB5",
+      "slot_id": "DOCK-GGN-D2-202608201700",
+      "slot_start": "2026-08-20T17:00:00+05:30",
+      "timing_group": "ON_TIME",
+      "gate_in_at": "2026-08-20T17:00:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-093",
+      "driver_id": "d3e4a8a2-206d-4c57-802e-76eb7dfedfa5",
+      "vehicle_id": "VEH007",
+      "appointment_id": "APT-PND-B2754CF3",
+      "slot_id": "DOCK-GGN-D1-202608210900",
+      "slot_start": "2026-08-21T09:00:00+05:30",
+      "timing_group": "DELAYED",
+      "gate_in_at": "2026-08-21T09:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-094",
+      "driver_id": "d7236bee-5e1d-4529-89a6-52b622788178",
+      "vehicle_id": "VEH005",
+      "appointment_id": "APT-PND-9EA26EE7",
+      "slot_id": "DOCK-GGN-D1-202608211300",
+      "slot_start": "2026-08-21T13:00:00+05:30",
+      "timing_group": "EARLY",
+      "gate_in_at": "2026-08-21T12:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-095",
+      "driver_id": "DRV001",
+      "vehicle_id": "VEH002",
+      "appointment_id": "APT-PND-E386A0B4",
+      "slot_id": "DOCK-GGN-D1-202608211000",
+      "slot_start": "2026-08-21T10:00:00+05:30",
+      "timing_group": "ON_TIME",
+      "gate_in_at": "2026-08-21T10:00:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-096",
+      "driver_id": "DRV002",
+      "vehicle_id": "VEH009",
+      "appointment_id": "APT-PND-8915C979",
+      "slot_id": "DOCK-GGN-D2-202608211000",
+      "slot_start": "2026-08-21T10:00:00+05:30",
+      "timing_group": "DELAYED",
+      "gate_in_at": "2026-08-21T10:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-097",
+      "driver_id": "DRV003",
+      "vehicle_id": "VEH004",
+      "appointment_id": "APT-PND-67DA2B7B",
+      "slot_id": "DOCK-GGN-D1-202608211100",
+      "slot_start": "2026-08-21T11:00:00+05:30",
+      "timing_group": "EARLY",
+      "gate_in_at": "2026-08-21T10:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-098",
+      "driver_id": "DRV004",
+      "vehicle_id": "VEH010",
+      "appointment_id": "APT-PND-4557B602",
+      "slot_id": "DOCK-GGN-D2-202608211100",
+      "slot_start": "2026-08-21T11:00:00+05:30",
+      "timing_group": "ON_TIME",
+      "gate_in_at": "2026-08-21T11:00:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-099",
+      "driver_id": "DRV005",
+      "vehicle_id": "VEH006",
+      "appointment_id": "APT-PND-DD654E97",
+      "slot_id": "DOCK-GGN-D1-202608211200",
+      "slot_start": "2026-08-21T12:00:00+05:30",
+      "timing_group": "DELAYED",
+      "gate_in_at": "2026-08-21T12:30:00+05:30"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-100",
+      "driver_id": "DRV006",
+      "vehicle_id": "VEH011",
+      "appointment_id": "APT-PND-EE95C357",
+      "slot_id": "DOCK-GGN-D2-202608211200",
+      "slot_start": "2026-08-21T12:00:00+05:30",
+      "timing_group": "EARLY",
+      "gate_in_at": "2026-08-21T11:30:00+05:30"
+    }
+  ],
+  "seed_failures": [
+    {
+      "shipment_id": "LT-CI-full-20260815151720-001",
+      "error": "POST /api/v1/dock-scheduler/request-confirmation failed (409): {\"detail\":\"Slot is held by another shipment\"}"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-003",
+      "error": "POST /api/v1/dock-scheduler/request-confirmation failed (409): {\"detail\":\"Slot is held by another shipment\"}"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-004",
+      "error": "POST /api/v1/dock-scheduler/request-confirmation failed (409): {\"detail\":\"Slot is held by another shipment\"}"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-006",
+      "error": "POST /api/v1/dock-scheduler/request-confirmation failed (409): {\"detail\":\"Slot is held by another shipment\"}"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-007",
+      "error": "POST /api/v1/dock-scheduler/request-confirmation failed (409): {\"detail\":\"Slot is held by another shipment\"}"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-010",
+      "error": "POST /api/v1/dock-scheduler/request-confirmation failed (409): {\"detail\":\"Slot is held by another shipment\"}"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-018",
+      "error": "POST /api/v1/dock-scheduler/hold failed (409): {\"detail\":\"Selected slot is no longer available for hold\"}"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-019",
+      "error": "POST /api/v1/dock-scheduler/request-confirmation failed (409): {\"detail\":\"Slot is held by another shipment\"}"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-037",
+      "error": "POST /api/v1/dock-scheduler/request-confirmation failed (409): {\"detail\":\"Slot is held by another shipment\"}"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-041",
+      "error": "POST /api/v1/dock-scheduler/request-confirmation failed (409): {\"detail\":\"Slot is held by another shipment\"}"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-045",
+      "error": "POST /api/v1/dock-scheduler/request-confirmation failed (409): {\"detail\":\"Slot is held by another shipment\"}"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-053",
+      "error": "POST /api/v1/dock-scheduler/hold failed (409): {\"detail\":\"Selected slot is no longer available for hold\"}"
+    },
+    {
+      "shipment_id": "LT-CI-full-20260815151720-074",
+      "error": "POST /api/v1/dock-scheduler/request-confirmation failed (409): {\"detail\":\"Slot is held by another shipment\"}"
+    }
+  ]
+}

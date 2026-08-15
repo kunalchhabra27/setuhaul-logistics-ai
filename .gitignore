@@ -4,6 +4,9 @@ __pycache__/
 .venv/
 *.egg-info/
 .env
+.env.local
+agentcore/.env.local
+agentcore/.cli/
 *.db
 .DS_Store
 .env.example
