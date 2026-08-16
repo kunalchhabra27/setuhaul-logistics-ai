@@ -5,6 +5,12 @@
 # match pyproject.toml's floors so behavior doesn't drift between the two
 # deployments of the same setuhaul package.
 bedrock-agentcore
+# Never runs uvicorn/the REST API itself, but driver_chat_eta.auth (needed
+# for DriverPrincipal) also defines get_current_driver using fastapi.Depends/
+# HTTPBearer at module scope -- the import fails without this regardless of
+# whether that function is ever called. Confirmed via a real CloudWatch
+# traceback (ModuleNotFoundError: No module named 'fastapi') on first deploy.
+fastapi>=0.110
 langchain>=0.3
 # The actual, currently-live tool-calling model -- llm/agent.py's
 # is_configured()/_run_chat_turn (which this container's entrypoint calls
