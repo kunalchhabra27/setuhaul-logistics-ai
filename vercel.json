@@ -1,6 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "buildCommand": "cd frontend && npm install && npm run build",
+  "buildCommand": "npm install && npm run build",
   "outputDirectory": "frontend/dist",
   "functions": {
     "src/setuhaul/main.py": {
