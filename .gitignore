@@ -10,3 +10,4 @@ agentcore/.cli/
 *.db
 .DS_Store
 .env.example
+driver_chat_payload.json

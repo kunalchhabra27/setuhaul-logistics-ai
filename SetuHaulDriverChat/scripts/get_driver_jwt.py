@@ -80,17 +80,17 @@ def main() -> int:
         "message": args.message,
     }
 
-    print("\n--- agentcore invoke payload (paste as-is) ---\n")
-    print(json.dumps(payload))
-    print("\n--- PowerShell (run these two lines) ---\n")
-    # Assign to a variable first, then pass the variable: PowerShell quotes it
-    # correctly for the external agentcore.cmd shim this way. Passing the
-    # single-quoted JSON literal directly on the command line does NOT work on
-    # Windows -- PowerShell strips the outer quotes before handing the string
-    # to the external program, and Windows' own argv parser then splits the
-    # JSON's spaces into separate arguments ("too many arguments" error).
-    print(f"$payload = '{json.dumps(payload)}'")
-    print("agentcore invoke $payload")
+    # Writing to a file and using agentcore's own --prompt-file flag sidesteps
+    # Windows shell-quoting entirely (both single-quoted literals AND
+    # variable-passing still get re-split into separate argv entries by the
+    # agentcore.cmd npm shim's underlying arg parser -- confirmed both fail
+    # with "too many arguments" on a real Windows/PowerShell run).
+    out_path = Path("driver_chat_payload.json")
+    out_path.write_text(json.dumps(payload))
+
+    print(f"\nWrote payload to {out_path.resolve()}")
+    print("\n--- Run this ---\n")
+    print(f"agentcore invoke --prompt-file {out_path}")
     print(f"\n(access_token expires in ~{result.session.expires_in}s -- rerun this script if it goes stale)")
     return 0
 
