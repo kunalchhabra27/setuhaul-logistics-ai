@@ -82,9 +82,15 @@ def main() -> int:
 
     print("\n--- agentcore invoke payload (paste as-is) ---\n")
     print(json.dumps(payload))
-    print("\n--- PowerShell one-liner ---\n")
-    # Single-quote the JSON for PowerShell so its own double quotes survive.
-    print(f"agentcore invoke '{json.dumps(payload)}'")
+    print("\n--- PowerShell (run these two lines) ---\n")
+    # Assign to a variable first, then pass the variable: PowerShell quotes it
+    # correctly for the external agentcore.cmd shim this way. Passing the
+    # single-quoted JSON literal directly on the command line does NOT work on
+    # Windows -- PowerShell strips the outer quotes before handing the string
+    # to the external program, and Windows' own argv parser then splits the
+    # JSON's spaces into separate arguments ("too many arguments" error).
+    print(f"$payload = '{json.dumps(payload)}'")
+    print("agentcore invoke $payload")
     print(f"\n(access_token expires in ~{result.session.expires_in}s -- rerun this script if it goes stale)")
     return 0
 
