@@ -13,6 +13,7 @@ somewhere.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta
 
 from setuhaul.backend._testing.fake_supabase import FakeSupabaseClient
 from setuhaul.backend.driver_chat_eta import redis_cache
@@ -76,6 +77,43 @@ def test_list_docks_is_served_from_cache_on_the_second_call(monkeypatch, tables)
 
     second = repo.list_docks(FACILITY)
     assert len(second) == 2
+
+
+def test_list_chat_messages_returns_the_newest_messages_not_the_oldest(tables):
+    # Regression test: list_chat_messages used to sort ascending by
+    # message_ts and then apply .limit(100) directly -- since PostgREST
+    # applies ORDER BY before LIMIT, that returned the OLDEST 100 messages on
+    # a thread, not the newest. Any thread that grew past 100 messages (easy
+    # over a long testing/demo session reusing the same driver+shipment) got
+    # permanently stuck showing only its first 100 messages forever: new
+    # messages were still being written to Supabase correctly, they just
+    # never appeared in the driver-facing snapshot or the LLM's hydrated
+    # history, making the assistant look like it had silently stopped
+    # responding.
+    thread_id = "TH-OVERFLOW"
+    base = datetime(2026, 1, 1)
+    tables["chat_threads"] = [{"thread_id": thread_id, "driver_id": "DRV001", "thread_status": "OPEN"}]
+    tables["chat_messages"] = [
+        {
+            "chat_message_id": f"MSG-{i:03d}",
+            "thread_id": thread_id,
+            "sender_type": "DRIVER" if i % 2 == 0 else "AGENT",
+            "message_text": f"message {i}",
+            "message_ts": (base + timedelta(minutes=i)).isoformat(),
+        }
+        for i in range(150)
+    ]
+
+    client = FakeSupabaseClient(tables)
+    repo = DriverChatRepository(client)
+
+    rows = repo.list_chat_messages(thread_id, limit=100)
+
+    assert len(rows) == 100
+    # Newest 100 (messages 50-149), still returned oldest-first.
+    assert [r["chat_message_id"] for r in rows] == [f"MSG-{i:03d}" for i in range(50, 150)]
+    assert rows[0]["message_text"] == "message 50"
+    assert rows[-1]["message_text"] == "message 149"
 
 
 def test_get_facility_falls_back_to_supabase_when_redis_is_unavailable(monkeypatch, tables):

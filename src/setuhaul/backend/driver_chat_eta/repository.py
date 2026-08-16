@@ -432,17 +432,39 @@ class DriverChatRepository:
             self._raise_persistence(exc)
 
     def list_chat_messages(self, thread_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        """The most recent `limit` messages on a thread, in chronological
+        (oldest-first) order.
+
+        This used to sort ascending and then apply the limit directly, which
+        -- since Postgres/PostgREST applies ORDER BY before LIMIT -- returned
+        the OLDEST `limit` messages, not the newest. That's backwards for
+        every caller: both the driver-facing snapshot (_build_snapshot_
+        sequential, what ChatPanel.tsx renders) and the LLM agent's history
+        hydration (llm/agent.py's _hydrate_from_persisted) want the most
+        recent conversation, not the very first messages ever sent. A thread
+        that stayed under 100 messages never noticed; one that grew past it
+        (any driver/shipment combo reused across enough chat turns -- exactly
+        what happens over a long testing/demo session) got permanently stuck
+        showing only its oldest 100 messages forever, no matter how many new
+        ones were sent and correctly persisted -- from the driver's
+        perspective the assistant looked like it had stopped responding,
+        even though every new message and reply was being written to
+        Supabase just fine. Sort descending to get the newest rows under the
+        limit, then reverse back to ascending order before returning, since
+        every caller expects chronological order.
+        """
         try:
-            return self._rows(
+            rows = self._rows(
                 self.client.table("chat_messages")
                 .select("*")
                 .eq("thread_id", thread_id)
-                .order("message_ts", desc=False)
+                .order("message_ts", desc=True)
                 .limit(limit)
                 .execute()
             )
         except APIError as exc:
             self._raise_persistence(exc)
+        return list(reversed(rows))
 
     def insert_chat_message(self, payload: dict[str, Any]) -> dict[str, Any]:
         try:

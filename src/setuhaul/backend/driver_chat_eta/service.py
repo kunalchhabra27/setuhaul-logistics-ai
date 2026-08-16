@@ -127,6 +127,40 @@ _LEAVE_BEFORE_PATTERN = re.compile(
     r"(?:before|leave by|out by|तक)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", re.IGNORECASE
 )
 
+# General-question intent patterns for the regex fallback. Before this was
+# added, _handle_chat_message_regex treated EVERY message as a delay report
+# and unconditionally tried to auto-book a slot -- so once a shipment had a
+# confirmed appointment, any question at all ("what is my name?", "hi",
+# "what's my status?") got the exact same canned already-booked reply,
+# because that's the only thing this fallback ever computed. That made the
+# chatbot look completely broken whenever the LLM path was unavailable (e.g.
+# HUGGINGFACEHUB_API_TOKEN quota exhausted -- HTTP 402 from HF's Inference
+# Providers router). These patterns let plain factual questions get a real,
+# data-backed answer without touching booking/exception state at all, while
+# anything that actually looks like a delay report or an explicit booking
+# request still goes through the existing pipeline below unchanged.
+_ACTION_VERB_PATTERN = re.compile(
+    r"\b(book|reserve|hold|reschedule|postpone|cancel|swap|"
+    r"change (my|the)?\s*(dock|slot|appointment)?|"
+    r"request (a |an )?(new |different |other )?(dock|slot)|"
+    r"move (my|the) (dock|slot|appointment))\b",
+    re.IGNORECASE,
+)
+_GREETING_ONLY_PATTERN = re.compile(r"^\s*(hi+|hello+|hey+|namaste|yo)[\s!.,]*$", re.IGNORECASE)
+_NAME_INTENT_PATTERN = re.compile(r"\bmy name\b|\bwho am i\b", re.IGNORECASE)
+_DOCK_INFO_INTENT_PATTERN = re.compile(r"\b(dock|slot|appointment|bay)\b", re.IGNORECASE)
+_ETA_INTENT_PATTERN = re.compile(
+    r"\beta\b|\barriv(e|al|ing)\b|\bwhen.*(reach|arrive|get there)\b", re.IGNORECASE
+)
+_STATUS_INTENT_PATTERN = re.compile(r"\bstatus\b", re.IGNORECASE)
+_SHIPMENT_INFO_INTENT_PATTERN = re.compile(
+    r"\bshipment\b.*\b(id|number|detail)|\bwhich shipment\b|\bwhat.*shipment\b", re.IGNORECASE
+)
+_NEXT_STEP_INTENT_PATTERN = re.compile(
+    r"\bwhat (should|do) i do\b|\bnext step\b|\bwhat('?s| is) next\b", re.IGNORECASE
+)
+_HELP_INTENT_PATTERN = re.compile(r"\bhelp\b|\bwhat can you do\b|\bcapabilit", re.IGNORECASE)
+
 
 def _normalize_digits(text: str) -> str:
     """Convert Devanagari numerals (०-९) to ASCII digits so the regex
@@ -547,6 +581,22 @@ class DriverChatService:
         declared_eta = planned_eta + timedelta(minutes=delay_minutes) if delay_minutes else planned_eta
         max_leave_dt = self._parse_leave_before(text, reference_date=declared_eta.date())
 
+        # Only treat this turn as a delay report / booking request if it
+        # actually looks like one -- a bare factual question ("what is my
+        # name?", "what's my ETA?", "hi") has no delay/leave-by signal and no
+        # booking verb, so it should never fall into the exception-report +
+        # auto-book pipeline below. See the intent-pattern comments above for
+        # why this branch exists.
+        has_actionable_signal = bool(delay_minutes) or max_leave_dt is not None or bool(
+            _ACTION_VERB_PATTERN.search(text)
+        )
+        if not has_actionable_signal:
+            general_reply = self._answer_general_question(
+                principal=principal, driver=driver, shipment_row=shipment_row, text=text
+            )
+            if general_reply is not None:
+                return self._reply_general_question(principal, driver, shipment_row, text, general_reply)
+
         # Record the driver-declared ETA in its own audit table, and reflect
         # it on the shipment so other consumers see the latest value.
         self.repository.insert_eta_update(
@@ -716,6 +766,147 @@ class DriverChatService:
             agent_message=ChatMessageSummary.model_validate(agent_row),
             suggested_options=options,
             exception=DriverExceptionSummary.model_validate(exception_row),
+            snapshot=snapshot,
+        )
+
+    def _answer_general_question(
+        self, *, principal: DriverPrincipal, driver: DriverProfile, shipment_row: dict, text: str
+    ) -> str | None:
+        """Best-effort, data-backed answer for a factual driver question that
+        has no delay/booking signal (see `has_actionable_signal` above).
+        Returns None if the text doesn't match any recognized intent, so the
+        caller can fall through to a generic capabilities reply rather than
+        silently doing nothing. Read-only: never touches exception, thread,
+        or booking state -- that's the whole point of this branch existing.
+
+        This is necessarily much shallower than the real LLM agent (no true
+        language understanding, just keyword/regex matching), but it's a
+        large step up from the previous behavior, which had no concept of a
+        read-only question at all and always ran the full delay-report +
+        auto-book pipeline no matter what was asked.
+        """
+        stripped = text.strip()
+
+        if _GREETING_ONLY_PATTERN.match(stripped):
+            return (
+                f"Hi {driver.driver_name or 'there'}, I'm your dispatch assistant. Ask me about your name, "
+                "shipment status, ETA, or dock appointment -- or tell me if you're running late."
+            )
+
+        if _NAME_INTENT_PATTERN.search(stripped):
+            return f"Your name is {driver.driver_name or 'not set on your driver profile yet'}."
+
+        # Checked before the more generic ETA/status patterns so "what's the
+        # status of my dock appointment?" describes the appointment, not the
+        # shipment -- _ACTION_VERB_PATTERN already ruled out real booking
+        # requests before this method is even called.
+        if _DOCK_INFO_INTENT_PATTERN.search(stripped):
+            # Needs the slot/dock join (dock_code, slot_start_ts, slot_end_ts)
+            # that only the assembled snapshot has -- the raw `appointments`
+            # table row from get_current_appointment_for_shipment() doesn't
+            # carry those columns (see AppointmentSummary's docstring).
+            snapshot = self._build_snapshot(principal, driver)
+            appointment = snapshot.appointment
+            if appointment and appointment.appointment_status == "CONFIRMED":
+                start = appointment.slot_start_ts or ""
+                end = appointment.slot_end_ts or ""
+                start_str = start[11:16] if len(start) >= 16 else start
+                end_str = end[11:16] if len(end) >= 16 else end
+                dock = appointment.dock_code or "your assigned dock"
+                return (
+                    f"You have a confirmed dock appointment at {dock}, {start_str}-{end_str}. "
+                    "Let me know if you're running late and I'll look for a better slot."
+                )
+            return (
+                "You don't have a confirmed dock appointment yet. Tell me if you're running late "
+                "(e.g. \"I'm 30 minutes late\") and I'll find you a compatible slot."
+            )
+
+        if _ETA_INTENT_PATTERN.search(stripped):
+            eta = shipment_row.get("latest_eta_ts") or shipment_row.get("original_eta_ts")
+            return f"Your shipment's latest ETA is {eta}." if eta else "There's no ETA recorded for your shipment yet."
+
+        if _STATUS_INTENT_PATTERN.search(stripped):
+            status = shipment_row.get("current_status")
+            return (
+                f"Your current shipment status is {status.replace('_', ' ').title()}."
+                if status
+                else "I couldn't find a status for your current shipment."
+            )
+
+        if _SHIPMENT_INFO_INTENT_PATTERN.search(stripped):
+            bits = [f"Your shipment ID is {shipment_row['shipment_id']}"]
+            if shipment_row.get("destination_facility_id"):
+                facility_row = self.repository.get_facility(shipment_row["destination_facility_id"])
+                if facility_row:
+                    bits.append(f"headed to {facility_row.get('facility_name') or facility_row['facility_id']}")
+            status = shipment_row.get("current_status")
+            if status:
+                bits.append(f"status is {status.replace('_', ' ').title()}")
+            return ", ".join(bits) + "."
+
+        if _NEXT_STEP_INTENT_PATTERN.search(stripped):
+            return (
+                "Please proceed to the facility for your appointment. Let me know when you arrive at the gate, "
+                "in the yard, or at the dock, and I'll keep your status updated."
+            )
+
+        if _HELP_INTENT_PATTERN.search(stripped):
+            return (
+                "I can answer questions about your name, shipment status, ETA, or dock appointment, and I can "
+                "report a delay and find you a new dock slot. Just ask, or use the quick-reply buttons below."
+            )
+
+        return None
+
+    def _reply_general_question(
+        self,
+        principal: DriverPrincipal,
+        driver: DriverProfile,
+        shipment_row: dict,
+        text: str,
+        reply_text: str,
+    ) -> ChatResponse:
+        """Persist a read-only Q&A exchange and return it, without creating
+        or mutating any exception/booking state -- see
+        `_answer_general_question` above for why this branch exists."""
+        thread_row = self.repository.get_open_thread_for_driver(principal.user_id)
+        if thread_row is None:
+            thread_row = self.repository.create_thread(
+                {
+                    "thread_id": _new_id("TH"),
+                    "driver_id": principal.user_id,
+                    "shipment_id": shipment_row["shipment_id"],
+                    "opened_at": _now_iso(),
+                    "thread_status": "OPEN",
+                    "thread_intent": "GENERAL_QUESTION",
+                }
+            )
+        self.repository.insert_chat_message(
+            {
+                "chat_message_id": _new_id("MSG"),
+                "thread_id": thread_row["thread_id"],
+                "sender_type": "DRIVER",
+                "sender_reference": principal.user_id,
+                "message_text": text,
+                "message_ts": _now_iso(),
+            }
+        )
+        agent_row = self.repository.insert_chat_message(
+            {
+                "chat_message_id": _new_id("MSG"),
+                "thread_id": thread_row["thread_id"],
+                "sender_type": "AGENT",
+                "message_text": reply_text,
+                "message_ts": _now_iso(),
+            }
+        )
+        exception_row = self.repository.get_active_exception_for_driver(principal.user_id)
+        snapshot = self._build_snapshot(principal, driver)
+        return ChatResponse(
+            agent_message=ChatMessageSummary.model_validate(agent_row),
+            suggested_options=snapshot.slot_options,
+            exception=DriverExceptionSummary.model_validate(exception_row) if exception_row else None,
             snapshot=snapshot,
         )
 

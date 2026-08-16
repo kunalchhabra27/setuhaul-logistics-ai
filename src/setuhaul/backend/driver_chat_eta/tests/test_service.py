@@ -329,6 +329,58 @@ def test_regex_fallback_escalates_and_says_so_when_nothing_is_compatible(service
     assert exceptions and exceptions[-1]["exception_status"] == "ESCALATED"
 
 
+def test_regex_fallback_answers_name_question_without_touching_booking_state(service, principal, tables):
+    # Regression test for the bug that made the chatbot look "completely
+    # down" whenever the LLM path was unavailable (e.g. HF Inference
+    # Providers quota exhausted -- HTTP 402): _handle_chat_message_regex
+    # used to treat EVERY message as a delay report and unconditionally
+    # auto-book, so a plain factual question got the exact same
+    # already-booked/escalation reply as any other message, and silently
+    # created a driver_exceptions row it had no business creating.
+    response = service._handle_chat_message_regex(principal, "what is my name?")
+
+    assert "Rajesh Kumar" in response.agent_message.message_text
+    assert tables["driver_exceptions"] == []
+    assert tables["eta_updates"] == []
+
+
+def test_regex_fallback_answers_shipment_status_question(service, principal, tables):
+    response = service._handle_chat_message_regex(principal, "what is the status of my shipment?")
+
+    assert "Planned" in response.agent_message.message_text
+    assert tables["driver_exceptions"] == []
+
+
+def test_regex_fallback_greeting_does_not_create_an_exception(service, principal, tables):
+    response = service._handle_chat_message_regex(principal, "hi")
+
+    assert response.agent_message.message_text
+    assert tables["driver_exceptions"] == []
+    # The exchange is still persisted so it shows up in chat history.
+    assert any(m["message_text"] == "hi" for m in tables["chat_messages"])
+
+
+def test_regex_fallback_still_auto_books_when_message_has_a_delay_signal(service, principal, tables):
+    # Same message shape as the pre-existing regression tests above --
+    # confirms the new intent gate doesn't accidentally swallow real delay
+    # reports into the Q&A branch.
+    response = service._handle_chat_message_regex(principal, "I have a tyre issue, 5 minutes late")
+
+    assert "Requested dock slot" in response.agent_message.message_text
+    exceptions = tables["driver_exceptions"]
+    assert exceptions and exceptions[-1]["exception_status"] == "WAITING_CONFIRMATION"
+
+
+def test_regex_fallback_booking_verb_without_delay_still_treated_as_actionable(service, principal, tables):
+    # "book d1" has no delay/leave-by signal but is clearly a booking
+    # request, not a factual question -- must still go through the real
+    # pipeline rather than getting a generic Q&A non-answer.
+    response = service._handle_chat_message_regex(principal, "please book a dock slot for me")
+
+    exceptions = tables["driver_exceptions"]
+    assert exceptions, "booking-verb message should have gone through the exception/auto-book pipeline"
+
+
 def test_auto_book_escalates_when_nothing_is_compatible(service, principal, tables):
     # Make every slot incompatible by shrinking every dock's capacity below
     # the shipment's load weight -- mirrors the real SHP1027-style data
