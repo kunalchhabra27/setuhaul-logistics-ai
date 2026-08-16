@@ -166,6 +166,24 @@ _CANCEL_REQUEST_PATTERN = re.compile(
     r"|^\s*cancel[\s!.,]*$",
     re.IGNORECASE,
 )
+# Driver explicitly asking for a human (the 46-section prompt's ESCALATION
+# intent category). Previously unhandled by the regex fallback entirely --
+# the only path to a human was the side effect of a delay report finding
+# nothing feasible (see the auto-book "escalated" status below); a driver
+# who just says "get me a real person" with no delay to report had nowhere
+# to go but the generic capabilities reply, over and over. Scoped to an
+# explicit ask for a person, not any mention of "human"/"coordinator" in
+# passing, and deliberately does NOT match "help" (that's _HELP_INTENT_
+# PATTERN, a request for what this bot itself can do, not for a human).
+_HUMAN_ESCALATION_PATTERN = re.compile(
+    r"\b(talk|speak|chat)\b[^.?!]{0,20}\b(to|with)\b[^.?!]{0,15}\b(human|person|someone|somebody|agent|"
+    r"representative|coordinator|dispatcher|dispatch)\b"
+    r"|\b(connect|transfer|put)\s+me\b[^.?!]{0,20}\b(human|person|someone|coordinator|dispatch\w*|agent)\b"
+    r"|\breal\s+(human|person)\b"
+    r"|\bhuman\s+(help|support|coordinator)\b"
+    r"|\bescalate\b",
+    re.IGNORECASE,
+)
 # Driver selecting a specific option by its position in a previously-shown
 # list ("take the second one", "the first option", "option 2", "I'll go
 # with the 3rd"). Deliberately word/digit-based only (no "slot N" form) --
@@ -753,6 +771,22 @@ class DriverChatService:
                 principal, driver, shipment_row, text, self._compose_cancel_reply(cancel_result)
             )
 
+        # Same treatment -- a driver explicitly asking for a human is never
+        # also a delay report or a booking request, and (per the 46-section
+        # prompt's rule 22/golden rule) must always be honored rather than
+        # met with "I don't understand" just because the deterministic
+        # fallback doesn't recognize the specific situation.
+        if _HUMAN_ESCALATION_PATTERN.search(text):
+            self._escalate_on_driver_request(principal, shipment_row, text)
+            return self._reply_general_question(
+                principal,
+                driver,
+                shipment_row,
+                text,
+                "Okay -- I'm connecting you with a human coordinator now. They'll pick up this "
+                "conversation and follow up with you directly.",
+            )
+
         # Same treatment -- a driver picking a specific option by its
         # position in a list ("take the second one") is an explicit
         # selection, not a delay report, and must never be swallowed by the
@@ -1171,16 +1205,28 @@ class DriverChatService:
         booking signal (so it must never reach the exception-report +
         auto-book pipeline -- see the has_actionable_signal check above)
         that ALSO doesn't match any specific pattern in
-        `_answer_general_question` -- e.g. a real question phrased in a way
-        none of those patterns catch. Read-only, honest about not
-        understanding, and points the driver at what this fallback layer
-        can actually help with, instead of guessing an action nobody asked
-        for."""
+        `_answer_general_question` or the explicit-branch checks above it
+        in `_handle_chat_message_regex` (cancel, human-escalation,
+        ordinal-selection) -- e.g. a real question phrased in a way none of
+        those catch. Read-only, honest about not understanding.
+
+        Deliberately does NOT frame this as a fixed, short list of topics
+        (an earlier version did, and read as if the bot were incapable of
+        anything outside it) -- this deterministic layer is genuinely
+        narrower than the LLM path, but the driver shouldn't be told that in
+        a way that discourages them from just asking, or from asking for a
+        person. Kept in sync with what this fallback layer can actually do
+        as that list grows (see tasks #149-153 in the codebase history:
+        cancel, multi-shipment disambiguation, compatibility/wait-time
+        questions, and "take the second one" have all been added since the
+        original narrower version of this reply shipped)."""
         name = driver.driver_name or "there"
         return (
-            f"I'm not sure how to answer that, {name} -- I can tell you your name, shipment status, ETA, "
-            "destination facility, or dock appointment, and I can log a delay or an early arrival and check "
-            "for a compatible dock slot. Could you rephrase, or ask about one of those?"
+            f"I couldn't quite match that to something I can check for you, {name}. I can help with your "
+            "shipment, ETA, dock appointment or its compatibility with your vehicle, a delay or early "
+            "arrival, or a request you already made (including cancelling it or picking one of the options "
+            "I showed you) -- or just say \"talk to someone\" and I'll bring a person into this "
+            "conversation. Could you rephrase, or tell me which of those you need?"
         )
 
     def _reply_general_question(
@@ -2134,6 +2180,52 @@ class DriverChatService:
             "dock_code": pending.get("dock_code"),
             "message": "Your pending dock slot request has been cancelled.",
         }
+
+    def _escalate_on_driver_request(
+        self, principal: DriverPrincipal, shipment_row: dict, reason_text: str
+    ) -> EscalateResponse:
+        """Hand a thread to a human coordinator because the DRIVER explicitly
+        asked for one -- the 46-section prompt's rule 22 lists this as a
+        real escalation trigger on its own, independent of whether any dock
+        slot search has come up empty. `escalate()` below only actually
+        marks something ESCALATED when an exception/thread already exists,
+        which is fine for the LLM tool (Gemini/HF always calls
+        report_delay_or_eta_change first per rule 2) but leaves the regex
+        fallback with nothing to escalate if the driver's very first message
+        is "get me a person" with no delay reported yet. Bootstrap a minimal
+        thread/exception in that case -- unlike report_exception, this never
+        fabricates a delay or ETA, since the driver didn't report one; it's
+        recorded as exception_type UNKNOWN specifically so it's never
+        confused with a real DELAY/BREAKDOWN report in the audit trail.
+        """
+        thread_row = self.repository.get_open_thread_for_driver(principal.user_id)
+        if thread_row is None:
+            thread_row = self.repository.create_thread(
+                {
+                    "thread_id": _new_id("TH"),
+                    "driver_id": principal.user_id,
+                    "shipment_id": shipment_row["shipment_id"],
+                    "opened_at": _now_iso(),
+                    "thread_status": "OPEN",
+                    "thread_intent": "OTHER",
+                }
+            )
+        exception_row = self.repository.get_active_exception_for_driver(principal.user_id)
+        if exception_row is None:
+            self.repository.create_exception(
+                {
+                    "exception_id": _new_id("EXC"),
+                    "shipment_id": shipment_row["shipment_id"],
+                    "driver_id": principal.user_id,
+                    "thread_id": thread_row["thread_id"],
+                    "exception_type": "UNKNOWN",
+                    "reported_at": _now_iso(),
+                    "severity_code": "LOW",
+                    "exception_status": "OPEN",
+                    "description": "Driver asked to speak with a human coordinator.",
+                }
+            )
+        return self.escalate(principal, f"Driver requested a human coordinator: {reason_text.strip()}")
 
     def get_latest_change_request_status(self, principal: DriverPrincipal) -> dict:
         """Status of the most recently filed dock-slot change request for the

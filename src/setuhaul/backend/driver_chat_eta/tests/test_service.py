@@ -576,6 +576,50 @@ def test_regex_fallback_cancel_message_with_nothing_pending_does_not_create_an_e
     assert service.dock_scheduler.list_change_requests() == []
 
 
+def test_regex_fallback_human_request_escalates_even_with_nothing_reported_yet(service, principal, tables):
+    # Regression test: the regex fallback's only path to a human used to be
+    # the side effect of a delay report finding nothing feasible -- a driver
+    # whose very first message is "get me a real person" (no delay/booking
+    # signal at all) had no exception/thread to escalate and fell into the
+    # generic "I don't understand" reply instead. _escalate_on_driver_request
+    # must bootstrap a minimal thread/exception (never a fabricated delay)
+    # so the escalation actually takes effect from a cold start.
+    response = service._handle_chat_message_regex(principal, "can you connect me with a real person")
+
+    assert "human coordinator" in response.agent_message.message_text.lower()
+    exceptions = tables["driver_exceptions"]
+    assert exceptions and exceptions[-1]["exception_status"] == "ESCALATED"
+    assert exceptions[-1]["exception_type"] == "UNKNOWN"
+    threads = tables["chat_threads"]
+    assert threads and threads[-1]["thread_status"] == "ESCALATED"
+
+
+def test_regex_fallback_human_request_escalates_an_existing_thread(service, principal, tables):
+    # When a delay was already reported, escalating a human request must
+    # reuse that same thread/exception rather than bootstrapping a second,
+    # unrelated one.
+    service._handle_chat_message_regex(principal, "I have a tyre issue, 5 minutes late")
+    response = service._handle_chat_message_regex(principal, "please talk to a human coordinator")
+
+    assert "human coordinator" in response.agent_message.message_text.lower()
+    exceptions = [e for e in tables["driver_exceptions"] if e["shipment_id"] == SHIPMENT_ID]
+    assert len(exceptions) == 1
+    assert exceptions[0]["exception_status"] == "ESCALATED"
+
+
+def test_regex_fallback_unmatched_question_offers_a_human_without_escalating(service, principal, tables):
+    # The broadened default reply mentions a driver can ask for a person,
+    # but merely landing on this fallback for an unrecognized question must
+    # never itself trigger escalation -- see
+    # test_regex_fallback_unrecognized_question_gets_a_fallback_reply_not_escalation
+    # for the original regression this must keep passing.
+    response = service._handle_chat_message_regex(principal, "can you tell me something random about my trip?")
+
+    text = response.agent_message.message_text.lower()
+    assert "talk to someone" in text
+    assert tables["driver_exceptions"] == []
+
+
 def test_regex_fallback_files_a_request_instead_of_just_listing_options(service, principal, tables):
     # Regression test: the regex fallback (used when HUGGINGFACEHUB_API_TOKEN
     # isn't configured, or the LLM path fails at runtime) used to only ever
