@@ -360,6 +360,36 @@ def test_regex_fallback_greeting_does_not_create_an_exception(service, principal
     assert any(m["message_text"] == "hi" for m in tables["chat_messages"])
 
 
+def test_regex_fallback_answers_destination_facility_question(service, principal, tables):
+    response = service._handle_chat_message_regex(principal, "Do I know the destination facility?")
+
+    assert "Jaipur DC" in response.agent_message.message_text
+    assert tables["driver_exceptions"] == []
+
+
+def test_regex_fallback_unrecognized_question_gets_a_fallback_reply_not_escalation(service, principal, tables):
+    # Regression test for a live screenshot: "Do I know the destination
+    # facility?" (before the facility-info intent above existed) matched no
+    # pattern in _answer_general_question, which returned None -- and the
+    # caller only ever returned early when that method found a match, so a
+    # None fell straight through into the delay-report + auto-book
+    # pipeline below. With a 0-minute "delay" and nothing feasible right
+    # then, the driver got a completely unrelated "escalated to a human
+    # coordinator" card in response to a plain question, and a spurious
+    # driver_exceptions row got created for a message that was never a
+    # delay report at all. Use a message that still matches nothing today
+    # (facility questions are now handled above) to prove the fallthrough
+    # itself is fixed, not just this one phrasing.
+    response = service._handle_chat_message_regex(principal, "can you tell me something random about my trip?")
+
+    text = response.agent_message.message_text.lower()
+    assert "escalat" not in text
+    assert "coordinator" not in text
+    assert tables["driver_exceptions"] == []
+    assert tables["eta_updates"] == []
+    assert service.dock_scheduler.list_change_requests() == []
+
+
 def test_regex_fallback_still_auto_books_when_message_has_a_delay_signal(service, principal, tables):
     # Same message shape as the pre-existing regression tests above --
     # confirms the new intent gate doesn't accidentally swallow real delay

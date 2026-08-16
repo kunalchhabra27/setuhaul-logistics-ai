@@ -186,6 +186,10 @@ _STATUS_INTENT_PATTERN = re.compile(r"\bstatus\b", re.IGNORECASE)
 _SHIPMENT_INFO_INTENT_PATTERN = re.compile(
     r"\bshipment\b.*\b(id|number|detail)|\bwhich shipment\b|\bwhat.*shipment\b", re.IGNORECASE
 )
+_FACILITY_INTENT_PATTERN = re.compile(
+    r"\b(facility|warehouse|destination)\b|\bwhere am i (headed|going)\b|\bwhich (facility|warehouse)\b",
+    re.IGNORECASE,
+)
 _NEXT_STEP_INTENT_PATTERN = re.compile(
     r"\bwhat (should|do) i do\b|\bnext step\b|\bwhat('?s| is) next\b", re.IGNORECASE
 )
@@ -647,11 +651,30 @@ class DriverChatService:
             or bool(_ACTION_VERB_PATTERN.search(text))
         )
         if not has_actionable_signal:
+            # Bug fix: this used to only return here when
+            # _answer_general_question recognized a specific intent
+            # (name/status/ETA/dock/etc). Any OTHER non-actionable message
+            # -- a real question that just didn't match one of those
+            # specific patterns, e.g. "do I know the destination facility?"
+            # -- silently fell through to the code below, which is the
+            # delay-report + auto-book pipeline: it logged a spurious
+            # driver_exceptions row with a 0-minute delay, tried to
+            # auto-book against the shipment's unchanged ETA, and (if
+            # nothing happened to be feasible right then) showed the driver
+            # a completely irrelevant "escalated to a human coordinator"
+            # card in response to a plain question. `has_actionable_signal`
+            # already established this message has no delay/leave-by/
+            # early-arrival/booking signal, so it must never reach that
+            # pipeline no matter what `_answer_general_question` returns --
+            # fall back to a generic, honest "I don't have that / here's
+            # what I can help with" reply instead of guessing what the
+            # driver wants.
             general_reply = self._answer_general_question(
                 principal=principal, driver=driver, shipment_row=shipment_row, text=text
             )
-            if general_reply is not None:
-                return self._reply_general_question(principal, driver, shipment_row, text, general_reply)
+            if general_reply is None:
+                general_reply = self._default_general_reply(driver)
+            return self._reply_general_question(principal, driver, shipment_row, text, general_reply)
 
         # Record the driver-declared ETA in its own audit table, and reflect
         # it on the shipment so other consumers see the latest value.
@@ -920,6 +943,15 @@ class DriverChatService:
                 else "I couldn't find a status for your current shipment."
             )
 
+        if _FACILITY_INTENT_PATTERN.search(stripped):
+            if shipment_row.get("destination_facility_id"):
+                facility_row = self.repository.get_facility(shipment_row["destination_facility_id"])
+                if facility_row:
+                    name = facility_row.get("facility_name") or facility_row["facility_id"]
+                    city = facility_row.get("city")
+                    return f"Yes -- your destination facility is {name}{f', {city}' if city else ''}."
+            return "I don't have a destination facility on file for your current shipment yet."
+
         if _SHIPMENT_INFO_INTENT_PATTERN.search(stripped):
             bits = [f"Your shipment ID is {shipment_row['shipment_id']}"]
             if shipment_row.get("destination_facility_id"):
@@ -944,6 +976,24 @@ class DriverChatService:
             )
 
         return None
+
+    @staticmethod
+    def _default_general_reply(driver: DriverProfile) -> str:
+        """Fallback reply for a message with no delay/leave-by/early-arrival/
+        booking signal (so it must never reach the exception-report +
+        auto-book pipeline -- see the has_actionable_signal check above)
+        that ALSO doesn't match any specific pattern in
+        `_answer_general_question` -- e.g. a real question phrased in a way
+        none of those patterns catch. Read-only, honest about not
+        understanding, and points the driver at what this fallback layer
+        can actually help with, instead of guessing an action nobody asked
+        for."""
+        name = driver.driver_name or "there"
+        return (
+            f"I'm not sure how to answer that, {name} -- I can tell you your name, shipment status, ETA, "
+            "destination facility, or dock appointment, and I can log a delay or an early arrival and check "
+            "for a compatible dock slot. Could you rephrase, or ask about one of those?"
+        )
 
     def _reply_general_question(
         self,
