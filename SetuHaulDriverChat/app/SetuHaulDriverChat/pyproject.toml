@@ -14,6 +14,15 @@ dependencies = [
     "langchain >= 1.0.3",
     "bedrock-agentcore >= 1.8.0",
     "botocore[crt] >= 1.35.0",
+    # This container never runs uvicorn/the FastAPI app itself, but the
+    # vendored setuhaul.backend.driver_chat_eta.auth module (imported for
+    # DriverPrincipal, which main.py needs) also defines get_current_driver
+    # using `fastapi.Depends`/`HTTPBearer` at module level -- Python has to
+    # execute that whole module just to reach DriverPrincipal, so the import
+    # fails with ModuleNotFoundError: No module named 'fastapi' without this,
+    # even though nothing in this container ever calls get_current_driver.
+    # Confirmed via a real CloudWatch traceback after the first live deploy.
+    "fastapi >= 0.110",
     # The actual, currently-live tool-calling model (tasks #136/#137 in repo
     # history swapped this app off Gemini/Claude onto an open-weights model
     # served via Hugging Face Inference Providers -- see
