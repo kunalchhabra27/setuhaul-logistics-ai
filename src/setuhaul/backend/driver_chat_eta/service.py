@@ -146,6 +146,36 @@ _ACTION_VERB_PATTERN = re.compile(
     r"move (my|the) (dock|slot|appointment))\b",
     re.IGNORECASE,
 )
+# Early-arrival intent -- a driver reaching the facility SOONER than
+# planned ("I'm reaching earlier, is there an earlier slot?", "running
+# early", "any earlier timings?"). This used to have no handling at all:
+# with no delay/leave-by number and no booking verb, `has_actionable_signal`
+# was False, so the message fell into `_answer_general_question`, where the
+# generic `_DOCK_INFO_INTENT_PATTERN` ("slot"/"timing"/"appointment") caught
+# it first and just repeated the existing confirmed appointment verbatim --
+# the driver's actual ask (check for something earlier) was silently
+# ignored. Two forms are handled differently (see the main flow below):
+# an explicit number/time ("reaching 20 min early", "I'll be there by
+# 2:30pm") is treated as a real driver-declared ETA update and re-runs the
+# normal auto-book pipeline, which already knows how to move a shipment to
+# a genuinely earlier compatible slot (see `better_slot_available` in
+# auto_book_earliest_feasible_slot). A vague report with no number is
+# answered with one clarifying question instead of guessing an ETA (see
+# ETA RULES: never fabricate a value the driver didn't give).
+_EARLY_ARRIVAL_PATTERN = re.compile(
+    r"\b(reach\w*|arriv\w*|get(?:ting)?\s+there|come|coming|be there)\b[^.?!]{0,30}\b(early|earlier|ahead|sooner)\b"
+    r"|\b(early|earlier|sooner)\b[^.?!]{0,40}\b(slot|timing|timings|appointment|dock|window)\b"
+    r"|\b(slot|timing|timings|appointment|dock|window)\b[^.?!]{0,40}\b(early|earlier|sooner)\b"
+    r"|\bahead of (schedule|time)\b"
+    r"|\brunning early\b",
+    re.IGNORECASE,
+)
+_EARLY_MINUTES_PATTERN = re.compile(r"(\d{1,3})\s*(?:min(?:ute)?s?)\s*(?:early|earlier|ahead)", re.IGNORECASE)
+_EARLY_HOUR_PATTERN = re.compile(r"(\d{1,2})\s*(?:hour|hr)s?\s*(?:early|earlier|ahead)", re.IGNORECASE)
+_ARRIVE_BY_PATTERN = re.compile(
+    r"(?:reach|arrive|get there|be there)\w*\s*(?:by|around|at)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?",
+    re.IGNORECASE,
+)
 _GREETING_ONLY_PATTERN = re.compile(r"^\s*(hi+|hello+|hey+|namaste|yo)[\s!.,]*$", re.IGNORECASE)
 _NAME_INTENT_PATTERN = re.compile(r"\bmy name\b|\bwho am i\b", re.IGNORECASE)
 _DOCK_INFO_INTENT_PATTERN = re.compile(r"\b(dock|slot|appointment|bay)\b", re.IGNORECASE)
@@ -575,20 +605,46 @@ class DriverChatService:
             snapshot.chat_messages = [driver_msg, reply]
             return ChatResponse(agent_message=reply, suggested_options=[], exception=None, snapshot=snapshot)
 
-        delay_minutes = self._parse_delay_minutes(text)
-
         planned_eta = _parse_dt(shipment_row.get("original_eta_ts")) or datetime.utcnow()
-        declared_eta = planned_eta + timedelta(minutes=delay_minutes) if delay_minutes else planned_eta
+
+        early_minutes = self._parse_early_minutes(text)
+        arrive_by_dt = self._parse_arrival_time(text, reference_date=planned_eta.date())
+        # An explicit "X minutes/hours early" phrase and the generic delay
+        # pattern can both match the same digits in the same message ("45
+        # minutes early" also satisfies _DELAY_PATTERN's bare "\d+ minutes"),
+        # which used to silently misread an early-arrival report as a delay
+        # report. Skip the generic delay parse whenever an explicit
+        # early-arrival number/time was found, so the two never fight over
+        # the same digits.
+        delay_minutes = 0 if (early_minutes or arrive_by_dt is not None) else self._parse_delay_minutes(text)
+
+        if arrive_by_dt is not None:
+            declared_eta = arrive_by_dt
+        elif early_minutes:
+            declared_eta = planned_eta - timedelta(minutes=early_minutes)
+        elif delay_minutes:
+            declared_eta = planned_eta + timedelta(minutes=delay_minutes)
+        else:
+            declared_eta = planned_eta
         max_leave_dt = self._parse_leave_before(text, reference_date=declared_eta.date())
 
-        # Only treat this turn as a delay report / booking request if it
-        # actually looks like one -- a bare factual question ("what is my
-        # name?", "what's my ETA?", "hi") has no delay/leave-by signal and no
-        # booking verb, so it should never fall into the exception-report +
-        # auto-book pipeline below. See the intent-pattern comments above for
-        # why this branch exists.
-        has_actionable_signal = bool(delay_minutes) or max_leave_dt is not None or bool(
-            _ACTION_VERB_PATTERN.search(text)
+        # Only treat this turn as a delay report / early-arrival report /
+        # booking request if it actually looks like one -- a bare factual
+        # question ("what is my name?", "what's my ETA?", "hi") has no
+        # delay/leave-by/early-arrival signal and no booking verb, so it
+        # should never fall into the exception-report + auto-book pipeline
+        # below. A *vague* early-arrival report (no explicit number/time,
+        # just "reaching earlier"/"any earlier timings?") deliberately does
+        # NOT count here either -- it's handled entirely inside
+        # `_answer_general_question` below, which asks the one necessary
+        # clarifying question instead of fabricating an ETA. See the
+        # intent-pattern comments above for why this branch exists.
+        has_actionable_signal = (
+            bool(delay_minutes)
+            or bool(early_minutes)
+            or arrive_by_dt is not None
+            or max_leave_dt is not None
+            or bool(_ACTION_VERB_PATTERN.search(text))
         )
         if not has_actionable_signal:
             general_reply = self._answer_general_question(
@@ -796,6 +852,36 @@ class DriverChatService:
         if _NAME_INTENT_PATTERN.search(stripped):
             return f"Your name is {driver.driver_name or 'not set on your driver profile yet'}."
 
+        # Checked before the dock-info pattern below -- a vague early-arrival
+        # report ("I'm reaching earlier", "any earlier timings?") mentions
+        # the same words (slot/timing/appointment) that pattern matches on,
+        # so without this check first it fell straight into the generic
+        # dock-info branch and just repeated the existing confirmed
+        # appointment verbatim, completely ignoring the driver's actual ask.
+        # This only fires for the *vague* case -- a message with an explicit
+        # early-arrival number/time (e.g. "reaching 20 min early", "I'll be
+        # there by 2:30pm") never reaches this method at all, since
+        # `has_actionable_signal` is already True for it and it goes through
+        # the real ETA-update + auto-book pipeline instead (see the main
+        # flow above, which already re-checks for a genuinely earlier
+        # compatible slot once a new, earlier ETA is on file).
+        if _EARLY_ARRIVAL_PATTERN.search(stripped):
+            snapshot = self._build_snapshot(principal, driver)
+            appointment = snapshot.appointment
+            if appointment and appointment.appointment_status == "CONFIRMED":
+                start = appointment.slot_start_ts or ""
+                start_str = start[11:16] if len(start) >= 16 else start
+                dock = appointment.dock_code or "your assigned dock"
+                return (
+                    f"Got it -- you're reaching earlier than planned. Your current appointment is at {dock}, "
+                    f"starting {start_str}. What time do you now expect to reach the facility (or how many "
+                    "minutes early)? Tell me that and I'll check whether an earlier dock slot is available."
+                )
+            return (
+                "Got it -- you're reaching earlier than planned. What time do you now expect to reach the "
+                "facility? Tell me that and I'll check for a compatible dock slot."
+            )
+
         # Checked before the more generic ETA/status patterns so "what's the
         # status of my dock appointment?" describes the appointment, not the
         # shipment -- _ACTION_VERB_PATTERN already ruled out real booking
@@ -921,6 +1007,47 @@ class DriverChatService:
         if minute_match:
             delay_minutes += int(minute_match.group(1))
         return delay_minutes
+
+    @staticmethod
+    def _parse_early_minutes(text: str) -> int:
+        """Minutes the driver expects to arrive AHEAD of the planned ETA --
+        the mirror image of `_parse_delay_minutes`, e.g. "20 min early" or
+        "1 hour ahead of schedule". Zero if no explicit early-arrival number
+        was found (that's the vague case, handled entirely by
+        `_answer_general_question`'s clarifying question instead)."""
+        text = _normalize_digits(text)
+        minutes = 0
+        hour_match = _EARLY_HOUR_PATTERN.search(text)
+        if hour_match:
+            minutes += int(hour_match.group(1)) * 60
+        minute_match = _EARLY_MINUTES_PATTERN.search(text)
+        if minute_match:
+            minutes += int(minute_match.group(1))
+        return minutes
+
+    @staticmethod
+    def _parse_arrival_time(text: str, *, reference_date) -> datetime | None:
+        """An explicit clock time the driver says they'll reach the facility
+        by, e.g. "I'll reach by 2:30pm" or "arriving around 14:00". Distinct
+        from `_parse_leave_before` (a must-LEAVE-by constraint, opposite
+        direction) -- this is when they expect to ARRIVE."""
+        text = _normalize_digits(text)
+        match = _ARRIVE_BY_PATTERN.search(text)
+        if not match:
+            return None
+        hour = int(match.group(1))
+        minute = int(match.group(2) or 0)
+        meridiem = (match.group(3) or "").lower()
+        if meridiem == "pm" and hour != 12:
+            hour += 12
+        elif meridiem == "am" and hour == 12:
+            hour = 0
+        if hour > 23 or minute > 59:
+            return None
+        try:
+            return datetime.combine(reference_date, datetime.min.time()).replace(hour=hour, minute=minute)
+        except ValueError:
+            return None
 
     @staticmethod
     def _parse_leave_before(text: str, *, reference_date) -> datetime | None:

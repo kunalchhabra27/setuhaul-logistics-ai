@@ -381,6 +381,103 @@ def test_regex_fallback_booking_verb_without_delay_still_treated_as_actionable(s
     assert exceptions, "booking-verb message should have gone through the exception/auto-book pipeline"
 
 
+def test_regex_fallback_vague_early_arrival_asks_for_a_time_without_touching_booking_state(
+    service, principal, tables
+):
+    # Regression test for the live screenshot: a driver with a confirmed
+    # appointment said "but i am reaching earlier so there can be a slot for
+    # earlier timings" and the bot just repeated the existing confirmed
+    # appointment verbatim ("You have a confirmed dock appointment at D1,
+    # 15:00-16:00...") -- it had no handling for early-arrival language at
+    # all, since it has no delay/leave-by number and no booking verb, so it
+    # fell into the generic dock-info Q&A branch. That branch must now
+    # recognize the early-arrival phrasing FIRST and ask the one necessary
+    # clarifying question instead, without creating any exception/ETA state
+    # (mirrors the name-question regression test above -- a vague question
+    # must stay read-only).
+    tables["appointments"].append(
+        {
+            "appointment_id": "APT-PRESET",
+            "shipment_id": SHIPMENT_ID,
+            "slot_id": "SLOT-2",
+            "appointment_status": "CONFIRMED",
+            "is_current": 1,
+            "booked_at": "2026-08-01T00:00:00",
+            "confirmed_at": "2026-08-01T00:00:00",
+        }
+    )
+
+    response = service._handle_chat_message_regex(
+        principal, "but i am reaching earlier so there can be a slot for earlier timings"
+    )
+
+    text = response.agent_message.message_text.lower()
+    assert "what time" in text
+    assert "you have a confirmed dock appointment" not in text  # not the old canned repeat
+    assert tables["driver_exceptions"] == []
+    assert tables["eta_updates"] == []
+    assert service.dock_scheduler.list_change_requests() == []
+    # Still a confirmed appointment on SLOT-2 -- nothing was moved.
+    confirmed = [a for a in tables["appointments"] if a["appointment_status"] == "CONFIRMED"]
+    assert len(confirmed) == 1 and confirmed[0]["slot_id"] == "SLOT-2"
+
+
+def test_regex_fallback_vague_early_arrival_with_no_appointment_yet(service, principal, tables):
+    response = service._handle_chat_message_regex(principal, "I'm running early today")
+
+    text = response.agent_message.message_text.lower()
+    assert "what time" in text
+    assert tables["driver_exceptions"] == []
+
+
+def test_regex_fallback_explicit_early_minutes_requests_the_earlier_open_slot(service, principal, tables):
+    # Once the driver gives a real number ("20 min early"), this must go
+    # through the full ETA-update + auto-book pipeline, exactly like a
+    # delay report -- and since SLOT-1 (earlier) is open and compatible
+    # while the shipment is currently confirmed on SLOT-2 (later),
+    # auto_book_earliest_feasible_slot's existing "a genuinely earlier slot
+    # opened up" logic should propose moving there.
+    tables["appointments"].append(
+        {
+            "appointment_id": "APT-PRESET",
+            "shipment_id": SHIPMENT_ID,
+            "slot_id": "SLOT-2",
+            "appointment_status": "CONFIRMED",
+            "is_current": 1,
+            "booked_at": "2026-08-01T00:00:00",
+            "confirmed_at": "2026-08-01T00:00:00",
+        }
+    )
+
+    response = service._handle_chat_message_regex(principal, "I'll reach 20 min early")
+
+    assert "Requested dock slot" in response.agent_message.message_text
+    change_requests = service.dock_scheduler.list_change_requests()
+    assert len(change_requests) == 1
+    assert change_requests[0]["requested_slot_id"] == "SLOT-1"
+    assert change_requests[0]["request_status"] == "PENDING"
+    # The stale SLOT-2 confirmation is untouched until WMS approves the move.
+    confirmed = [a for a in tables["appointments"] if a["appointment_status"] == "CONFIRMED"]
+    assert len(confirmed) == 1 and confirmed[0]["slot_id"] == "SLOT-2"
+
+
+def test_regex_fallback_explicit_early_minutes_does_not_get_misread_as_a_delay(service, principal, tables):
+    # "45 minutes early" also matches the generic bare "\d+ minutes" delay
+    # pattern -- must not be misread as 45 minutes LATE (which would push
+    # the declared ETA forward instead of back).
+    early_delay = service._parse_early_minutes("I'll reach 45 min early")
+    assert early_delay == 45
+
+    response = service._handle_chat_message_regex(principal, "I'll reach 45 min early")
+    exceptions = tables["driver_exceptions"]
+    assert exceptions
+    # A 45-minute-EARLY declared ETA is well before the shipment's planned
+    # ETA, so severity must not be computed as if it were a 45-minute delay
+    # (reported_delay_min should be 0/None here, not 45).
+    assert not exceptions[-1].get("reported_delay_min")
+    assert response.agent_message.message_text  # got a real reply either way
+
+
 def test_auto_book_escalates_when_nothing_is_compatible(service, principal, tables):
     # Make every slot incompatible by shrinking every dock's capacity below
     # the shipment's load weight -- mirrors the real SHP1027-style data
