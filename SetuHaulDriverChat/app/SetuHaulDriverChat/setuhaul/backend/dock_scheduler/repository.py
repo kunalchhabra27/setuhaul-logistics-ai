@@ -343,6 +343,19 @@ class DockSchedulerRepository:
             return None
         return rows[0].get("destination_facility_id")
 
+    def docks_for_facility(self, facility_id: str, *, active_only: bool = False) -> list[dict[str, Any]]:
+        """Every dock row at a facility, regardless of compatibility with any
+        particular shipment -- used by DockSchedulerService.
+        dock_board_unavailable_reason to work out WHY compatible_slots()
+        came back empty (no docks at all vs. none ACTIVE vs. none matching
+        this shipment's requirements), which compatible_slots() itself has
+        no reason to compute since it only ever needs the positive case.
+        """
+        filters: dict[str, Any] = {"facility_id": facility_id}
+        if active_only:
+            filters["dock_status"] = "ACTIVE"
+        return self._select("docks", **filters)
+
     def ensure_future_slots_for_shipment(self, shipment_id: str) -> int:
         """Cheap wrapper around ensure_future_slots() for board/feasibility
         read paths that already have a shipment_id in hand."""
@@ -809,7 +822,9 @@ class DockSchedulerRepository:
             self._raise_persistence(exc)
         return self._enrich_change_request(payload)
 
-    def list_change_requests(self, status: str | None = None) -> list[dict[str, Any]]:
+    def list_change_requests(
+        self, status: str | None = None, shipment_id: str | None = None
+    ) -> list[dict[str, Any]]:
         """List change requests, enriched with dock_code/slot times.
 
         Batches the enrichment lookups (one query for every requested
@@ -818,8 +833,18 @@ class DockSchedulerRepository:
         polled every 15s by every WMS user's pending-requests header (see
         PortalWorkspace's WmsChangeRequestsHeader), so an N+1 here means
         2*N avoidable round trips on every single poll tick.
+
+        ``shipment_id`` is optional and additive to ``status`` -- used by
+        driver_chat_eta's "is my request approved?" tool to look up just
+        this shipment's own requests instead of scanning every pending
+        request across every shipment.
         """
-        rows = self._select("dock_slot_change_requests", **({"request_status": status} if status else {}))
+        filters: dict[str, Any] = {}
+        if status:
+            filters["request_status"] = status
+        if shipment_id:
+            filters["shipment_id"] = shipment_id
+        rows = self._select("dock_slot_change_requests", **filters)
         rows.sort(key=lambda row: row.get("created_at") or "", reverse=True)
         if not rows:
             return []

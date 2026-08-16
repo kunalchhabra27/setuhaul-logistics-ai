@@ -49,16 +49,54 @@ class Settings(BaseSettings):
     environment: str = Field(default="development", alias="ENVIRONMENT")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
-    # driver_chat_eta LLM chatbot (Gemini tool-calling). google_api_key is
-    # intentionally optional -- when unset, driver_chat_eta.service falls
-    # back to its deterministic regex-based chat parser instead of failing.
+    # driver_chat_eta LLM chatbot -- an open-weights model served via Hugging
+    # Face Inference Providers, through langchain-huggingface's
+    # ChatHuggingFace/HuggingFaceEndpoint (OpenAI-compatible tool-calling
+    # chat completions, routed to whichever provider actually hosts the
+    # model). huggingface_api_token is intentionally optional -- when unset,
+    # driver_chat_eta.service falls back to its deterministic regex-based
+    # chat parser instead of failing (see llm.agent.is_configured()).
+    huggingface_api_token: str | None = Field(default=None, alias="HUGGINGFACEHUB_API_TOKEN")
+    # repo_id of the model on the Hub. Llama 3.3 70B Instruct is used as the
+    # default because it's one of the strongest open models at strict,
+    # conditional tool-calling (the exact skill this agent leans on --
+    # calling book_next_available_dock_slot only when actually asked to, not
+    # as a catch-all) and is broadly available across HF's routed providers.
+    driver_chat_llm_model: str = Field(
+        default="meta-llama/Llama-3.3-70B-Instruct", alias="DRIVER_CHAT_LLM_MODEL"
+    )
+    # Which HF Inference Provider actually serves the model (Together,
+    # Fireworks, Novita, Cerebras, etc.) -- "auto" lets HF route to the
+    # fastest available one for this repo_id, so this rarely needs changing.
+    # See https://huggingface.co/settings/inference-providers.
+    driver_chat_llm_provider: str = Field(default="auto", alias="DRIVER_CHAT_LLM_PROVIDER")
+    # Voice-note transcription ONLY (llm.agent.transcribe_audio) -- kept on
+    # Gemini's native multimodal audio input, which the open models above
+    # don't have an equivalent for via HF's routed chat-completions API.
+    # Also optional: llm.agent.transcription_is_configured() gates the
+    # voice-message endpoint independently of huggingface_api_token above,
+    # so an unset key just disables voice notes (the driver can still type)
+    # instead of failing the request.
     google_api_key: str | None = Field(default=None, alias="GOOGLE_API_KEY")
-    driver_chat_llm_model: str = Field(default="gemini-2.5-flash", alias="DRIVER_CHAT_LLM_MODEL")
+    driver_chat_transcription_model: str = Field(
+        default="gemini-2.5-flash", alias="DRIVER_CHAT_TRANSCRIPTION_MODEL"
+    )
     # Optional hot session cache for the LLM agent's tool-call scratchpad.
     # When unset, the agent reconstructs working memory from the permanent
     # chat_messages table in Supabase instead (slower, coarser, but never
     # loses data).
     redis_url: str | None = Field(default=None, alias="REDIS_URL")
+
+    # Optional observability harness configuration. These defaults keep local
+    # development and all existing flows unchanged unless explicitly enabled.
+    otel_enabled: bool = Field(default=False, alias="OTEL_ENABLED")
+    otel_exporter_otlp_endpoint: str | None = Field(default=None, alias="OTEL_EXPORTER_OTLP_ENDPOINT")
+    otel_exporter_otlp_protocol: str = Field(default="http/protobuf", alias="OTEL_EXPORTER_OTLP_PROTOCOL")
+    otel_service_name: str = Field(default="setuhaul-backend", alias="OTEL_SERVICE_NAME")
+    aws_region: str | None = Field(default=None, alias="AWS_REGION")
+    langsmith_tracing: bool = Field(default=False, alias="LANGSMITH_TRACING")
+    langsmith_api_key: str | None = Field(default=None, alias="LANGSMITH_API_KEY")
+    langsmith_project: str = Field(default="setuhaul-harness", alias="LANGSMITH_PROJECT")
 
     # Twilio SMS notifications (check-in confirmation, driver assignment).
     # All three are optional -- when unset, setuhaul.infrastructure.sms simply
@@ -80,7 +118,6 @@ class Settings(BaseSettings):
     # vars, ~/.aws/credentials, or an assumed role), not from this Settings
     # model.
     agentcore_runtime_arn: str | None = Field(default=None, alias="AGENTCORE_RUNTIME_ARN")
-    aws_region: str | None = Field(default=None, alias="AWS_REGION")
     # Seconds to wait for one AgentCore invocation before giving up and
     # falling back to the regex parser. Gemini calls have taken 20-40s+
     # under free-tier quota pressure in testing -- keep this generous, but
@@ -110,14 +147,24 @@ def get_settings() -> Settings:
             "DATA_BACKEND": os.getenv("DATA_BACKEND", "local"),
             "ENVIRONMENT": os.getenv("ENVIRONMENT", "development"),
             "LOG_LEVEL": os.getenv("LOG_LEVEL", "INFO"),
+            "HUGGINGFACEHUB_API_TOKEN": os.getenv("HUGGINGFACEHUB_API_TOKEN"),
+            "DRIVER_CHAT_LLM_MODEL": os.getenv("DRIVER_CHAT_LLM_MODEL", "meta-llama/Llama-3.3-70B-Instruct"),
+            "DRIVER_CHAT_LLM_PROVIDER": os.getenv("DRIVER_CHAT_LLM_PROVIDER", "auto"),
             "GOOGLE_API_KEY": os.getenv("GOOGLE_API_KEY"),
-            "DRIVER_CHAT_LLM_MODEL": os.getenv("DRIVER_CHAT_LLM_MODEL", "gemini-2.5-flash"),
+            "DRIVER_CHAT_TRANSCRIPTION_MODEL": os.getenv("DRIVER_CHAT_TRANSCRIPTION_MODEL", "gemini-2.5-flash"),
             "REDIS_URL": os.getenv("REDIS_URL"),
+            "OTEL_ENABLED": os.getenv("OTEL_ENABLED", "false"),
+            "OTEL_EXPORTER_OTLP_ENDPOINT": os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+            "OTEL_EXPORTER_OTLP_PROTOCOL": os.getenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf"),
+            "OTEL_SERVICE_NAME": os.getenv("OTEL_SERVICE_NAME", "setuhaul-backend"),
+            "AWS_REGION": os.getenv("AWS_REGION"),
+            "LANGSMITH_TRACING": os.getenv("LANGSMITH_TRACING", "false"),
+            "LANGSMITH_API_KEY": os.getenv("LANGSMITH_API_KEY"),
+            "LANGSMITH_PROJECT": os.getenv("LANGSMITH_PROJECT", "setuhaul-harness"),
             "TWILIO_ACCOUNT_SID": os.getenv("TWILIO_ACCOUNT_SID"),
             "TWILIO_AUTH_TOKEN": os.getenv("TWILIO_AUTH_TOKEN"),
             "TWILIO_FROM_NUMBER": os.getenv("TWILIO_FROM_NUMBER"),
             "AGENTCORE_RUNTIME_ARN": os.getenv("AGENTCORE_RUNTIME_ARN"),
-            "AWS_REGION": os.getenv("AWS_REGION"),
             "AGENTCORE_INVOKE_TIMEOUT_SECONDS": os.getenv("AGENTCORE_INVOKE_TIMEOUT_SECONDS", "45"),
         }
         return Settings.model_validate(data)  # type: ignore[attr-defined]
@@ -127,13 +174,23 @@ def get_settings() -> Settings:
         DATA_BACKEND=os.getenv("DATA_BACKEND", "local"),
         ENVIRONMENT=os.getenv("ENVIRONMENT", "development"),
         LOG_LEVEL=os.getenv("LOG_LEVEL", "INFO"),
+        HUGGINGFACEHUB_API_TOKEN=os.getenv("HUGGINGFACEHUB_API_TOKEN"),
+        DRIVER_CHAT_LLM_MODEL=os.getenv("DRIVER_CHAT_LLM_MODEL", "meta-llama/Llama-3.3-70B-Instruct"),
+        DRIVER_CHAT_LLM_PROVIDER=os.getenv("DRIVER_CHAT_LLM_PROVIDER", "auto"),
         GOOGLE_API_KEY=os.getenv("GOOGLE_API_KEY"),
-        DRIVER_CHAT_LLM_MODEL=os.getenv("DRIVER_CHAT_LLM_MODEL", "gemini-2.5-flash"),
+        DRIVER_CHAT_TRANSCRIPTION_MODEL=os.getenv("DRIVER_CHAT_TRANSCRIPTION_MODEL", "gemini-2.5-flash"),
         REDIS_URL=os.getenv("REDIS_URL"),
+        OTEL_ENABLED=os.getenv("OTEL_ENABLED", "false"),
+        OTEL_EXPORTER_OTLP_ENDPOINT=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+        OTEL_EXPORTER_OTLP_PROTOCOL=os.getenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf"),
+        OTEL_SERVICE_NAME=os.getenv("OTEL_SERVICE_NAME", "setuhaul-backend"),
+        AWS_REGION=os.getenv("AWS_REGION"),
+        LANGSMITH_TRACING=os.getenv("LANGSMITH_TRACING", "false"),
+        LANGSMITH_API_KEY=os.getenv("LANGSMITH_API_KEY"),
+        LANGSMITH_PROJECT=os.getenv("LANGSMITH_PROJECT", "setuhaul-harness"),
         TWILIO_ACCOUNT_SID=os.getenv("TWILIO_ACCOUNT_SID"),
         TWILIO_AUTH_TOKEN=os.getenv("TWILIO_AUTH_TOKEN"),
         TWILIO_FROM_NUMBER=os.getenv("TWILIO_FROM_NUMBER"),
         AGENTCORE_RUNTIME_ARN=os.getenv("AGENTCORE_RUNTIME_ARN"),
-        AWS_REGION=os.getenv("AWS_REGION"),
         AGENTCORE_INVOKE_TIMEOUT_SECONDS=os.getenv("AGENTCORE_INVOKE_TIMEOUT_SECONDS", "45"),
     )

@@ -100,10 +100,17 @@ deploy`, or (recommended for the secret-ish ones) `agentcore add
 credential --name <Name> --type api-key --api-key <value>` before
 deploying. Full explanation of each in `../DEPLOYMENT_PLAN.md` §2.5.
 
+**The live model is HF-hosted, not Gemini** (tasks #136/#137 swapped it) — `HUGGINGFACEHUB_API_TOKEN`
+is the one that actually makes chat replies work from this runtime; `GOOGLE_API_KEY` here is unused
+by the actual chat path (only the vendored copy's unused voice-transcription import needs it to
+resolve).
+
 | Variable | Purpose |
 |---|---|
-| `GOOGLE_API_KEY` | Gemini — use a **paid tier** key, not the free 20-req/day tier |
-| `DRIVER_CHAT_LLM_MODEL` | e.g. `gemini-2.5-flash` |
+| `HUGGINGFACEHUB_API_TOKEN` | **Required** — without it, every invocation ImportErrors on `langchain_huggingface`, gets swallowed by `app.py`'s broad except, and silently falls back to the regex parser |
+| `DRIVER_CHAT_LLM_MODEL` | e.g. `meta-llama/Llama-3.3-70B-Instruct` |
+| `DRIVER_CHAT_LLM_PROVIDER` | `auto` |
+| `GOOGLE_API_KEY` | Optional, unused by this container's actual chat replies |
 | `SUPABASE_URL` | same value as everywhere else |
 | `SUPABASE_PUBLISHABLE_KEY` | same value as everywhere else |
 | `REDIS_URL` | same Upstash URL used on Vercel — shares the session-scratchpad/facility cache |

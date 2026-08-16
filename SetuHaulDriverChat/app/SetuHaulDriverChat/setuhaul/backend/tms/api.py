@@ -37,8 +37,10 @@ from setuhaul.backend.tms.models import (
 from setuhaul.backend.tms.repository import TMSRepository
 from setuhaul.backend.tms.service import TMSService
 from setuhaul.infrastructure.auth import Principal, require_admin, require_reader
+from setuhaul.infrastructure.metrics import emit_domain_event, increment
 from setuhaul.infrastructure.settings import get_settings
 from setuhaul.infrastructure.supabase_client import create_caller_client
+from setuhaul.infrastructure.telemetry import observe_operation
 
 router = APIRouter(prefix="/tms", tags=["tms"])
 
@@ -155,14 +157,18 @@ def list_shipments(
     offset: int = Query(default=0, ge=0),
     service: TMSService = Depends(get_service),
 ) -> list[ShipmentResponse]:
-    return service.list_shipments(
-        driver_id=driver_id,
-        destination_facility_id=destination_facility_id,
-        status=shipment_status,
-        unassigned_only=unassigned_only,
-        include_archived=include_archived,
-        limit=limit,
-        offset=offset,
+    return observe_operation(
+        "tms.shipments.list",
+        {"operation": "list_shipments", "status": shipment_status.value if shipment_status else None},
+        lambda: service.list_shipments(
+            driver_id=driver_id,
+            destination_facility_id=destination_facility_id,
+            status=shipment_status,
+            unassigned_only=unassigned_only,
+            include_archived=include_archived,
+            limit=limit,
+            offset=offset,
+        ),
     )
 
 
@@ -179,7 +185,10 @@ def create_shipment(
     _: Principal = Depends(require_admin),
     service: TMSService = Depends(get_service),
 ) -> ShipmentResponse:
-    return service.create_shipment(request)
+    shipment = observe_operation("tms.shipment.create", {"operation": "create_shipment"}, lambda: service.create_shipment(request))
+    increment("setuhaul.tms.shipments_created")
+    emit_domain_event("shipment_created", shipment_id=shipment.shipment_id, current_status=str(shipment.current_status))
+    return shipment
 
 
 @router.patch("/shipments/{shipment_id}", response_model=ShipmentResponse)
@@ -204,7 +213,11 @@ def assign_shipment(
     _: Principal = Depends(require_admin),
     service: TMSService = Depends(get_service),
 ) -> ShipmentResponse:
-    return service.assign_shipment(shipment_id, driver_id=request.driver_id, vehicle_id=request.vehicle_id)
+    return observe_operation(
+        "tms.shipment.assign",
+        {"operation": "assign_shipment", "shipment_id": shipment_id},
+        lambda: service.assign_shipment(shipment_id, driver_id=request.driver_id, vehicle_id=request.vehicle_id),
+    )
 
 
 @router.post("/shipments/{shipment_id}/archive", response_model=ShipmentResponse)
@@ -232,7 +245,14 @@ def cancel_shipment(
     _: Principal = Depends(require_admin),
     service: TMSService = Depends(get_service),
 ) -> ShipmentResponse:
-    return service.cancel_shipment(shipment_id, reason=request.reason)
+    shipment = observe_operation(
+        "tms.shipment.cancel",
+        {"operation": "cancel_shipment", "shipment_id": shipment_id},
+        lambda: service.cancel_shipment(shipment_id, reason=request.reason),
+    )
+    increment("setuhaul.tms.shipments_cancelled", {"shipment_id": shipment_id})
+    emit_domain_event("shipment_cancelled", shipment_id=shipment_id, current_status=str(shipment.current_status))
+    return shipment
 
 
 @router.get("/facilities", response_model=list[FacilityResponse])

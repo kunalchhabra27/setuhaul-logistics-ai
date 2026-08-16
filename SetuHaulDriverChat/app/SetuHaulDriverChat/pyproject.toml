@@ -14,6 +14,23 @@ dependencies = [
     "langchain >= 1.0.3",
     "bedrock-agentcore >= 1.8.0",
     "botocore[crt] >= 1.35.0",
+    # The actual, currently-live tool-calling model (tasks #136/#137 in repo
+    # history swapped this app off Gemini/Claude onto an open-weights model
+    # served via Hugging Face Inference Providers -- see
+    # backend/driver_chat_eta/llm/agent.py's is_configured()/_run_chat_turn,
+    # which this container's main.py calls directly). Without this
+    # dependency, run_chat_turn's `from langchain_huggingface import
+    # ChatHuggingFace, HuggingFaceEndpoint` raises ImportError at runtime,
+    # main.py's broad except swallows it, and every driver message silently
+    # falls back to the deterministic regex parser -- i.e. this container
+    # would deploy successfully but never actually run the LLM.
+    "langchain-huggingface >= 1.2",
+    # Gemini is kept only because backend/driver_chat_eta/llm/agent.py's
+    # transcribe_audio() imports langchain_google_genai -- NOT used by this
+    # container's entrypoint (voice-note transcription is a Vercel/FastAPI
+    # concern, agentcore_app never calls transcribe_audio), but left in so
+    # the vendored setuhaul/ package's imports resolve identically to the
+    # main repo either way.
     "langchain-google-genai >= 3.0.3",
     "google-genai >= 1.0.0, < 2.0.0",
     # Below: same runtime deps setuhaul/ (vendored copy of src/setuhaul, see

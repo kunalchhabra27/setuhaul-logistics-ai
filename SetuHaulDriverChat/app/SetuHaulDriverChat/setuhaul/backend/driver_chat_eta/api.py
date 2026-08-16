@@ -27,7 +27,9 @@ from setuhaul.backend.driver_chat_eta.models import (
 from setuhaul.backend.driver_chat_eta.repository import DriverChatRepository
 from setuhaul.backend.driver_chat_eta.service import DriverChatService
 from setuhaul.infrastructure.settings import get_settings
+from setuhaul.infrastructure.metrics import emit_domain_event, increment
 from setuhaul.infrastructure.supabase_client import create_caller_client
+from setuhaul.infrastructure.telemetry import observe_operation
 
 router = APIRouter(prefix="/driver-chat-eta", tags=["driver-chat-eta"])
 
@@ -115,7 +117,11 @@ def send_chat_message(
     service: DriverChatService = Depends(get_service),
 ) -> ChatResponse:
     try:
-        return service.handle_chat_message(principal, request.message)
+        return observe_operation(
+            "driver_chat.request",
+            {"operation": "chat_request"},
+            lambda: service.handle_chat_message(principal, request.message),
+        )
     except DriverChatError as exc:
         _raise_http(exc)
 
@@ -139,7 +145,10 @@ def hold_slot(
     service: DriverChatService = Depends(get_service),
 ) -> SlotActionResponse:
     try:
-        return service.hold_slot(principal, request.slot_id)
+        response = service.hold_slot(principal, request.slot_id)
+        increment("setuhaul.driver.slot_requests")
+        emit_domain_event("slot_change_requested", result="held")
+        return response
     except DriverChatError as exc:
         _raise_http(exc)
 
@@ -151,7 +160,10 @@ def confirm_slot(
     service: DriverChatService = Depends(get_service),
 ) -> ConfirmSlotResponse:
     try:
-        return service.confirm_slot(principal, request.slot_id)
+        response = service.confirm_slot(principal, request.slot_id)
+        increment("setuhaul.driver.slot_requests")
+        emit_domain_event("slot_confirmed", result="success")
+        return response
     except DriverChatError as exc:
         _raise_http(exc)
 
@@ -176,6 +188,24 @@ def escalate(
 ) -> EscalateResponse:
     try:
         return service.escalate(principal, request.reason)
+    except DriverChatError as exc:
+        _raise_http(exc)
+
+
+@router.post("/emergency-alert", response_model=dict)
+def send_emergency_alert(
+    request: EscalateRequest,
+    principal: DriverPrincipal = Depends(get_current_driver),
+    service: DriverChatService = Depends(get_service),
+) -> dict:
+    """Send the actual emergency SMS to the fixed emergency contact -- only
+    ever called by the driver explicitly tapping the "Send Emergency Alert"
+    button the frontend shows once flag_emergency_situation has marked the
+    thread (see ContextBar.tsx / ChatPanel.tsx). Reuses EscalateRequest's
+    single `reason` field rather than a new request model.
+    """
+    try:
+        return service.send_emergency_alert(principal, request.reason)
     except DriverChatError as exc:
         _raise_http(exc)
 

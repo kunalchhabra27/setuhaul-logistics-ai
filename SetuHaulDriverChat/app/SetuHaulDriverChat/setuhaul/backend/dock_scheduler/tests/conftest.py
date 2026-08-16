@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 
 import pytest
 
@@ -27,7 +27,21 @@ SHP_OCCUPANT = "SHP-TEST3"
 # the staleness bug ensure_future_slots() exists to fix in production, just
 # showing up in the test suite instead. SEED_DAY floats forward with the
 # real clock so these fixtures stay "today" no matter when the suite runs.
+#
+# dock_board() additionally now drops any slot whose slot_end_ts has already
+# passed (real WMS/TMS staff should never see yesterday-or-earlier-today's
+# slots as bookable -- see its own docstring). The earliest fixture slot is
+# seed_ts(8) (08:00 IST) -- if the suite happens to run after 08:00 IST,
+# "today" at 08:00 is already behind wall-clock "now" and that fix would
+# correctly, but inconveniently, filter fixture slots out from under
+# time-of-day-insensitive assertions. Bumping SEED_DAY to tomorrow whenever
+# it's already past 08:00 IST keeps every seed_ts(8..) timestamp in the
+# future no matter what time of day the suite runs, without having to touch
+# any of the ~40 seed_ts(hour) call sites below.
 SEED_DAY = datetime.now(timezone.utc).date()
+_now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+if _now_ist.time() >= time(8, 0):
+    SEED_DAY += timedelta(days=1)
 
 
 def seed_ts(hour: int, minute: int = 0, day_offset: int = 0) -> str:

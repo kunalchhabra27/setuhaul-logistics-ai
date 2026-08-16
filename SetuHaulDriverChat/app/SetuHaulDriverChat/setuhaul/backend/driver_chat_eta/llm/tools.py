@@ -23,7 +23,10 @@ from typing import TYPE_CHECKING, Any
 from setuhaul.backend.driver_chat_eta.exceptions import DriverChatError
 from setuhaul.backend.driver_chat_eta.llm.schemas import (
     AutoBookSlotInput,
+    CancelPendingRequestInput,
+    CheckRequestStatusInput,
     EscalateInput,
+    FlagEmergencyInput,
     ListFeasibleSlotsInput,
     ReportExceptionInput,
     UpdateCheckinInput,
@@ -95,27 +98,82 @@ def build_tools(service: "DriverChatService", principal: "DriverPrincipal") -> l
             return {"error": exc.code, "message": exc.message}
 
     @tool(args_schema=AutoBookSlotInput)
-    def book_next_available_dock_slot() -> dict:
-        """Book the earliest dock slot that is compatible with the shipment (dock
-        type, refrigeration, weight) and fits the driver's latest declared ETA --
-        no driver click required. This directly books (not just holds) the slot
-        through the same validated scheduling engine WMS staff use, so it's safe
-        against double-booking. It also checks whether a genuinely lower-priority
-        shipment is occupying a better (earlier) slot that could be freed up -- if
-        so, it files that as a change request AND immediately approves/executes
-        it itself (the dispatch assistant acts with WMS's delegated approval
-        authority here, so nothing is left pending for a human to click). Call
-        this immediately after report_delay_or_eta_change (or after
-        list_feasible_dock_slots if the driver is just asking about slots with no
-        new delay to report) instead of listing multiple options for the driver
-        to choose from. Returns one of these statuses: "booked" (done, nothing
-        else needed), "already_booked" (this shipment already has a confirmed
-        appointment), "booked_via_swap" (booked into a better/earlier slot that
-        required moving a lower-priority shipment out of the way first -- also
-        already done, nothing pending), or "escalated" (nothing compatible and no
-        swap candidate existed, so this was handed to a human coordinator)."""
+    def book_next_available_dock_slot(slot_id: str | None = None) -> dict:
+        """With slot_id left null (the default): identify the earliest dock slot
+        that is compatible with the shipment (dock type, refrigeration, weight)
+        and fits the driver's latest declared ETA, and FILE it as a change
+        request for WMS to review -- you never book or approve anything
+        yourself, only propose. This also works for changing a slot the
+        shipment already has booked (there's no separate "change my slot" tool
+        -- calling this again re-evaluates and, if a better slot exists, files
+        a request to move there). It also checks whether a genuinely
+        lower-priority shipment is occupying a better (earlier) slot that could
+        be freed up -- if so, it files that as a swap request instead (still
+        pending WMS approval, never auto-executed).
+        With slot_id set: skip the auto-ranking and the swap check entirely, and
+        request exactly that slot instead -- use this ONLY when the driver has
+        explicitly picked a specific option from a list you already showed them
+        in this conversation (e.g. "take the second one", "the 7:30 one"), using
+        the exact slot_id from that earlier tool result. Never invent a slot_id.
+        Call this immediately after report_delay_or_eta_change (or after
+        list_feasible_dock_slots if the driver is just asking about slots with
+        no new delay to report) instead of listing multiple options for the
+        driver to choose from -- only pass slot_id when they've already made
+        that choice themselves.
+        Only call this when the driver is explicitly asking to book, change, or move
+        a dock slot -- never to answer a question about an EXISTING request's status
+        (use check_request_status for that) or as a default action for messages that
+        aren't about booking at all.
+        Returns one of these statuses: "already_booked" (the existing confirmed
+        appointment still fits, nothing to request), "request_submitted" (a
+        change request was filed and is now pending WMS approval -- check the
+        "via_swap" field to know whether it also requires displacing another
+        shipment), "request_already_pending" (a request for this exact slot was
+        already filed and is still waiting on WMS -- nothing new was submitted,
+        this is the same request as before, not a fresh one), "invalid_slot"
+        (only when slot_id was given -- that slot isn't a currently compatible
+        option anymore, e.g. it was taken or no longer fits the ETA; call
+        list_feasible_dock_slots again rather than guessing another one),
+        "gated_in" (the shipment already checked in at the facility, so no
+        further change is possible from chat -- tell the driver to speak to
+        gate/WMS staff on site), or "escalated" (nothing compatible and no swap
+        candidate existed, so this was handed to a human coordinator)."""
         try:
-            return service.auto_book_earliest_feasible_slot(principal)
+            return service.auto_book_earliest_feasible_slot(principal, slot_id=slot_id)
+        except DriverChatError as exc:
+            return {"error": exc.code, "message": exc.message}
+
+    @tool(args_schema=CheckRequestStatusInput)
+    def check_request_status() -> dict:
+        """Look up whether WMS has decided on the driver's most recently filed dock
+        slot request. Use this whenever the driver asks something like "is my
+        request approved?", "did WMS decide?", "what happened to my booking?",
+        or "is my slot confirmed?" -- NEVER call book_next_available_dock_slot to
+        answer a question like that, since that tool files a NEW request instead
+        of checking an existing one. Returns has_request: False if nothing has
+        been filed yet; otherwise "status": "PENDING" (still waiting on WMS),
+        "APPROVED" (the requested slot is now the shipment's confirmed
+        appointment), or "DECLINED" (WMS rejected it)."""
+        try:
+            return service.get_latest_change_request_status(principal)
+        except DriverChatError as exc:
+            return {"error": exc.code, "message": exc.message}
+
+    @tool(args_schema=CancelPendingRequestInput)
+    def cancel_pending_dock_request(reason: str | None = None) -> dict:
+        """Withdraw the driver's own dock-slot change request while it's still PENDING
+        with WMS. Use this whenever the driver says something like "cancel my request",
+        "never mind, don't book that", "withdraw my slot request", or "forget the change
+        I asked for" -- NEVER call book_next_available_dock_slot for this, since that
+        tool has no concept of cancelling anything and would just file ANOTHER request
+        instead, the opposite of what the driver wants.
+        Returns "cancelled" (the PENDING request was withdrawn -- tell the driver plainly
+        that it's cancelled, nothing pending anymore), "no_pending_request" (there was
+        nothing to cancel -- tell them that), or "already_decided" (WMS decided it just
+        before it could be cancelled -- tell the driver the real outcome instead of
+        pretending the cancel worked; they may need check_request_status next)."""
+        try:
+            return service.cancel_pending_request(principal, reason=reason)
         except DriverChatError as exc:
             return {"error": exc.code, "message": exc.message}
 
@@ -144,10 +202,32 @@ def build_tools(service: "DriverChatService", principal: "DriverPrincipal") -> l
         except DriverChatError as exc:
             return {"error": exc.code, "message": exc.message}
 
+    @tool(args_schema=FlagEmergencyInput)
+    def flag_emergency_situation(reason: str) -> dict:
+        """Flag a SAFETY-CRITICAL emergency: accident, engine failure/breakdown
+        that leaves the driver stranded or unsafe, medical emergency, or a
+        hazmat spill. This is different from escalate_to_human (which is for
+        ordinary "no slot found"/"driver wants a person" cases) -- use this one
+        specifically for situations involving driver safety. This marks the
+        thread escalated and makes an "Send Emergency Alert" button appear in
+        the driver's app so THEY can choose to notify the emergency contact by
+        SMS with their shipment/location details -- it does not send that SMS
+        itself. Always also tell the driver, in your reply, to call emergency
+        services directly first if there is any immediate danger -- you are not
+        a substitute for that."""
+        try:
+            service.flag_emergency_situation(principal, reason)
+            return {"status": "flagged", "message": "Emergency flagged. The driver can now send an alert from the app."}
+        except DriverChatError as exc:
+            return {"error": exc.code, "message": exc.message}
+
     return [
         report_delay_or_eta_change,
         list_feasible_dock_slots,
         book_next_available_dock_slot,
+        cancel_pending_dock_request,
+        check_request_status,
         update_arrival_checkin,
         escalate_to_human,
+        flag_emergency_situation,
     ]

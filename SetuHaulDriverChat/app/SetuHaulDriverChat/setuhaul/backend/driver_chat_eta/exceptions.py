@@ -34,6 +34,18 @@ class ShipmentNotFoundError(DriverChatError):
     code = "SHIPMENT_NOT_FOUND"
 
 
+class MultipleActiveShipmentsError(DriverChatError):
+    """Raised instead of silently picking one when a driver has more than
+    one active shipment and an action/state-changing method needs exactly
+    one to act on (report a delay, book/cancel a dock slot, check request
+    status, update arrival check-in, etc). Callers -- both the regex
+    fallback and the LLM tool wrappers -- turn this into a clarification
+    question for the driver rather than treating it like any other error."""
+
+    status_code = 409
+    code = "MULTIPLE_ACTIVE_SHIPMENTS"
+
+
 class SlotNotFoundError(DriverChatError):
     status_code = 404
     code = "SLOT_NOT_FOUND"

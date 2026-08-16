@@ -53,6 +53,22 @@ class DockSchedulerService:
         self.repository.ensure_future_slots_for_shipment(shipment_id)
         slots = self.repository.compatible_slots(shipment_id)
 
+        # compatible_slots() deliberately queries a rolling window starting
+        # 24h before "now" (see its own docstring) -- a generous lower bound
+        # chosen for query-cost reasons, not because every row in it is
+        # still actually bookable. Concretely: a slot from yesterday
+        # afternoon is still inside that window and still carries
+        # availability_status=AVAILABLE (nothing ever flips that once its
+        # time passes), so without this filter WMS/TMS staff were shown --
+        # and could attempt to reserve -- dock slots whose time had already
+        # elapsed. Driver-chat's own _feasible_slots() never had this
+        # problem because it separately filters on the driver's declared
+        # ETA, which for an already-in-transit shipment is always >= now;
+        # this board has no such ETA filter, so it needs its own explicit
+        # "already over" check.
+        now = datetime.now(timezone.utc)
+        slots = [row for row in slots if parse_ts(row["slot_end_ts"]) >= now]
+
         # compatible_slots() has no notion of the facility's own operating
         # hours -- suggest_slots() already filtered by them via
         # FacilityConstraintEvaluator, but this board (what WMS/TMS/driver
@@ -86,6 +102,87 @@ class DockSchedulerService:
             )
             for row in slots
         ]
+
+    def dock_board_unavailable_reason(self, shipment_id: str) -> str | None:
+        """Explain why dock_board() came back empty for this shipment.
+
+        The frontend only calls this when the board is already known to be
+        empty, so it re-derives the answer by walking the exact same filter
+        chain dock_board()/compatible_slots() apply -- docks at the facility
+        -> ACTIVE docks -> dock-type match -> refrigeration match -> weight
+        capacity match -> operating-hours overlap -- and returns a message
+        for the FIRST stage that eliminates every candidate. That's the
+        actual blocker; later stages are moot once an earlier one has
+        already zeroed out the list. Returns None only if nothing here can
+        explain it (e.g. a transient data issue) -- callers should fall back
+        to a generic "no slots right now" message in that case.
+        """
+        try:
+            target = self.repository.shipment(shipment_id)
+        except DockSchedulerError:
+            return None
+
+        facility_id = target.get("destination_facility_id")
+        if not facility_id:
+            return "This shipment has no destination facility assigned yet, so no dock board can be shown."
+
+        try:
+            facility = self.repository.facility(facility_id)
+        except DockSchedulerError:
+            facility = None
+
+        all_docks = self.repository.docks_for_facility(facility_id)
+        if not all_docks:
+            return "This facility has no docks configured yet."
+
+        active_docks = [d for d in all_docks if d.get("dock_status") == "ACTIVE"]
+        if not active_docks:
+            return "Every dock at this facility is currently inactive or out of service."
+
+        required_dock_type = target.get("required_dock_type")
+        type_matches = [
+            d for d in active_docks if required_dock_type == "ANY" or d.get("dock_type") == required_dock_type
+        ]
+        if not type_matches:
+            available_types = sorted({d.get("dock_type") for d in active_docks if d.get("dock_type")})
+            return (
+                f"This shipment requires a {required_dock_type} dock, but no active dock at this "
+                f"facility is that type -- active dock types here: {', '.join(available_types) or 'none'}."
+            )
+
+        refrigeration_matches = type_matches
+        if target.get("temperature_control_required"):
+            refrigeration_matches = [d for d in type_matches if d.get("supports_refrigerated")]
+            if not refrigeration_matches:
+                return (
+                    f"This shipment needs a refrigerated dock, but no active {required_dock_type} dock "
+                    "at this facility supports refrigeration."
+                )
+
+        load_weight_kg = target.get("load_weight_kg")
+        weight_matches = refrigeration_matches
+        if load_weight_kg is not None:
+            weight_matches = [
+                d
+                for d in refrigeration_matches
+                if d.get("max_vehicle_weight_kg") is None or d.get("max_vehicle_weight_kg") >= load_weight_kg
+            ]
+            if not weight_matches:
+                heaviest = max((d.get("max_vehicle_weight_kg") or 0) for d in refrigeration_matches)
+                return (
+                    f"This shipment's load ({load_weight_kg:,} kg) exceeds the weight capacity of "
+                    f"every matching dock at this facility (highest capacity here: {heaviest:,} kg)."
+                )
+
+        hours_note = ""
+        if facility and facility.get("open_time") and facility.get("close_time"):
+            hours_note = f" ({facility['open_time']}–{facility['close_time']})"
+        dock_word = "dock" if len(weight_matches) == 1 else "docks"
+        return (
+            f"{len(weight_matches)} matching {dock_word} at this facility, but none currently have an "
+            f"open appointment slot within the facility's operating hours{hours_note} right now -- "
+            "try again shortly, or ask WMS to open more slots."
+        )
 
     def hold_slot(self, shipment_id: str, slot_id: str, ttl_minutes: int = 15) -> HoldResult:
         """Reserve a slot temporarily while the driver considers the option."""
@@ -242,6 +339,43 @@ class DockSchedulerService:
                 "decided_at": _now_iso(),
                 "decided_by_user_id": decided_by_user_id,
                 "decision_note": note,
+            },
+        )
+        return updated or request
+
+    def withdraw_change_request(
+        self, change_request_id: str, withdrawn_by_user_id: str, note: str | None = None
+    ) -> dict:
+        """Withdraw a still-PENDING change request before WMS has decided on
+        it -- e.g. the driver who requested it changed their mind ("cancel
+        my request"), or driver_chat_eta's auto-book flow is superseding a
+        stale request with a better one it just found (see
+        DriverChatService.auto_book_earliest_feasible_slot's dedup logic).
+
+        Reuses the 'DECLINED' status rather than adding a new one -- the
+        `dock_slot_change_requests.request_status` check constraint only
+        allows PENDING/APPROVED/DECLINED (see
+        supabase/migrations/20260814140000_dock_slot_change_requests.sql),
+        and a driver-initiated withdrawal is, from WMS's point of view,
+        exactly the same as "nothing to review here anymore" that a decline
+        already is. `decision_note` always says explicitly that this was a
+        withdrawal, not an actual WMS rejection, so the distinction is
+        still visible to anyone reading the request's history.
+        """
+        request = self.repository.get_change_request(change_request_id)
+        if request is None:
+            raise ChangeRequestNotFoundError(f"Unknown change request: {change_request_id}")
+        if request["request_status"] != "PENDING":
+            raise ChangeRequestAlreadyDecidedError(
+                f"This request was already {request['request_status'].lower()}."
+            )
+        updated = self.repository.update_change_request(
+            change_request_id,
+            {
+                "request_status": "DECLINED",
+                "decided_at": _now_iso(),
+                "decided_by_user_id": withdrawn_by_user_id,
+                "decision_note": note or "Withdrawn before WMS review.",
             },
         )
         return updated or request

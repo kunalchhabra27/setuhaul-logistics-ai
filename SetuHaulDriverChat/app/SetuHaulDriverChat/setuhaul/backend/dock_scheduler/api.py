@@ -19,6 +19,7 @@ from setuhaul.backend.dock_scheduler.models import (
     ConfirmResponse,
     CreateChangeRequest,
     DecideChangeRequest,
+    DockBoardReasonResponse,
     DockSlot,
     DriverConstraints,
     HoldRequest,
@@ -31,8 +32,10 @@ from setuhaul.backend.dock_scheduler.models import (
 from setuhaul.backend.dock_scheduler.repository import DockSchedulerRepository, parse_ts
 from setuhaul.backend.dock_scheduler.service import DockSchedulerService
 from setuhaul.infrastructure.auth import Principal, require_admin, require_reader
+from setuhaul.infrastructure.metrics import emit_domain_event, increment
 from setuhaul.infrastructure.settings import get_settings
 from setuhaul.infrastructure.supabase_client import create_caller_client
+from setuhaul.infrastructure.telemetry import observe_operation
 
 router = APIRouter(prefix="/dock-scheduler", tags=["dock-scheduler"])
 
@@ -62,9 +65,21 @@ def suggest_slots(
         must_finish_by=request.must_finish_by,
     )
     try:
-        suggestions = service.suggest_slots(request.shipment_id, constraints, request.limit)
+        suggestions = observe_operation(
+            "dock_scheduler.slot_search",
+            {"operation": "suggest_slots", "shipment_id": request.shipment_id},
+            lambda: service.suggest_slots(request.shipment_id, constraints, request.limit),
+        )
     except DockSchedulerError as exc:
         raise _handle_error(exc) from exc
+    increment("setuhaul.scheduler.slot_searches", {"shipment_id": request.shipment_id})
+    if not suggestions:
+        increment("setuhaul.scheduler.no_feasible_slot", {"shipment_id": request.shipment_id})
+    emit_domain_event(
+        "slot_search_completed",
+        shipment_id=request.shipment_id,
+        result="feasible" if suggestions else "no_feasible_slot",
+    )
     return [SlotSuggestionResponse.from_suggestion(item) for item in suggestions]
 
 
@@ -78,9 +93,33 @@ def dock_board(shipment_id: str, service: DockSchedulerService = Depends(get_ser
     `GET /dock-scheduler/board?shipment_id=SHP1006`
     """
     try:
-        return service.dock_board(shipment_id)
+        return observe_operation(
+            "dock_scheduler.dock_board",
+            {"operation": "dock_board", "shipment_id": shipment_id},
+            lambda: service.dock_board(shipment_id),
+        )
     except DockSchedulerError as exc:
         raise _handle_error(exc) from exc
+
+
+@router.get("/board/reason", response_model=DockBoardReasonResponse)
+def dock_board_unavailable_reason(
+    shipment_id: str, service: DockSchedulerService = Depends(get_service)
+) -> DockBoardReasonResponse:
+    """Why GET /board came back empty for this shipment -- called by the
+    frontend only when the board is already known to be empty, to explain
+    the specific blocker (no active docks, dock-type/refrigeration/weight
+    mismatch, or no slots within operating hours) instead of a bare "no
+    slots" message.
+
+    Example:
+    `GET /dock-scheduler/board/reason?shipment_id=SHP1006`
+    """
+    try:
+        reason = service.dock_board_unavailable_reason(shipment_id)
+    except DockSchedulerError as exc:
+        raise _handle_error(exc) from exc
+    return DockBoardReasonResponse(reason=reason)
 
 
 @router.post("/hold", response_model=HoldResponse)
@@ -90,8 +129,15 @@ def hold_slot(
     service: DockSchedulerService = Depends(get_service),
 ) -> HoldResponse:
     try:
-        hold = service.hold_slot(request.shipment_id, request.slot_id, request.ttl_minutes)
+        hold = observe_operation(
+            "dock_scheduler.slot_hold",
+            {"operation": "hold_slot", "shipment_id": request.shipment_id},
+            lambda: service.hold_slot(request.shipment_id, request.slot_id, request.ttl_minutes),
+        )
     except DockSchedulerError as exc:
+        if isinstance(exc, SlotUnavailableError):
+            increment("setuhaul.scheduler.conflicts", {"shipment_id": request.shipment_id})
+            emit_domain_event("slot_conflict", shipment_id=request.shipment_id, result="rejected")
         raise _handle_error(exc) from exc
     return HoldResponse.from_hold(hold)
 
@@ -126,11 +172,18 @@ def confirm_booking(
     service: DockSchedulerService = Depends(get_service),
 ) -> ConfirmResponse:
     try:
-        appointment_id = service.confirm_booking(
-            request.shipment_id, request.slot_id, request.accepted
+        appointment_id = observe_operation(
+            "dock_scheduler.slot_confirm",
+            {"operation": "confirm_booking", "shipment_id": request.shipment_id},
+            lambda: service.confirm_booking(request.shipment_id, request.slot_id, request.accepted),
         )
     except DockSchedulerError as exc:
+        if isinstance(exc, SlotUnavailableError):
+            increment("setuhaul.scheduler.conflicts", {"shipment_id": request.shipment_id})
+            emit_domain_event("slot_conflict", shipment_id=request.shipment_id, result="rejected")
         raise _handle_error(exc) from exc
+    increment("setuhaul.scheduler.confirmations", {"shipment_id": request.shipment_id})
+    emit_domain_event("slot_confirmed", shipment_id=request.shipment_id, result="success")
     return ConfirmResponse(
         appointment_id=appointment_id,
         shipment_id=request.shipment_id,
@@ -169,6 +222,8 @@ def create_change_request(
         )
     except DockSchedulerError as exc:
         raise _handle_error(exc) from exc
+    increment("setuhaul.tms.slot_changes", {"shipment_id": request.shipment_id})
+    emit_domain_event("slot_change_requested", shipment_id=request.shipment_id, result="success")
     return ChangeRequestResponse(**row)
 
 
@@ -197,8 +252,12 @@ def decide_change_request(
     service: DockSchedulerService = Depends(get_service),
 ) -> ChangeRequestResponse:
     try:
-        row = service.decide_change_request(
-            change_request_id, approve=request.approve, decided_by_user_id=principal.user_id, note=request.note
+        row = observe_operation(
+            "dock_scheduler.change_request_decision",
+            {"operation": "decide_change_request", "result": "approved" if request.approve else "declined"},
+            lambda: service.decide_change_request(
+                change_request_id, approve=request.approve, decided_by_user_id=principal.user_id, note=request.note
+            ),
         )
     except DockSchedulerError as exc:
         raise _handle_error(exc) from exc

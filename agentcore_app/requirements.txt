@@ -6,6 +6,17 @@
 # deployments of the same setuhaul package.
 bedrock-agentcore
 langchain>=0.3
+# The actual, currently-live tool-calling model -- llm/agent.py's
+# is_configured()/_run_chat_turn (which this container's entrypoint calls
+# directly) checks HUGGINGFACEHUB_API_TOKEN and imports ChatHuggingFace/
+# HuggingFaceEndpoint, not Gemini. Without this package the import fails at
+# runtime, gets swallowed by the broad except in agentcore_app/app.py, and
+# every invocation silently falls back to the regex parser instead of
+# actually running the LLM.
+langchain-huggingface>=1.2
+# Kept only because transcribe_audio() (Vercel/FastAPI voice-note path,
+# never called from this container) imports langchain_google_genai -- left
+# in so the vendored setuhaul/ package's imports resolve identically.
 langchain-google-genai>=2.0
 supabase==2.31.0
 redis>=5.0

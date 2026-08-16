@@ -8,6 +8,7 @@ from setuhaul.backend.dock_scheduler.models import ChangeRequestRole, Suggestion
 from setuhaul.backend.dock_scheduler.repository import DockSchedulerRepository
 from setuhaul.backend.dock_scheduler.service import DockSchedulerService
 from setuhaul.backend.dock_scheduler.tests.conftest import (
+    DOCK_REEFER,
     DOCK_STANDARD_1,
     FACILITY,
     SHP_NORMAL,
@@ -163,6 +164,38 @@ def test_dock_board_excludes_slots_outside_facility_operating_hours(service, tab
     assert "SLOT-D1-2200" not in {s.slot_id for s in board}
 
 
+def test_dock_board_unavailable_reason_explains_dock_type_mismatch(service, tables):
+    # Remove the only REEFER dock -- SHP_REEFER needs one, so the board is
+    # empty, and the reason must name the actual blocker (dock type), not a
+    # generic "nothing here". Mutated in place (slice assignment), not
+    # reassigned -- FakeSupabaseClient captures a reference to this exact
+    # list object at construction time, so `tables["docks"] = [...]` would
+    # rebind the dict key without the fake client ever seeing the change.
+    tables["docks"][:] = [d for d in tables["docks"] if d["dock_id"] != DOCK_REEFER]
+    assert service.dock_board(SHP_REEFER) == []
+    reason = service.dock_board_unavailable_reason(SHP_REEFER)
+    assert reason is not None
+    assert "REEFER" in reason
+    assert "STANDARD" in reason  # still lists what IS available, for context
+
+
+def test_dock_board_unavailable_reason_explains_no_active_docks(service, tables):
+    for dock in tables["docks"]:
+        dock["dock_status"] = "OUT_OF_SERVICE"
+    assert service.dock_board(SHP_NORMAL) == []
+    reason = service.dock_board_unavailable_reason(SHP_NORMAL)
+    assert reason == "Every dock at this facility is currently inactive or out of service."
+
+
+def test_dock_board_unavailable_reason_explains_weight_capacity(service, tables):
+    for dock in tables["docks"]:
+        dock["max_vehicle_weight_kg"] = 1000  # below every shipment's load_weight_kg (10000)
+    assert service.dock_board(SHP_NORMAL) == []
+    reason = service.dock_board_unavailable_reason(SHP_NORMAL)
+    assert reason is not None
+    assert "exceeds the weight capacity" in reason
+
+
 def test_hold_slot_accepts_any_compatible_slot_not_just_top_ranked(service):
     board = service.dock_board(SHP_NORMAL)
     # Hold the chronologically-last compatible slot -- this used to be
@@ -288,6 +321,47 @@ def test_change_request_cannot_be_decided_twice(service):
 
     with pytest.raises(ChangeRequestAlreadyDecidedError):
         service.decide_change_request(request["change_request_id"], approve=True, decided_by_user_id="wms-1", note=None)
+
+
+def test_withdraw_change_request_marks_it_declined_with_a_distinguishing_note(service):
+    # Used by driver_chat_eta when a driver cancels a request they made, or
+    # when the chatbot supersedes a stale request with a better one it just
+    # found (see DriverChatService._reuse_or_supersede_pending_request).
+    # Reuses the 'DECLINED' status (the DB check constraint has no separate
+    # CANCELLED/WITHDRAWN value), so the note must make clear this wasn't an
+    # actual WMS rejection.
+    request = service.create_change_request(
+        shipment_id=SHP_NORMAL,
+        requested_slot_id="SLOT-D1-0900",
+        requested_by_role=ChangeRequestRole.DRIVER,
+        requested_by_user_id="driver-1",
+        reason=None,
+    )
+
+    withdrawn = service.withdraw_change_request(request["change_request_id"], withdrawn_by_user_id="driver-1")
+
+    assert withdrawn["request_status"] == "DECLINED"
+    assert withdrawn["decided_by_user_id"] == "driver-1"
+    assert "withdraw" in withdrawn["decision_note"].lower()
+
+    # The appointment (if any) is untouched -- withdrawing a request never
+    # moves anything, unlike an approval.
+    current = service.repository.current_appointment(SHP_NORMAL)
+    assert current is None
+
+
+def test_withdraw_change_request_cannot_withdraw_an_already_decided_request(service):
+    request = service.create_change_request(
+        shipment_id=SHP_NORMAL,
+        requested_slot_id="SLOT-D1-0900",
+        requested_by_role=ChangeRequestRole.DRIVER,
+        requested_by_user_id="driver-1",
+        reason=None,
+    )
+    service.decide_change_request(request["change_request_id"], approve=False, decided_by_user_id="wms-1", note=None)
+
+    with pytest.raises(ChangeRequestAlreadyDecidedError):
+        service.withdraw_change_request(request["change_request_id"], withdrawn_by_user_id="driver-1")
 
 
 def test_change_request_approval_executes_a_priority_swap(tables):

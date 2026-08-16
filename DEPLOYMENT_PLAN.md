@@ -175,10 +175,22 @@ agentcore invoke "I am 2 hours late, book me a slot"
 
 For local `agentcore dev` testing, put these in the generated `agentcore/.env.local` (gitignored). For the deployed Runtime, either add them as plain env vars via the AWS console / `update-agent-runtime` after `agentcore deploy`, or (recommended for `GOOGLE_API_KEY`/`LANGCHAIN_API_KEY`) use `agentcore add credential --name <Name> --type api-key --api-key <value>` before `agentcore deploy`, which stores it in Secrets Manager and wires it in automatically:
 
+**Update (post-tasks #136/#137): the live tool-calling model is no longer Gemini.** The app was
+later swapped onto an open-weights model served via Hugging Face Inference Providers --
+`llm/agent.py`'s `is_configured()`/`_run_chat_turn` (which this container's entrypoint calls
+directly, with no fallback check) gate on `HUGGINGFACEHUB_API_TOKEN`, not `GOOGLE_API_KEY`.
+`GOOGLE_API_KEY` is still listed below because `agentcore_app`'s vendored `setuhaul` copy imports
+`langchain_google_genai` for the (Vercel-only) voice-transcription path, but it is **not** what
+answers a driver's chat message from this runtime -- `HUGGINGFACEHUB_API_TOKEN` is the one that
+actually matters here.
+
 | Variable | Value |
 |---|---|
-| `GOOGLE_API_KEY` | Your Gemini API key (see §5 — get a **paid-tier** key, not the free 20-req/day tier we hit earlier) |
-| `DRIVER_CHAT_LLM_MODEL` | `gemini-2.5-flash` (or whatever you're pinned to) |
+| `HUGGINGFACEHUB_API_TOKEN` | **Required** — your Hugging Face Inference Providers token (a "Read" token from huggingface.co/settings/tokens is enough); without this, every chat turn silently falls back to the regex parser instead of running the LLM |
+| `DRIVER_CHAT_LLM_MODEL` | `meta-llama/Llama-3.3-70B-Instruct` (or whatever you're pinned to) |
+| `DRIVER_CHAT_LLM_PROVIDER` | `auto` (lets HF route to the fastest available provider) |
+| `GOOGLE_API_KEY` | Optional here — only needed if you want feature parity with Vercel's voice-transcription path; not used by this container's actual chat replies |
+| `DRIVER_CHAT_TRANSCRIPTION_MODEL` | `gemini-2.5-flash` (only relevant if `GOOGLE_API_KEY` is set) |
 | `SUPABASE_URL` | Same value as your other environments |
 | `SUPABASE_PUBLISHABLE_KEY` | Same value as your other environments |
 | `REDIS_URL` | The **same** Upstash `rediss://...` URL used on Vercel (§3.5) — keeps the LLM session scratchpad and facility/dock cache shared across both deployments |
