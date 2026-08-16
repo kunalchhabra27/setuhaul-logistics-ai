@@ -61,6 +61,16 @@ class CheckRequestStatusInput(BaseModel):
     """No arguments needed -- looks up the driver's own active shipment's latest request."""
 
 
+class CancelPendingRequestInput(BaseModel):
+    """Withdraw the driver's own still-PENDING dock-slot request. No slot_id needed --
+    there is at most one PENDING request per shipment at a time."""
+
+    reason: str | None = Field(
+        default=None,
+        description="A short, one-sentence reason the driver gave for cancelling, if any. Leave null otherwise.",
+    )
+
+
 class SlotIdInput(BaseModel):
     slot_id: str = Field(
         description=(

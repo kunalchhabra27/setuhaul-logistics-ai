@@ -46,6 +46,8 @@ from datetime import datetime, timedelta
 from uuid import uuid4
 
 from setuhaul.backend.dock_scheduler.exceptions import (
+    ChangeRequestAlreadyDecidedError,
+    ChangeRequestNotFoundError,
     DockSchedulerError,
     InvalidBookingError as DockInvalidBookingError,
     SlotUnavailableError as DockSlotUnavailableError,
@@ -60,6 +62,7 @@ from setuhaul.backend.driver_chat_eta.exceptions import (
     BusinessValidationError,
     DriverChatError,
     DriverProfileNotFoundError,
+    MultipleActiveShipmentsError,
     PersistenceError,
     ShipmentNotFoundError,
     SlotConflictError,
@@ -140,10 +143,27 @@ _LEAVE_BEFORE_PATTERN = re.compile(
 # anything that actually looks like a delay report or an explicit booking
 # request still goes through the existing pipeline below unchanged.
 _ACTION_VERB_PATTERN = re.compile(
-    r"\b(book|reserve|hold|reschedule|postpone|cancel|swap|"
+    r"\b(book|reserve|hold|reschedule|postpone|swap|"
     r"change (my|the)?\s*(dock|slot|appointment)?|"
     r"request (a |an )?(new |different |other )?(dock|slot)|"
     r"move (my|the) (dock|slot|appointment))\b",
+    re.IGNORECASE,
+)
+# Cancel/withdraw a still-PENDING dock-slot request -- checked and handled
+# BEFORE has_actionable_signal/_ACTION_VERB_PATTERN below, and deliberately
+# no longer part of _ACTION_VERB_PATTERN itself (it used to include
+# "cancel", which routed straight into the delay-report + auto-book
+# pipeline -- auto_book_earliest_feasible_slot has no concept of cancelling
+# anything, so "cancel my request" used to file ANOTHER pending request
+# instead, the exact opposite of what the driver asked for). Scoped to
+# request/booking/slot/appointment context so it doesn't swallow unrelated
+# uses of "cancel" (e.g. "cancel my shipment", which this chatbot doesn't
+# handle at all -- that stays whatever it was before this pattern existed).
+_CANCEL_REQUEST_PATTERN = re.compile(
+    r"\b(cancel|withdraw|scrap|drop)\b[^.?!]{0,30}\b(request|booking|slot|appointment)\b"
+    r"|\b(request|booking|slot|appointment)\b[^.?!]{0,30}\b(cancel|withdraw)\b"
+    r"|\bnever\s*mind\b[^.?!]{0,30}\b(book|request|slot|appointment)\b"
+    r"|^\s*cancel[\s!.,]*$",
     re.IGNORECASE,
 )
 # Early-arrival intent -- a driver reaching the facility SOONER than
@@ -241,6 +261,51 @@ class DriverChatService:
         # naturally scoped to one turn and never needs explicit clearing or
         # a TTL. Not a general-purpose cache and not shared across requests.
         self._feasible_slots_cache: dict[tuple, list[SlotOption]] = {}
+
+    def _resolve_single_active_shipment(self, principal: DriverPrincipal) -> dict | None:
+        """The driver's one unambiguous active shipment, or None if they
+        have none at all right now.
+
+        Regression fix: every action/state-changing method here used to
+        call `repository.get_active_shipment_for_driver` directly, which
+        silently returns the single earliest-ETA active shipment even when
+        a driver genuinely has more than one active at once (a real,
+        explicitly expected scenario -- a driver can be assigned a second
+        load before finishing the first). A message like "I'm running
+        late" or "cancel my request" would then get applied to whichever
+        shipment happened to have the earliest ETA, with no indication to
+        the driver that there even was a choice to make -- silently acting
+        on the wrong shipment instead of asking which one.
+
+        Raises MultipleActiveShipmentsError when there's more than one --
+        callers turn this into a clarification question (the regex
+        fallback replies directly; the LLM tool wrappers in llm/tools.py
+        already convert any DriverChatError into a `{"error", "message"}`
+        tool result, which the model relays as a question rather than
+        guessing). Read-only/display code (`_build_snapshot_sequential`)
+        deliberately keeps using the plain, non-raising lookup instead --
+        showing *a* default shipment in the snapshot is harmless; silently
+        acting on the wrong one via chat is not.
+        """
+        shipments = self.repository.list_active_shipments_for_driver(principal.user_id)
+        if not shipments:
+            return None
+        if len(shipments) == 1:
+            return shipments[0]
+
+        facility_ids = {s["destination_facility_id"] for s in shipments if s.get("destination_facility_id")}
+        facilities_by_id = {
+            facility_id: self.repository.get_facility(facility_id) for facility_id in facility_ids
+        }
+        labels = []
+        for shipment in shipments:
+            facility = facilities_by_id.get(shipment.get("destination_facility_id"))
+            facility_name = (facility or {}).get("facility_name") or shipment.get("destination_facility_id")
+            labels.append(f"{shipment['shipment_id']} ({facility_name})" if facility_name else shipment["shipment_id"])
+        raise MultipleActiveShipmentsError(
+            "You have more than one active delivery right now: " + ", ".join(labels) + ". "
+            "Which one are you referring to?"
+        )
 
     # -- profile ----------------------------------------------------------
 
@@ -575,7 +640,34 @@ class DriverChatService:
 
     def _handle_chat_message_regex(self, principal: DriverPrincipal, text: str) -> ChatResponse:
         driver = self.get_my_profile(principal)
-        shipment_row = self.repository.get_active_shipment_for_driver(principal.user_id)
+        try:
+            shipment_row = self._resolve_single_active_shipment(principal)
+        except MultipleActiveShipmentsError as exc:
+            # Same treatment as the no-shipment case just below -- this is
+            # a normal conversational reply, not a raised error, since chat
+            # must always respond to the driver rather than surfacing a
+            # hard failure. Not written to Supabase (no shipment is
+            # resolved yet, so there's nothing to attach a thread to),
+            # exactly like the no-shipment reply.
+            snapshot = self._build_snapshot(principal, driver)
+            driver_msg = ChatMessageSummary(
+                chat_message_id=_new_id("MSG"),
+                thread_id=None,
+                sender_type="DRIVER",
+                sender_reference=principal.user_id,
+                message_text=text,
+                message_ts=_now_iso(),
+            )
+            reply = ChatMessageSummary(
+                chat_message_id=_new_id("MSG"),
+                thread_id=None,
+                sender_type="AGENT",
+                sender_reference=None,
+                message_text=exc.message,
+                message_ts=_now_iso(),
+            )
+            snapshot.chat_messages = [driver_msg, reply]
+            return ChatResponse(agent_message=reply, suggested_options=[], exception=None, snapshot=snapshot)
         if shipment_row is None:
             # Chat is always available in the UI, with or without a shipment,
             # so this must be a normal reply rather than a raised error --
@@ -608,6 +700,17 @@ class DriverChatService:
             )
             snapshot.chat_messages = [driver_msg, reply]
             return ChatResponse(agent_message=reply, suggested_options=[], exception=None, snapshot=snapshot)
+
+        # Checked BEFORE any delay/ETA/booking-verb parsing -- a driver
+        # cancelling a request is never also a delay report or a new
+        # booking request in the same breath, and this must never reach
+        # the auto-book pipeline below (see _CANCEL_REQUEST_PATTERN's own
+        # comment for why "cancel" was removed from _ACTION_VERB_PATTERN).
+        if _CANCEL_REQUEST_PATTERN.search(text):
+            cancel_result = self.cancel_pending_request(principal, reason=text)
+            return self._reply_general_question(
+                principal, driver, shipment_row, text, self._compose_cancel_reply(cancel_result)
+            )
 
         planned_eta = _parse_dt(shipment_row.get("original_eta_ts")) or datetime.utcnow()
 
@@ -1245,7 +1348,7 @@ class DriverChatService:
 
     def get_current_feasible_slots(self, principal: DriverPrincipal) -> list[SlotOption]:
         """Return the currently compatible open dock slots for the driver's active shipment."""
-        shipment_row = self.repository.get_active_shipment_for_driver(principal.user_id)
+        shipment_row = self._resolve_single_active_shipment(principal)
         if shipment_row is None:
             raise ShipmentNotFoundError("No active shipment is assigned to you.")
         if not shipment_row.get("destination_facility_id"):
@@ -1282,7 +1385,7 @@ class DriverChatService:
         compatible slot was found.
         """
         self.get_my_profile(principal)  # raises DriverProfileNotFoundError if missing
-        shipment_row = self.repository.get_active_shipment_for_driver(principal.user_id)
+        shipment_row = self._resolve_single_active_shipment(principal)
         if shipment_row is None:
             raise ShipmentNotFoundError(
                 "No active shipment is assigned to you yet. Dispatch will assign a load before you can "
@@ -1473,6 +1576,18 @@ class DriverChatService:
             "No compatible dock slot was found for your declared ETA, so this has been escalated to a human coordinator."
         )
 
+    @staticmethod
+    def _compose_cancel_reply(result: dict) -> str:
+        """Plain-language version of a cancel_pending_request() result --
+        mirrors _compose_autobook_reply's role for the regex fallback."""
+        status = result.get("status")
+        if status == "cancelled":
+            dock = result.get("dock_code") or result.get("slot_id") or "your requested slot"
+            return f"Done -- your pending request for {dock} has been cancelled."
+        # "no_pending_request", "already_decided", or anything unrecognized
+        # all carry their own explanatory message from cancel_pending_request.
+        return result.get("message") or "I couldn't cancel that request -- please try again or contact dispatch."
+
     # -- slot hold / confirm ------------------------------------------------
 
     def hold_slot(self, principal: DriverPrincipal, slot_id: str) -> SlotActionResponse:
@@ -1485,7 +1600,7 @@ class DriverChatService:
         chatbot-only implementation never re-checked at hold time.
         """
         driver = self.get_my_profile(principal)
-        shipment_row = self.repository.get_active_shipment_for_driver(principal.user_id)
+        shipment_row = self._resolve_single_active_shipment(principal)
         if shipment_row is None:
             raise ShipmentNotFoundError("No active shipment is assigned to you.")
         shipment_id = shipment_row["shipment_id"]
@@ -1580,7 +1695,7 @@ class DriverChatService:
         chat. This method is only ever called from the LLM tool-calling loop
         (see llm/tools.py's `book_next_available_dock_slot`).
         """
-        shipment_row = self.repository.get_active_shipment_for_driver(principal.user_id)
+        shipment_row = self._resolve_single_active_shipment(principal)
         if shipment_row is None:
             raise ShipmentNotFoundError("No active shipment is assigned to you.")
         shipment_id = shipment_row["shipment_id"]
@@ -1702,6 +1817,33 @@ class DriverChatService:
             # swap, but only a human WMS user approves it (see the WMS
             # change-requests queue this lands in, the same one TMS/driver
             # self-service change requests already use).
+            #
+            # Dedup first: if a PENDING request already targets this exact
+            # slot, reuse it instead of filing a duplicate (see
+            # _reuse_or_supersede_pending_request's docstring) -- this is
+            # what makes repeating the same message to the chatbot
+            # idempotent instead of piling up competing WMS requests.
+            existing = self._reuse_or_supersede_pending_request(
+                shipment_id=shipment_id, target_slot_id=best_swap.slot_id, principal=principal
+            )
+            if existing is not None:
+                return {
+                    "status": "request_already_pending",
+                    "change_request_id": existing["change_request_id"],
+                    "slot_id": best_swap.slot_id,
+                    "dock_code": existing.get("dock_code") or best_swap.dock_code,
+                    "start_time": best_swap.start.isoformat(),
+                    "end_time": best_swap.end.isoformat(),
+                    "via_swap": True,
+                    "displaced_shipment_id": best_swap.displaced_shipment_id,
+                    "message": (
+                        f"You already have a request for dock slot {best_swap.slot_id} at "
+                        f"{existing.get('dock_code') or best_swap.dock_code}, "
+                        f"{best_swap.start.strftime('%H:%M')}-{best_swap.end.strftime('%H:%M')} pending with WMS "
+                        "-- no need to submit it again."
+                    ),
+                }
+
             try:
                 request = self.dock_scheduler.create_change_request(
                     shipment_id=shipment_id,
@@ -1751,6 +1893,28 @@ class DriverChatService:
                 "message": "No compatible dock slot was found for the declared ETA, so this was escalated to a human coordinator.",
             }
 
+        # Same dedup as the swap branch above -- reuse an already-pending
+        # request for this exact slot instead of filing a duplicate.
+        existing = self._reuse_or_supersede_pending_request(
+            shipment_id=shipment_id, target_slot_id=best_direct.slot_id, principal=principal
+        )
+        if existing is not None:
+            return {
+                "status": "request_already_pending",
+                "change_request_id": existing["change_request_id"],
+                "slot_id": best_direct.slot_id,
+                "dock_code": existing.get("dock_code") or best_direct.dock_code,
+                "start_time": best_direct.start_time.isoformat(),
+                "end_time": best_direct.end_time.isoformat(),
+                "via_swap": False,
+                "message": (
+                    f"You already have a request for dock slot {best_direct.slot_id} at "
+                    f"{existing.get('dock_code') or best_direct.dock_code}, "
+                    f"{best_direct.start_time.strftime('%H:%M')}-{best_direct.end_time.strftime('%H:%M')} pending "
+                    "with WMS -- no need to submit it again."
+                ),
+            }
+
         try:
             request = self.dock_scheduler.create_change_request(
                 shipment_id=shipment_id,
@@ -1778,6 +1942,78 @@ class DriverChatService:
             ),
         }
 
+    def cancel_pending_request(self, principal: DriverPrincipal, reason: str | None = None) -> dict:
+        """Withdraw the driver's most recently filed dock-slot change
+        request, if it's still PENDING (WMS hasn't decided on it yet).
+
+        This is what "cancel my request" / "never mind, don't book that"
+        actually means, and it used to have no real handling at all: the
+        regex fallback's `_ACTION_VERB_PATTERN` treats "cancel" as a
+        generic booking verb and routed the whole message into
+        `auto_book_earliest_feasible_slot`, which has no concept of
+        cancelling anything -- it just filed ANOTHER pending request for
+        whatever slot currently looked best, the opposite of what the
+        driver asked for. This method (and the regex-fallback branch and
+        LLM tool that call it) exist specifically to stop that.
+
+        Only ever withdraws a PENDING request -- once WMS has already
+        approved or declined it, chat has nothing left to cancel: an
+        approved request is now a real appointment (ask a human to change
+        it), and a declined one is already resolved.
+        """
+        shipment_row = self._resolve_single_active_shipment(principal)
+        if shipment_row is None:
+            raise ShipmentNotFoundError("No active shipment is assigned to you.")
+        shipment_id = shipment_row["shipment_id"]
+
+        requests = self.dock_scheduler.repository.list_change_requests(shipment_id=shipment_id)
+        pending = next((r for r in requests if r.get("request_status") == "PENDING"), None)
+        if pending is None:
+            return {
+                "status": "no_pending_request",
+                "message": "You don't have a dock slot request waiting on WMS right now, so there's nothing to cancel.",
+            }
+
+        try:
+            self.dock_scheduler.withdraw_change_request(
+                pending["change_request_id"],
+                withdrawn_by_user_id=principal.user_id,
+                note=reason or "Cancelled by the driver via chat.",
+            )
+        except (ChangeRequestNotFoundError, ChangeRequestAlreadyDecidedError) as exc:
+            # Raced with WMS deciding it in the moments before this call --
+            # tell the driver the truth instead of pretending the cancel
+            # went through.
+            return {
+                "status": "already_decided",
+                "message": f"That request was just decided by WMS before it could be cancelled: {exc}",
+            }
+
+        exception_row = self.repository.get_active_exception_for_driver(principal.user_id)
+        if exception_row and exception_row.get("exception_status") == "WAITING_CONFIRMATION":
+            self.repository.update_exception(exception_row["exception_id"], {"exception_status": "NEEDS_INFORMATION"})
+            if exception_row.get("thread_id"):
+                self.repository.insert_chat_message(
+                    {
+                        "chat_message_id": _new_id("MSG"),
+                        "thread_id": exception_row["thread_id"],
+                        "sender_type": "SYSTEM",
+                        "message_text": (
+                            f"Dock slot change request {pending['change_request_id']} was cancelled at the "
+                            "driver's request."
+                        ),
+                        "message_ts": _now_iso(),
+                    }
+                )
+
+        return {
+            "status": "cancelled",
+            "change_request_id": pending["change_request_id"],
+            "slot_id": pending.get("requested_slot_id"),
+            "dock_code": pending.get("dock_code"),
+            "message": "Your pending dock slot request has been cancelled.",
+        }
+
     def get_latest_change_request_status(self, principal: DriverPrincipal) -> dict:
         """Status of the most recently filed dock-slot change request for the
         driver's active shipment -- lets the chatbot answer "is my request
@@ -1790,7 +2026,7 @@ class DriverChatService:
         for this shipment (e.g. the driver hasn't asked to book/change a
         slot yet).
         """
-        shipment_row = self.repository.get_active_shipment_for_driver(principal.user_id)
+        shipment_row = self._resolve_single_active_shipment(principal)
         if shipment_row is None:
             raise ShipmentNotFoundError("No active shipment is assigned to you.")
         requests = self.dock_scheduler.repository.list_change_requests(shipment_id=shipment_row["shipment_id"])
@@ -1812,6 +2048,63 @@ class DriverChatService:
             "decided_at": latest.get("decided_at"),
             "decision_note": latest.get("decision_note"),
         }
+
+    def _reuse_or_supersede_pending_request(
+        self, *, shipment_id: str, target_slot_id: str, principal: DriverPrincipal
+    ) -> dict | None:
+        """Called right before filing a new change request in
+        `auto_book_earliest_feasible_slot`, so this shipment never ends up
+        with two live PENDING requests at once.
+
+        Regression fix: this used to not exist at all -- every call to
+        auto_book_earliest_feasible_slot (the regex fallback re-evaluates on
+        every single message, see _handle_chat_message_regex) filed a brand
+        new PENDING change request regardless of whether one was already
+        sitting in WMS's queue for the exact same shipment. A driver
+        repeating themselves (a duplicate message from a flaky connection,
+        or just re-stating the same delay) or the chatbot being asked the
+        same thing twice in a row produced two, three, or more competing
+        PENDING requests for the same shipment -- confusing for WMS (which
+        one do they approve?) and a direct violation of "never double-act"/
+        "treat retries as idempotent".
+
+        Returns the EXISTING pending request's dict if it already targets
+        `target_slot_id` -- the caller should treat this as "nothing new to
+        file" rather than calling create_change_request again. Returns None
+        if the caller should go ahead and file a new request -- either
+        because nothing was pending, or because whatever WAS pending
+        targeted a different slot and has just been withdrawn here (see
+        DockSchedulerService.withdraw_change_request) to keep exactly one
+        live request per shipment instead of leaving the stale one to rot
+        alongside the new one.
+        """
+        pending = [
+            row
+            for row in self.dock_scheduler.repository.list_change_requests(shipment_id=shipment_id)
+            if row.get("request_status") == "PENDING"
+        ]
+        if not pending:
+            return None
+
+        same_slot = next((row for row in pending if row.get("requested_slot_id") == target_slot_id), None)
+        for row in pending:
+            if row is same_slot:
+                continue
+            try:
+                self.dock_scheduler.withdraw_change_request(
+                    row["change_request_id"],
+                    withdrawn_by_user_id=principal.user_id,
+                    note="Superseded by a newer request from the dispatch assistant.",
+                )
+            except DockSchedulerError:
+                import logging
+
+                logging.getLogger(__name__).exception(
+                    "driver_chat_eta: failed to withdraw stale change request %s for shipment %s.",
+                    row.get("change_request_id"),
+                    shipment_id,
+                )
+        return same_slot
 
     def _mark_request_pending(self, exception_row: dict | None, change_request_id: str) -> None:
         """Move the driver's active exception (if any) to WAITING_CONFIRMATION
@@ -1869,7 +2162,7 @@ class DriverChatService:
     def confirm_slot(self, principal: DriverPrincipal, slot_id: str) -> ConfirmSlotResponse:
         """Confirm a held slot via the shared WMS scheduling engine."""
         driver = self.get_my_profile(principal)
-        shipment_row = self.repository.get_active_shipment_for_driver(principal.user_id)
+        shipment_row = self._resolve_single_active_shipment(principal)
         if shipment_row is None:
             raise ShipmentNotFoundError("No active shipment is assigned to you.")
         shipment_id = shipment_row["shipment_id"]
@@ -1925,7 +2218,7 @@ class DriverChatService:
 
     def update_checkin(self, principal: DriverPrincipal, request: CheckinUpdateRequest) -> CheckinResponse:
         driver = self.get_my_profile(principal)
-        shipment_row = self.repository.get_active_shipment_for_driver(principal.user_id)
+        shipment_row = self._resolve_single_active_shipment(principal)
         if shipment_row is None:
             raise ShipmentNotFoundError("No active shipment is assigned to you.")
 

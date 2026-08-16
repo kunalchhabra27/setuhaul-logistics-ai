@@ -211,6 +211,14 @@ class DriverChatRepository:
     # -- shipments --------------------------------------------------------
 
     def get_active_shipment_for_driver(self, driver_id: str) -> dict[str, Any] | None:
+        """The single earliest active shipment for this driver, silently
+        picked if there happen to be more than one. Kept as-is (not
+        ambiguity-aware) for read-only/display purposes -- see
+        `list_active_shipments_for_driver` below, which
+        `DriverChatService._resolve_single_active_shipment` uses instead for
+        every action/state-changing entry point, where silently guessing the
+        wrong one among several would actually matter.
+        """
         rows = self._rows(
             self._execute(
                 self.client.table("shipments")
@@ -222,6 +230,25 @@ class DriverChatRepository:
             )
         )
         return rows[0] if rows else None
+
+    def list_active_shipments_for_driver(self, driver_id: str) -> list[dict[str, Any]]:
+        """Every active (not COMPLETED/CANCELLED) shipment currently
+        assigned to this driver, earliest ETA first -- unlike
+        `get_active_shipment_for_driver` above, this doesn't cap at one, so
+        callers can tell whether a driver genuinely has more than one
+        active shipment right now and needs to be asked which one they
+        mean, instead of the chatbot silently acting on whichever one
+        happens to have the earliest ETA.
+        """
+        return self._rows(
+            self._execute(
+                self.client.table("shipments")
+                .select("*")
+                .eq("driver_id", driver_id)
+                .not_.in_("current_status", ["COMPLETED", "CANCELLED"])
+                .order("original_eta_ts", desc=False)
+            )
+        )
 
     def update_shipment(self, shipment_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
         rows = self._rows(

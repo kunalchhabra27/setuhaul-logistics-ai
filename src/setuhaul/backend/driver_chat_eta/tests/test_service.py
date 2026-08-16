@@ -6,8 +6,13 @@ from datetime import datetime, timedelta
 
 from setuhaul.backend.dock_scheduler.models import SlotLifecycleStage, SlotSuggestion, SuggestionType
 from setuhaul.backend.dock_scheduler.repository import _FUTURE_SLOTS_LAST_CHECKED
-from setuhaul.backend.driver_chat_eta.exceptions import DriverChatError, PersistenceError, SlotConflictError
-from setuhaul.backend.driver_chat_eta.tests.conftest import FACILITY, SHIPMENT_ID
+from setuhaul.backend.driver_chat_eta.exceptions import (
+    DriverChatError,
+    MultipleActiveShipmentsError,
+    PersistenceError,
+    SlotConflictError,
+)
+from setuhaul.backend.driver_chat_eta.tests.conftest import DRIVER_ID, FACILITY, SHIPMENT_ID
 
 
 def test_handle_chat_message_propagates_driver_chat_errors_from_the_llm_path(service, principal, monkeypatch):
@@ -33,6 +38,77 @@ def test_handle_chat_message_propagates_driver_chat_errors_from_the_llm_path(ser
 
     with pytest.raises(DriverChatError):
         service.handle_chat_message(principal, "hi")
+
+
+def _add_second_active_shipment(tables: dict) -> None:
+    """Give the fixture driver a second active shipment at a different
+    facility -- used to test the multi-shipment disambiguation guard.
+    """
+    tables["facilities"].append(
+        {
+            "facility_id": "FAC-2",
+            "facility_name": "Gurgaon DC",
+            "city": "Gurgaon",
+            "state": "Haryana",
+            "timezone": "Asia/Kolkata",
+            "open_time": "06:00",
+            "close_time": "22:00",
+            "checkin_grace_min": 30,
+            "default_unload_min": 60,
+        }
+    )
+    tables["shipments"].append(
+        {
+            **tables["shipments"][0],
+            "shipment_id": "SHP002",
+            "destination_facility_id": "FAC-2",
+            "order_reference": "ORD-2",
+        }
+    )
+
+
+def test_multiple_active_shipments_raises_instead_of_silently_picking_one(service, principal, tables):
+    # Regression test: every action/state-changing method used to call
+    # repository.get_active_shipment_for_driver directly, which silently
+    # returns the single earliest-ETA active shipment even when the driver
+    # genuinely has more than one active at once (an explicitly expected
+    # scenario -- a driver can be assigned a second load before finishing
+    # the first). A message like "I'm running late" would then get applied
+    # to whichever shipment happened to have the earliest ETA, with no
+    # indication to the driver that there was ever a choice to make.
+    _add_second_active_shipment(tables)
+
+    with pytest.raises(MultipleActiveShipmentsError) as exc_info:
+        service.auto_book_earliest_feasible_slot(principal)
+
+    assert "SHP001" in str(exc_info.value)
+    assert "SHP002" in str(exc_info.value)
+
+
+def test_regex_fallback_multiple_active_shipments_asks_for_clarification(service, principal, tables):
+    _add_second_active_shipment(tables)
+
+    response = service._handle_chat_message_regex(principal, "I have a tyre issue, 5 minutes late")
+
+    text = response.agent_message.message_text
+    assert "SHP001" in text and "SHP002" in text
+    # Read-only -- nothing was reported/booked against either shipment
+    # until the driver actually says which one they mean.
+    assert tables["driver_exceptions"] == []
+    assert tables["eta_updates"] == []
+    assert service.dock_scheduler.list_change_requests() == []
+
+
+def test_snapshot_still_works_with_multiple_active_shipments(service, principal, tables):
+    # The read-only snapshot/display path deliberately keeps using the
+    # plain (non-raising) shipment lookup -- showing *a* default shipment
+    # there is harmless, unlike silently acting on the wrong one via chat,
+    # and snapshot must never break just because a driver has two loads.
+    _add_second_active_shipment(tables)
+
+    snapshot = service.snapshot(principal)
+
+    assert snapshot.shipment is not None
 
 
 def test_get_current_feasible_slots_returns_open_compatible_slot(service, principal):
@@ -285,6 +361,123 @@ def test_auto_book_requests_a_newly_available_earlier_slot_even_when_the_existin
     assert len(change_requests) == 1
     assert change_requests[0]["requested_slot_id"] == "SLOT-1"
     assert change_requests[0]["request_status"] == "PENDING"
+
+
+def test_auto_book_reuses_an_already_pending_request_for_the_same_slot(service, principal, tables):
+    # Regression test: auto_book_earliest_feasible_slot used to file a brand
+    # new PENDING change request on every single call, regardless of
+    # whether one already existed for this exact slot -- a driver repeating
+    # themselves (duplicate message, flaky connection) or the regex
+    # fallback re-evaluating on every turn produced multiple competing
+    # PENDING requests for the same shipment/slot. Calling it twice in a
+    # row with nothing having changed must reuse the existing request, not
+    # file a second one.
+    first = service.auto_book_earliest_feasible_slot(principal)
+    assert first["status"] == "request_submitted"
+
+    second = service.auto_book_earliest_feasible_slot(principal)
+    assert second["status"] == "request_already_pending"
+    assert second["slot_id"] == first["slot_id"]
+    assert second["change_request_id"] == first["change_request_id"]
+
+    requests = service.dock_scheduler.list_change_requests()
+    assert len(requests) == 1
+    assert requests[0]["request_status"] == "PENDING"
+
+
+def test_auto_book_withdraws_a_stale_pending_request_when_a_better_slot_is_found(service, principal, tables):
+    # A PENDING request already exists for SLOT-2 (the later of conftest's
+    # two STANDARD slots); SLOT-1 (earlier) is open and compatible. Rather
+    # than leaving both requests live -- ambiguous for WMS, which one do
+    # they approve? -- the stale SLOT-2 request must be withdrawn
+    # (declined, with a note distinguishing it from an actual WMS
+    # rejection) and exactly one new PENDING request filed for SLOT-1.
+    # Seeded via the fake client's own table/insert interface, not by
+    # mutating `tables` directly -- the `service` fixture already built the
+    # FakeSupabaseClient before this test body runs, and FakeSupabaseClient
+    # lazily creates a fresh (empty) FakeTable the first time a table name
+    # it doesn't already know about is accessed, so assigning straight into
+    # `tables["dock_slot_change_requests"]` here would silently never be
+    # seen by the client under test.
+    service.repository.client.table("dock_slot_change_requests").insert(
+        {
+            "change_request_id": "CHG-STALE",
+            "shipment_id": SHIPMENT_ID,
+            "current_appointment_id": None,
+            "requested_slot_id": "SLOT-2",
+            "requested_by_role": "DRIVER",
+            "requested_by_user_id": DRIVER_ID,
+            "reason": "stale test request",
+            "request_status": "PENDING",
+            "created_at": "2026-01-01T00:00:00",
+            "displaced_shipment_id": None,
+            "displaced_to_slot_id": None,
+        }
+    ).execute()
+
+    result = service.auto_book_earliest_feasible_slot(principal)
+
+    assert result["status"] == "request_submitted"
+    assert result["slot_id"] == "SLOT-1"
+
+    requests = {r["change_request_id"]: r for r in service.dock_scheduler.list_change_requests()}
+    assert requests["CHG-STALE"]["request_status"] == "DECLINED"
+    assert "superseded" in requests["CHG-STALE"]["decision_note"].lower()
+    new_requests = [r for r in requests.values() if r["change_request_id"] != "CHG-STALE"]
+    assert len(new_requests) == 1
+    assert new_requests[0]["requested_slot_id"] == "SLOT-1"
+    assert new_requests[0]["request_status"] == "PENDING"
+
+
+def test_regex_fallback_repeating_the_same_delay_message_does_not_duplicate_requests(service, principal, tables):
+    service._handle_chat_message_regex(principal, "I have a tyre issue, 5 minutes late")
+    response = service._handle_chat_message_regex(principal, "I have a tyre issue, 5 minutes late")
+
+    assert "already have a request" in response.agent_message.message_text.lower()
+    requests = service.dock_scheduler.list_change_requests()
+    assert len(requests) == 1
+
+
+def test_cancel_pending_request_withdraws_the_active_request(service, principal, tables):
+    # Regression test: "cancel my request" used to have no real handling --
+    # "cancel" was one of _ACTION_VERB_PATTERN's generic booking verbs, so
+    # it routed straight into auto_book_earliest_feasible_slot, which has
+    # no concept of cancelling anything and just filed ANOTHER pending
+    # request, the opposite of what the driver asked for.
+    filed = service.auto_book_earliest_feasible_slot(principal)
+    assert filed["status"] == "request_submitted"
+
+    result = service.cancel_pending_request(principal, reason="changed my mind")
+
+    assert result["status"] == "cancelled"
+    assert result["change_request_id"] == filed["change_request_id"]
+    requests = {r["change_request_id"]: r for r in service.dock_scheduler.list_change_requests()}
+    assert requests[filed["change_request_id"]]["request_status"] == "DECLINED"
+    assert requests[filed["change_request_id"]]["decision_note"] == "changed my mind"
+
+
+def test_cancel_pending_request_reports_nothing_to_cancel(service, principal):
+    result = service.cancel_pending_request(principal)
+
+    assert result["status"] == "no_pending_request"
+
+
+def test_regex_fallback_cancel_message_withdraws_the_request_not_files_a_new_one(service, principal, tables):
+    service._handle_chat_message_regex(principal, "I have a tyre issue, 5 minutes late")
+    response = service._handle_chat_message_regex(principal, "actually cancel my request")
+
+    assert "cancelled" in response.agent_message.message_text.lower()
+    requests = service.dock_scheduler.list_change_requests()
+    assert len(requests) == 1
+    assert requests[0]["request_status"] == "DECLINED"
+
+
+def test_regex_fallback_cancel_message_with_nothing_pending_does_not_create_an_exception(service, principal, tables):
+    response = service._handle_chat_message_regex(principal, "please cancel my request")
+
+    assert "nothing to cancel" in response.agent_message.message_text.lower()
+    assert tables["driver_exceptions"] == []
+    assert service.dock_scheduler.list_change_requests() == []
 
 
 def test_regex_fallback_files_a_request_instead_of_just_listing_options(service, principal, tables):

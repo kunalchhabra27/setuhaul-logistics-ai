@@ -343,6 +343,43 @@ class DockSchedulerService:
         )
         return updated or request
 
+    def withdraw_change_request(
+        self, change_request_id: str, withdrawn_by_user_id: str, note: str | None = None
+    ) -> dict:
+        """Withdraw a still-PENDING change request before WMS has decided on
+        it -- e.g. the driver who requested it changed their mind ("cancel
+        my request"), or driver_chat_eta's auto-book flow is superseding a
+        stale request with a better one it just found (see
+        DriverChatService.auto_book_earliest_feasible_slot's dedup logic).
+
+        Reuses the 'DECLINED' status rather than adding a new one -- the
+        `dock_slot_change_requests.request_status` check constraint only
+        allows PENDING/APPROVED/DECLINED (see
+        supabase/migrations/20260814140000_dock_slot_change_requests.sql),
+        and a driver-initiated withdrawal is, from WMS's point of view,
+        exactly the same as "nothing to review here anymore" that a decline
+        already is. `decision_note` always says explicitly that this was a
+        withdrawal, not an actual WMS rejection, so the distinction is
+        still visible to anyone reading the request's history.
+        """
+        request = self.repository.get_change_request(change_request_id)
+        if request is None:
+            raise ChangeRequestNotFoundError(f"Unknown change request: {change_request_id}")
+        if request["request_status"] != "PENDING":
+            raise ChangeRequestAlreadyDecidedError(
+                f"This request was already {request['request_status'].lower()}."
+            )
+        updated = self.repository.update_change_request(
+            change_request_id,
+            {
+                "request_status": "DECLINED",
+                "decided_at": _now_iso(),
+                "decided_by_user_id": withdrawn_by_user_id,
+                "decision_note": note or "Withdrawn before WMS review.",
+            },
+        )
+        return updated or request
+
     @staticmethod
     def lifecycle_stage_for_slot(slot_id: str, shipment_id: str, repository: DockSchedulerRepository) -> SlotLifecycleStage:
         hold = repository.active_hold_for_shipment(shipment_id, slot_id)

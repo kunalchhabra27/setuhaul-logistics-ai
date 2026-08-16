@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 from setuhaul.backend.driver_chat_eta.exceptions import DriverChatError
 from setuhaul.backend.driver_chat_eta.llm.schemas import (
     AutoBookSlotInput,
+    CancelPendingRequestInput,
     CheckRequestStatusInput,
     EscalateInput,
     FlagEmergencyInput,
@@ -119,10 +120,13 @@ def build_tools(service: "DriverChatService", principal: "DriverPrincipal") -> l
         appointment still fits, nothing to request), "request_submitted" (a
         change request was filed and is now pending WMS approval -- check the
         "via_swap" field to know whether it also requires displacing another
-        shipment), "gated_in" (the shipment already checked in at the facility, so
-        no further change is possible from chat -- tell the driver to speak to
-        gate/WMS staff on site), or "escalated" (nothing compatible and no swap
-        candidate existed, so this was handed to a human coordinator)."""
+        shipment), "request_already_pending" (a request for this exact slot was
+        already filed and is still waiting on WMS -- nothing new was submitted,
+        this is the same request as before, not a fresh one), "gated_in" (the
+        shipment already checked in at the facility, so no further change is
+        possible from chat -- tell the driver to speak to gate/WMS staff on
+        site), or "escalated" (nothing compatible and no swap candidate existed,
+        so this was handed to a human coordinator)."""
         try:
             return service.auto_book_earliest_feasible_slot(principal)
         except DriverChatError as exc:
@@ -141,6 +145,24 @@ def build_tools(service: "DriverChatService", principal: "DriverPrincipal") -> l
         appointment), or "DECLINED" (WMS rejected it)."""
         try:
             return service.get_latest_change_request_status(principal)
+        except DriverChatError as exc:
+            return {"error": exc.code, "message": exc.message}
+
+    @tool(args_schema=CancelPendingRequestInput)
+    def cancel_pending_dock_request(reason: str | None = None) -> dict:
+        """Withdraw the driver's own dock-slot change request while it's still PENDING
+        with WMS. Use this whenever the driver says something like "cancel my request",
+        "never mind, don't book that", "withdraw my slot request", or "forget the change
+        I asked for" -- NEVER call book_next_available_dock_slot for this, since that
+        tool has no concept of cancelling anything and would just file ANOTHER request
+        instead, the opposite of what the driver wants.
+        Returns "cancelled" (the PENDING request was withdrawn -- tell the driver plainly
+        that it's cancelled, nothing pending anymore), "no_pending_request" (there was
+        nothing to cancel -- tell them that), or "already_decided" (WMS decided it just
+        before it could be cancelled -- tell the driver the real outcome instead of
+        pretending the cancel worked; they may need check_request_status next)."""
+        try:
+            return service.cancel_pending_request(principal, reason=reason)
         except DriverChatError as exc:
             return {"error": exc.code, "message": exc.message}
 
@@ -192,6 +214,7 @@ def build_tools(service: "DriverChatService", principal: "DriverPrincipal") -> l
         report_delay_or_eta_change,
         list_feasible_dock_slots,
         book_next_available_dock_slot,
+        cancel_pending_dock_request,
         check_request_status,
         update_arrival_checkin,
         escalate_to_human,
