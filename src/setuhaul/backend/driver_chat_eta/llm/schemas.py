@@ -54,7 +54,20 @@ class ListFeasibleSlotsInput(BaseModel):
 
 
 class AutoBookSlotInput(BaseModel):
-    """No arguments needed -- the agent picks the earliest compatible slot itself."""
+    """Leave slot_id null to let the agent pick the earliest compatible slot itself
+    (the normal case). Only set slot_id when the driver has explicitly selected one
+    of the specific options a previous list_feasible_dock_slots/report_delay_or_eta_change
+    result already showed them (e.g. "take the second one", "the 7:30 one, please") --
+    use the exact slot_id from that earlier tool result, never a guessed or invented one."""
+
+    slot_id: str | None = Field(
+        default=None,
+        description=(
+            "The exact slot_id of a specific option the driver picked from a previous tool "
+            "result in this conversation. Leave null to auto-pick the earliest compatible slot "
+            "instead (the default, and correct choice unless the driver named a specific one)."
+        ),
+    )
 
 
 class CheckRequestStatusInput(BaseModel):

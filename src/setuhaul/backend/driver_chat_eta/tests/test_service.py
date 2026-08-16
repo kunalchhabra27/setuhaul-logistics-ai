@@ -429,6 +429,102 @@ def test_auto_book_withdraws_a_stale_pending_request_when_a_better_slot_is_found
     assert new_requests[0]["request_status"] == "PENDING"
 
 
+def test_auto_book_with_explicit_slot_id_requests_exactly_that_slot(service, principal, tables):
+    # The slot_id-aware path (used both by the LLM tool and the regex
+    # ordinal-selection fallback) must skip auto-ranking/swap entirely and
+    # request exactly the slot named, even though SLOT-1 (not SLOT-2) is
+    # the earliest compatible option that auto-ranking would otherwise pick.
+    result = service.auto_book_earliest_feasible_slot(principal, slot_id="SLOT-2")
+
+    assert result["status"] == "request_submitted"
+    assert result["slot_id"] == "SLOT-2"
+    requests = service.dock_scheduler.list_change_requests()
+    assert len(requests) == 1
+    assert requests[0]["requested_slot_id"] == "SLOT-2"
+
+
+def test_auto_book_with_explicit_slot_id_reuses_a_pending_request_for_that_slot(service, principal, tables):
+    first = service.auto_book_earliest_feasible_slot(principal, slot_id="SLOT-2")
+    assert first["status"] == "request_submitted"
+
+    second = service.auto_book_earliest_feasible_slot(principal, slot_id="SLOT-2")
+
+    assert second["status"] == "request_already_pending"
+    assert second["change_request_id"] == first["change_request_id"]
+    assert len(service.dock_scheduler.list_change_requests()) == 1
+
+
+def test_auto_book_with_explicit_slot_id_rejects_a_slot_that_is_not_currently_compatible(service, principal, tables):
+    result = service.auto_book_earliest_feasible_slot(principal, slot_id="NOT-A-REAL-SLOT")
+
+    assert result["status"] == "invalid_slot"
+    assert service.dock_scheduler.list_change_requests() == []
+
+
+def test_request_slot_by_ordinal_second_one_maps_to_the_second_compatible_slot(service, principal, tables):
+    # conftest's two STANDARD slots (SLOT-1, SLOT-2) at DOCK-1 are
+    # compatible-first, earliest-first sorted by _feasible_slots -- SLOT-1
+    # first, SLOT-2 second.
+    result = service.request_slot_by_ordinal(principal, 2)
+
+    assert result["status"] == "request_submitted"
+    assert result["slot_id"] == "SLOT-2"
+
+
+def test_request_slot_by_ordinal_first_one_maps_to_the_first_compatible_slot(service, principal, tables):
+    result = service.request_slot_by_ordinal(principal, 1)
+
+    assert result["status"] == "request_submitted"
+    assert result["slot_id"] == "SLOT-1"
+
+
+def test_request_slot_by_ordinal_beyond_available_options_reports_invalid_ordinal(service, principal, tables):
+    # Constrain every dock's max weight so nothing is compatible -- this
+    # guarantees a deterministic zero-compatible-options case rather than
+    # relying on how many slots happen to exist, since
+    # ensure_future_slots_for_shipment can generate additional future slots
+    # beyond conftest's two fixture ones when feasibility is computed fresh.
+    for dock in tables["docks"]:
+        dock["max_vehicle_weight_kg"] = 100
+
+    result = service.request_slot_by_ordinal(principal, 1)
+
+    assert result["status"] == "invalid_ordinal"
+    assert result["available_count"] == 0
+    assert service.dock_scheduler.list_change_requests() == []
+
+
+def test_regex_fallback_ordinal_word_selection_requests_the_matching_slot(service, principal, tables):
+    response = service._handle_chat_message_regex(principal, "take the second one")
+
+    assert "SLOT-2" in response.agent_message.message_text
+    requests = service.dock_scheduler.list_change_requests()
+    assert len(requests) == 1
+    assert requests[0]["requested_slot_id"] == "SLOT-2"
+
+
+def test_regex_fallback_ordinal_option_digit_selection_requests_the_matching_slot(service, principal, tables):
+    response = service._handle_chat_message_regex(principal, "I'll go with option 2")
+
+    assert "SLOT-2" in response.agent_message.message_text
+    requests = service.dock_scheduler.list_change_requests()
+    assert len(requests) == 1
+    assert requests[0]["requested_slot_id"] == "SLOT-2"
+
+
+def test_regex_fallback_pasted_slot_id_is_not_misread_as_an_ordinal_selection(service, principal, tables):
+    # Deliberate design constraint on _ORDINAL_OPTION_PATTERN: it must be
+    # word/digit-based only (no "slot N" form) so a driver pasting a real
+    # slot_id like "SLOT-1" is never misread as "select option 1" -- that
+    # would silently request whatever slot happens to be ranked first,
+    # which may not be the one actually named.
+    assert service._parse_ordinal_selection("I want SLOT-1") is None
+
+    response = service._handle_chat_message_regex(principal, "I want SLOT-1")
+
+    assert service.dock_scheduler.list_change_requests() == []
+
+
 def test_regex_fallback_repeating_the_same_delay_message_does_not_duplicate_requests(service, principal, tables):
     service._handle_chat_message_regex(principal, "I have a tyre issue, 5 minutes late")
     response = service._handle_chat_message_regex(principal, "I have a tyre issue, 5 minutes late")
@@ -551,6 +647,28 @@ def test_regex_fallback_greeting_does_not_create_an_exception(service, principal
     assert tables["driver_exceptions"] == []
     # The exchange is still persisted so it shows up in chat history.
     assert any(m["message_text"] == "hi" for m in tables["chat_messages"])
+
+
+def test_regex_fallback_answers_dock_compatibility_question(service, principal, tables):
+    # Regression test: "does the dock accept a 32-foot vehicle?" used to
+    # match the generic _DOCK_INFO_INTENT_PATTERN ("dock") and get an
+    # irrelevant "you don't have a confirmed appointment yet" reply,
+    # ignoring the actual compatibility question. The answer must come
+    # from _feasible_slots' real, tool-computed compatibility_reason --
+    # never a guessed/invented judgment.
+    response = service._handle_chat_message_regex(principal, "does the dock accept a 32-foot vehicle?")
+
+    text = response.agent_message.message_text
+    assert "compatible" in text.lower()
+    assert "D1" in text or "SLOT" in text.upper()
+    assert tables["driver_exceptions"] == []
+
+
+def test_regex_fallback_answers_shortest_wait_question(service, principal, tables):
+    response = service._handle_chat_message_regex(principal, "which one has the shortest wait?")
+
+    assert "shortest wait" in response.agent_message.message_text.lower()
+    assert tables["driver_exceptions"] == []
 
 
 def test_regex_fallback_answers_destination_facility_question(service, principal, tables):

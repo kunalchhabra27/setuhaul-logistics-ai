@@ -166,6 +166,23 @@ _CANCEL_REQUEST_PATTERN = re.compile(
     r"|^\s*cancel[\s!.,]*$",
     re.IGNORECASE,
 )
+# Driver selecting a specific option by its position in a previously-shown
+# list ("take the second one", "the first option", "option 2", "I'll go
+# with the 3rd"). Deliberately word/digit-based only (no "slot N" form) --
+# real slot_ids look like "SLOT-1" (hyphenated), and a driver pasting one
+# back verbatim must never be misread as an ordinal reference to option 1.
+_ORDINAL_WORD_TO_INT = {
+    "first": 1, "1st": 1,
+    "second": 2, "2nd": 2,
+    "third": 3, "3rd": 3,
+    "fourth": 4, "4th": 4,
+    "fifth": 5, "5th": 5,
+}
+_ORDINAL_OPTION_PATTERN = re.compile(
+    r"\b(?:the\s+)?(first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th)\b[^.?!]{0,20}\b(?:one|option)\b"
+    r"|\boption\s*#?\s*([1-5])\b",
+    re.IGNORECASE,
+)
 # Early-arrival intent -- a driver reaching the facility SOONER than
 # planned ("I'm reaching earlier, is there an earlier slot?", "running
 # early", "any earlier timings?"). This used to have no handling at all:
@@ -214,6 +231,30 @@ _NEXT_STEP_INTENT_PATTERN = re.compile(
     r"\bwhat (should|do) i do\b|\bnext step\b|\bwhat('?s| is) next\b", re.IGNORECASE
 )
 _HELP_INTENT_PATTERN = re.compile(r"\bhelp\b|\bwhat can you do\b|\bcapabilit", re.IGNORECASE)
+# Facility/dock compatibility ("does the dock accept a 32-foot vehicle?",
+# "is the 7:30 slot compatible with my truck?") and wait-time comparison
+# ("which one has the shortest wait?") questions -- checked before
+# _DOCK_INFO_INTENT_PATTERN below (which would otherwise swallow these,
+# since they also mention "dock"/"slot", and just repeat the generic
+# confirmed-appointment-or-not reply, ignoring what was actually asked).
+# Both handlers only ever report what _feasible_slots() -- the same
+# tool-computed compatibility/wait-time data the driver-facing DockSlotBoard
+# and the LLM's list_feasible_dock_slots tool use -- already says; neither
+# invents a compatibility judgment of its own (see the FDE brief's slot-
+# feasibility rules: the LLM/regex layer must never calculate or guess
+# compatibility that the system is responsible for).
+_COMPATIBILITY_INTENT_PATTERN = re.compile(
+    r"\b(compatible|compatibility|accept|handle|support)\b[^.?!]{0,40}\b(dock|slot|vehicle|truck|load|reefer|refrigerat\w*)\b"
+    r"|\b(dock|slot)\b[^.?!]{0,40}\b(compatible|accept|handle|support)\b"
+    r"|\bcan\s+(the\s+)?dock\b[^.?!]{0,30}\b(take|handle|accept)\b"
+    r"|\bwill\s+(it|my truck|my vehicle)\s+fit\b",
+    re.IGNORECASE,
+)
+_WAIT_TIME_INTENT_PATTERN = re.compile(
+    r"\b(shortest|fastest|quickest|least)\b[^.?!]{0,30}\b(wait|waiting|time)\b"
+    r"|\bwhich\b[^.?!]{0,30}\b(sooner|quicker|faster)\b",
+    re.IGNORECASE,
+)
 
 
 def _normalize_digits(text: str) -> str:
@@ -712,6 +753,17 @@ class DriverChatService:
                 principal, driver, shipment_row, text, self._compose_cancel_reply(cancel_result)
             )
 
+        # Same treatment -- a driver picking a specific option by its
+        # position in a list ("take the second one") is an explicit
+        # selection, not a delay report, and must never be swallowed by the
+        # generic delay/ETA parsing below.
+        ordinal = self._parse_ordinal_selection(text)
+        if ordinal is not None:
+            selection_result = self.request_slot_by_ordinal(principal, ordinal)
+            return self._reply_general_question(
+                principal, driver, shipment_row, text, self._compose_autobook_reply(selection_result)
+            )
+
         planned_eta = _parse_dt(shipment_row.get("original_eta_ts")) or datetime.utcnow()
 
         early_minutes = self._parse_early_minutes(text)
@@ -978,6 +1030,39 @@ class DriverChatService:
         if _NAME_INTENT_PATTERN.search(stripped):
             return f"Your name is {driver.driver_name or 'not set on your driver profile yet'}."
 
+        if _COMPATIBILITY_INTENT_PATTERN.search(stripped):
+            snapshot = self._build_snapshot(principal, driver)
+            options = snapshot.slot_options
+            if not options:
+                return (
+                    "I don't have any dock slots to check compatibility against right now -- tell me if "
+                    "you're running late and I'll pull up current options."
+                )
+            compatible = [opt for opt in options if opt.is_compatible]
+            if compatible:
+                best = compatible[0]
+                start_str = best.start_time.strftime("%H:%M")
+                end_str = best.end_time.strftime("%H:%M")
+                return (
+                    f"Yes -- {best.dock_code or best.dock_id} ({start_str}-{end_str}) is compatible with your "
+                    f"vehicle: {best.compatibility_reason}."
+                )
+            sample = options[0]
+            return f"Not right now -- {sample.dock_code or sample.dock_id}: {sample.compatibility_reason}."
+
+        if _WAIT_TIME_INTENT_PATTERN.search(stripped):
+            snapshot = self._build_snapshot(principal, driver)
+            compatible = [opt for opt in snapshot.slot_options if opt.is_compatible]
+            if not compatible:
+                return "I don't have any compatible dock slots to compare right now."
+            best = min(compatible, key=lambda opt: opt.estimated_wait_minutes)
+            start_str = best.start_time.strftime("%H:%M")
+            end_str = best.end_time.strftime("%H:%M")
+            return (
+                f"{best.dock_code or best.dock_id} ({start_str}-{end_str}) has the shortest wait -- about "
+                f"{best.estimated_wait_minutes} minutes."
+            )
+
         # Checked before the dock-info pattern below -- a vague early-arrival
         # report ("I'm reaching earlier", "any earlier timings?") mentions
         # the same words (slot/timing/appointment) that pattern matches on,
@@ -1201,6 +1286,21 @@ class DriverChatService:
             return datetime.combine(reference_date, datetime.min.time()).replace(hour=hour, minute=minute)
         except ValueError:
             return None
+
+    @staticmethod
+    def _parse_ordinal_selection(text: str) -> int | None:
+        """1-indexed option number if the driver referenced one by position
+        ("take the second one", "option 2"), else None. See
+        _ORDINAL_OPTION_PATTERN's own comment for why this is deliberately
+        word/digit-based only, not a general "slot N" pattern."""
+        match = _ORDINAL_OPTION_PATTERN.search(text)
+        if not match:
+            return None
+        word = match.group(1)
+        if word:
+            return _ORDINAL_WORD_TO_INT.get(word.lower())
+        digit = match.group(2)
+        return int(digit) if digit else None
 
     @staticmethod
     def _parse_leave_before(text: str, *, reference_date) -> datetime | None:
@@ -1636,10 +1736,25 @@ class DriverChatService:
             message=f"Slot {slot_id} held for {HOLD_MINUTES} minutes.",
         )
 
-    def auto_book_earliest_feasible_slot(self, principal: DriverPrincipal) -> dict:
+    def auto_book_earliest_feasible_slot(self, principal: DriverPrincipal, slot_id: str | None = None) -> dict:
         """Let the agent identify the driver's best dock slot and FILE it as a
         change request for WMS to approve -- it never books or approves
         anything on its own.
+
+        If `slot_id` is given, request THAT specific currently-compatible
+        slot instead of auto-picking the earliest one -- used when the
+        driver has explicitly selected a slot already shown to them (see
+        llm/tools.py's `book_next_available_dock_slot` slot_id argument,
+        and the regex fallback's ordinal-reference handling in
+        `request_slot_by_ordinal` below, e.g. "take the second one").
+        Bypasses the earliest-slot ranking and the priority-swap
+        consideration entirely in that case -- the driver picked a
+        specific, already-open slot, so there's nothing to auto-rank and
+        no reason to propose displacing another shipment instead of what
+        they asked for. Returns "invalid_slot" if `slot_id` isn't
+        currently a compatible option for this shipment (stale/expired
+        selection -- see FRESHNESS RULES) rather than silently booking a
+        different one.
 
         The chatbot is the driver's assistant, not WMS: it picks the
         earliest slot that is currently compatible with the shipment (dock
@@ -1729,6 +1844,12 @@ class DriverChatService:
         after_dt = _parse_dt(after) or datetime.utcnow()
         max_leave_dt = _parse_dt(max_leave_at)
         options = self._feasible_slots(shipment_row=shipment_row, after=after, max_leave_at=max_leave_at)
+
+        if slot_id is not None:
+            return self._request_specific_slot(
+                shipment_id=shipment_id, options=options, slot_id=slot_id,
+                exception_row=exception_row, principal=principal,
+            )
 
         already = next((opt for opt in options if opt.is_booked_by_me), None)
         compatible = [opt for opt in options if opt.is_compatible]
@@ -2105,6 +2226,121 @@ class DriverChatService:
                     shipment_id,
                 )
         return same_slot
+
+    def _request_specific_slot(
+        self,
+        *,
+        shipment_id: str,
+        options: list[SlotOption],
+        slot_id: str,
+        exception_row: dict | None,
+        principal: DriverPrincipal,
+    ) -> dict:
+        """File a change request for a SPECIFIC, already-open compatible
+        slot the driver picked (rather than auto-ranking for the earliest
+        one) -- shared by auto_book_earliest_feasible_slot's slot_id path
+        and request_slot_by_ordinal below. Same dedup-against-an-existing-
+        PENDING-request behavior as the auto-pick path (see
+        _reuse_or_supersede_pending_request), just against exactly one
+        target slot instead of a ranked list.
+        """
+        target = next((opt for opt in options if opt.slot_id == slot_id and opt.is_compatible), None)
+        if target is None:
+            return {
+                "status": "invalid_slot",
+                "slot_id": slot_id,
+                "message": (
+                    f"Slot {slot_id} isn't a currently compatible option for this shipment anymore -- it may "
+                    "have been taken, or it no longer fits your declared ETA. Ask me for the current options "
+                    "again."
+                ),
+            }
+
+        existing = self._reuse_or_supersede_pending_request(
+            shipment_id=shipment_id, target_slot_id=target.slot_id, principal=principal
+        )
+        if existing is not None:
+            return {
+                "status": "request_already_pending",
+                "change_request_id": existing["change_request_id"],
+                "slot_id": target.slot_id,
+                "dock_code": existing.get("dock_code") or target.dock_code,
+                "start_time": target.start_time.isoformat(),
+                "end_time": target.end_time.isoformat(),
+                "via_swap": False,
+                "message": (
+                    f"You already have a request for dock slot {target.slot_id} at "
+                    f"{existing.get('dock_code') or target.dock_code}, "
+                    f"{target.start_time.strftime('%H:%M')}-{target.end_time.strftime('%H:%M')} pending with "
+                    "WMS -- no need to submit it again."
+                ),
+            }
+
+        try:
+            request = self.dock_scheduler.create_change_request(
+                shipment_id=shipment_id,
+                requested_slot_id=target.slot_id,
+                requested_by_role=ChangeRequestRole.DRIVER,
+                requested_by_user_id=principal.user_id,
+                reason="Driver explicitly selected this dock slot from the options shown by the dispatch assistant.",
+            )
+        except DockSchedulerError as exc:
+            raise PersistenceError(str(exc)) from exc
+
+        self._mark_request_pending(exception_row, request["change_request_id"])
+        return {
+            "status": "request_submitted",
+            "change_request_id": request["change_request_id"],
+            "slot_id": target.slot_id,
+            "dock_code": target.dock_code,
+            "start_time": target.start_time.isoformat(),
+            "end_time": target.end_time.isoformat(),
+            "via_swap": False,
+            "message": (
+                f"Requested dock slot {target.slot_id} at {target.dock_code or target.dock_id}, "
+                f"{target.start_time.strftime('%H:%M')}-{target.end_time.strftime('%H:%M')} -- submitted to "
+                "WMS for approval. You'll be notified once it's confirmed."
+            ),
+        }
+
+    def request_slot_by_ordinal(self, principal: DriverPrincipal, ordinal: int) -> dict:
+        """Resolve a driver's ordinal reference ("take the second one",
+        "option 2") against the CURRENT, freshly recomputed feasible-slots
+        list (1-indexed, compatible-first, earliest-first -- the same
+        order _feasible_slots/list_feasible_dock_slots/the DockSlotBoard
+        already use) rather than a stale snapshot from earlier in the
+        conversation (see FRESHNESS RULES: an option shown earlier may no
+        longer exist by the time the driver picks it). Delegates the
+        actual request-filing to auto_book_earliest_feasible_slot's
+        slot_id path, so this gets the exact same gate-in check, dedup
+        behavior, and response shape as an explicit slot selection made
+        through the LLM tool.
+        """
+        shipment_row = self._resolve_single_active_shipment(principal)
+        if shipment_row is None:
+            raise ShipmentNotFoundError("No active shipment is assigned to you.")
+
+        exception_row = self.repository.get_active_exception_for_driver(principal.user_id)
+        after = (
+            (exception_row or {}).get("declared_eta_ts")
+            or shipment_row.get("latest_eta_ts")
+            or shipment_row.get("original_eta_ts")
+        )
+        max_leave_at = (exception_row or {}).get("latest_acceptable_ts")
+        options = self._feasible_slots(shipment_row=shipment_row, after=after, max_leave_at=max_leave_at)
+        compatible = [opt for opt in options if opt.is_compatible]
+
+        if ordinal < 1 or ordinal > len(compatible):
+            return {
+                "status": "invalid_ordinal",
+                "available_count": len(compatible),
+                "message": (
+                    f"I only have {len(compatible)} feasible option(s) right now, so there's no #{ordinal} "
+                    "choice. Ask me to list the current options again if you'd like to see them."
+                ),
+            }
+
+        return self.auto_book_earliest_feasible_slot(principal, slot_id=compatible[ordinal - 1].slot_id)
 
     def _mark_request_pending(self, exception_row: dict | None, change_request_id: str) -> None:
         """Move the driver's active exception (if any) to WAITING_CONFIRMATION

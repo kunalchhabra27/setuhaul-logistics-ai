@@ -98,20 +98,28 @@ def build_tools(service: "DriverChatService", principal: "DriverPrincipal") -> l
             return {"error": exc.code, "message": exc.message}
 
     @tool(args_schema=AutoBookSlotInput)
-    def book_next_available_dock_slot() -> dict:
-        """Identify the earliest dock slot that is compatible with the shipment
-        (dock type, refrigeration, weight) and fits the driver's latest declared
-        ETA, and FILE it as a change request for WMS to review -- you never book
-        or approve anything yourself, only propose. This also works for changing
-        a slot the shipment already has booked (there's no separate "change my
-        slot" tool -- calling this again re-evaluates and, if a better slot
-        exists, files a request to move there). It also checks whether a
-        genuinely lower-priority shipment is occupying a better (earlier) slot
-        that could be freed up -- if so, it files that as a swap request instead
-        (still pending WMS approval, never auto-executed). Call this immediately
-        after report_delay_or_eta_change (or after list_feasible_dock_slots if
-        the driver is just asking about slots with no new delay to report)
-        instead of listing multiple options for the driver to choose from.
+    def book_next_available_dock_slot(slot_id: str | None = None) -> dict:
+        """With slot_id left null (the default): identify the earliest dock slot
+        that is compatible with the shipment (dock type, refrigeration, weight)
+        and fits the driver's latest declared ETA, and FILE it as a change
+        request for WMS to review -- you never book or approve anything
+        yourself, only propose. This also works for changing a slot the
+        shipment already has booked (there's no separate "change my slot" tool
+        -- calling this again re-evaluates and, if a better slot exists, files
+        a request to move there). It also checks whether a genuinely
+        lower-priority shipment is occupying a better (earlier) slot that could
+        be freed up -- if so, it files that as a swap request instead (still
+        pending WMS approval, never auto-executed).
+        With slot_id set: skip the auto-ranking and the swap check entirely, and
+        request exactly that slot instead -- use this ONLY when the driver has
+        explicitly picked a specific option from a list you already showed them
+        in this conversation (e.g. "take the second one", "the 7:30 one"), using
+        the exact slot_id from that earlier tool result. Never invent a slot_id.
+        Call this immediately after report_delay_or_eta_change (or after
+        list_feasible_dock_slots if the driver is just asking about slots with
+        no new delay to report) instead of listing multiple options for the
+        driver to choose from -- only pass slot_id when they've already made
+        that choice themselves.
         Only call this when the driver is explicitly asking to book, change, or move
         a dock slot -- never to answer a question about an EXISTING request's status
         (use check_request_status for that) or as a default action for messages that
@@ -122,13 +130,16 @@ def build_tools(service: "DriverChatService", principal: "DriverPrincipal") -> l
         "via_swap" field to know whether it also requires displacing another
         shipment), "request_already_pending" (a request for this exact slot was
         already filed and is still waiting on WMS -- nothing new was submitted,
-        this is the same request as before, not a fresh one), "gated_in" (the
-        shipment already checked in at the facility, so no further change is
-        possible from chat -- tell the driver to speak to gate/WMS staff on
-        site), or "escalated" (nothing compatible and no swap candidate existed,
-        so this was handed to a human coordinator)."""
+        this is the same request as before, not a fresh one), "invalid_slot"
+        (only when slot_id was given -- that slot isn't a currently compatible
+        option anymore, e.g. it was taken or no longer fits the ETA; call
+        list_feasible_dock_slots again rather than guessing another one),
+        "gated_in" (the shipment already checked in at the facility, so no
+        further change is possible from chat -- tell the driver to speak to
+        gate/WMS staff on site), or "escalated" (nothing compatible and no swap
+        candidate existed, so this was handed to a human coordinator)."""
         try:
-            return service.auto_book_earliest_feasible_slot(principal)
+            return service.auto_book_earliest_feasible_slot(principal, slot_id=slot_id)
         except DriverChatError as exc:
             return {"error": exc.code, "message": exc.message}
 
