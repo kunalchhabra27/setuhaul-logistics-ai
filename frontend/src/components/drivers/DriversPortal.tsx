@@ -262,46 +262,57 @@ export default function DriversPortal({ color }: { color: string }) {
     }
   };
 
+  const toastPortal =
+    toast &&
+    createPortal(
+      <motion.div
+        initial={{ opacity: 0, y: -12, scale: 0.97 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: -12, scale: 0.97 }}
+        transition={{ duration: 0.18 }}
+        className={`fixed right-5 top-5 z-[9999] flex max-w-sm items-start gap-2.5 rounded-2xl border px-4 py-3 text-sm font-bold shadow-lg ${
+          toast.tone === "success"
+            ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+            : toast.tone === "error"
+              ? "border-rose-200 bg-rose-50 text-rose-800"
+              : "border-line bg-cloud text-ink"
+        }`}
+      >
+        <span className="flex-1">{toast.text}</span>
+        <button
+          onClick={() => setToast(null)}
+          className="shrink-0 opacity-60 transition hover:opacity-100"
+          aria-label="Dismiss"
+        >
+          <X className="h-4 w-4" />
+        </button>
+      </motion.div>,
+      document.body
+    );
+
   if (loading) {
     return (
-      <div className="flex items-center justify-center gap-2 py-16 text-sm font-semibold text-ink-soft">
-        <Loader2 className="h-4 w-4 animate-spin" /> Loading driver portal...
-      </div>
+      <>
+        {toastPortal}
+        <div className="flex items-center justify-center gap-2 py-16 text-sm font-semibold text-ink-soft">
+          <Loader2 className="h-4 w-4 animate-spin" /> Loading driver portal...
+        </div>
+      </>
     );
   }
 
   if (needsProfile || !driver) {
-    return <ProfileSetupForm color={color} onComplete={handleProfileComplete} />;
+    return (
+      <>
+        {toastPortal}
+        <ProfileSetupForm color={color} onComplete={handleProfileComplete} />
+      </>
+    );
   }
 
   return (
     <div className="space-y-5">
-      {toast &&
-        createPortal(
-          <motion.div
-            initial={{ opacity: 0, y: -12, scale: 0.97 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: -12, scale: 0.97 }}
-            transition={{ duration: 0.18 }}
-            className={`fixed right-5 top-5 z-[9999] flex max-w-sm items-start gap-2.5 rounded-2xl border px-4 py-3 text-sm font-bold shadow-lg ${
-              toast.tone === "success"
-                ? "border-emerald-200 bg-emerald-50 text-emerald-800"
-                : toast.tone === "error"
-                ? "border-rose-200 bg-rose-50 text-rose-800"
-                : "border-line bg-cloud text-ink"
-            }`}
-          >
-            <span className="flex-1">{toast.text}</span>
-            <button
-              onClick={() => setToast(null)}
-              className="shrink-0 opacity-60 transition hover:opacity-100"
-              aria-label="Dismiss"
-            >
-              <X className="h-4 w-4" />
-            </button>
-          </motion.div>,
-          document.body
-        )}
+      {toastPortal}
 
       <div className="grid gap-4 sm:grid-cols-3">
         {driverStats.map((s, i) => (
