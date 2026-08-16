@@ -1,0 +1,14 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm install && npm run build",
+  "outputDirectory": "frontend/dist",
+  "functions": {
+    "src/setuhaul/main.py": {
+      "maxDuration": 120
+    }
+  },
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/src/setuhaul/main.py" },
+    { "source": "/health", "destination": "/src/setuhaul/main.py" }
+  ]
+}
