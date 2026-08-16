@@ -53,6 +53,22 @@ class DockSchedulerService:
         self.repository.ensure_future_slots_for_shipment(shipment_id)
         slots = self.repository.compatible_slots(shipment_id)
 
+        # compatible_slots() deliberately queries a rolling window starting
+        # 24h before "now" (see its own docstring) -- a generous lower bound
+        # chosen for query-cost reasons, not because every row in it is
+        # still actually bookable. Concretely: a slot from yesterday
+        # afternoon is still inside that window and still carries
+        # availability_status=AVAILABLE (nothing ever flips that once its
+        # time passes), so without this filter WMS/TMS staff were shown --
+        # and could attempt to reserve -- dock slots whose time had already
+        # elapsed. Driver-chat's own _feasible_slots() never had this
+        # problem because it separately filters on the driver's declared
+        # ETA, which for an already-in-transit shipment is always >= now;
+        # this board has no such ETA filter, so it needs its own explicit
+        # "already over" check.
+        now = datetime.now(timezone.utc)
+        slots = [row for row in slots if parse_ts(row["slot_end_ts"]) >= now]
+
         # compatible_slots() has no notion of the facility's own operating
         # hours -- suggest_slots() already filtered by them via
         # FacilityConstraintEvaluator, but this board (what WMS/TMS/driver
