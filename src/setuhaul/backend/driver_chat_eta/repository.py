@@ -11,8 +11,10 @@ enum-ish column is UPPER_SNAKE_CASE ``text``, and boolean-ish columns are
 
 from __future__ import annotations
 
+import time
 from typing import Any, TYPE_CHECKING
 
+import httpx
 from postgrest.exceptions import APIError
 
 from setuhaul.backend.driver_chat_eta import redis_cache
@@ -25,6 +27,21 @@ from setuhaul.backend.driver_chat_eta.exceptions import ConflictError, Persisten
 # maintenance), hence the shorter TTL.
 _FACILITY_CACHE_TTL_SECONDS = 300
 _DOCKS_CACHE_TTL_SECONDS = 120
+
+# Retry policy for _execute() below -- see its own docstring for why this
+# exists at all (a class of transient httpx/httpcore connection error that
+# postgrest-py's own retry logic doesn't cover).
+_EXECUTE_RETRIES = 2
+_EXECUTE_RETRY_BACKOFF_SECONDS = 0.3
+_TRANSIENT_NETWORK_ERRORS = (
+    httpx.ReadError,
+    httpx.ReadTimeout,
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.WriteError,
+    httpx.RemoteProtocolError,
+    httpx.PoolTimeout,
+)
 
 if TYPE_CHECKING:
     from supabase import Client
@@ -53,21 +70,56 @@ class DriverChatRepository:
             raise ConflictError("A record with the same unique identifier already exists.") from exc
         raise PersistenceError(f"The driver-chat-eta database operation failed: {message}") from exc
 
+    def _execute(self, builder: Any) -> Any:
+        """Run a PostgREST/RPC query builder's `.execute()`, converting a
+        postgrest `APIError` into our own PersistenceError/ConflictError
+        taxonomy, and retrying a couple of times on transient network-layer
+        failures first.
+
+        postgrest-py's own retry logic only covers qualifying HTTP response
+        codes -- it does not retry raw httpx/httpcore connection-layer
+        exceptions (ReadError, ConnectError, RemoteProtocolError, ...),
+        which propagate straight out of `.execute()` completely uncaught by
+        anything that used to be here. This showed up live as the driver
+        chat endpoint intermittently failing with a raw 500 and
+        `httpx.ReadError: [WinError 10035] A non-blocking socket operation
+        could not be completed immediately` -- this repository's Supabase
+        clients are long-lived and reused across requests (see
+        infrastructure/supabase_client.py's caching), specifically for
+        performance, but that means a pooled/kept-alive HTTP connection can
+        go stale between requests and fail on its next reuse. Reported
+        behavior matched exactly: one chat message would 500, and the
+        driver's next message (or the next background snapshot poll, which
+        opens its own request) would go through fine a couple of minutes
+        later once some request happened to get a fresh connection. A short
+        retry here absorbs that kind of blip before it ever reaches the
+        driver, instead of leaving them staring at a failed message.
+        """
+        last_exc: Exception | None = None
+        for attempt in range(_EXECUTE_RETRIES + 1):
+            try:
+                return builder.execute()
+            except APIError as exc:
+                self._raise_persistence(exc)
+            except _TRANSIENT_NETWORK_ERRORS as exc:
+                last_exc = exc
+                if attempt >= _EXECUTE_RETRIES:
+                    raise PersistenceError(
+                        "The driver-chat-eta database operation failed after retrying "
+                        f"a transient network error ({exc.__class__.__name__})."
+                    ) from exc
+                time.sleep(_EXECUTE_RETRY_BACKOFF_SECONDS * (attempt + 1))
+        raise last_exc  # pragma: no cover - unreachable, loop above always returns or raises
+
     # -- drivers ------------------------------------------------------
 
     def get_driver(self, driver_id: str) -> dict[str, Any] | None:
-        try:
-            rows = self._rows(self.client.table("drivers").select("*").eq("driver_id", driver_id).limit(1).execute())
-        except APIError as exc:
-            self._raise_persistence(exc)
+        rows = self._rows(self._execute(self.client.table("drivers").select("*").eq("driver_id", driver_id).limit(1)))
         return rows[0] if rows else None
 
     def upsert_driver(self, driver_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         payload = {**payload, "driver_id": driver_id}
-        try:
-            rows = self._rows(self.client.table("drivers").upsert(payload, on_conflict="driver_id").execute())
-        except APIError as exc:
-            self._raise_persistence(exc)
+        rows = self._rows(self._execute(self.client.table("drivers").upsert(payload, on_conflict="driver_id")))
         if not rows:
             raise PersistenceError("The driver profile upsert returned no record.")
         return rows[0]
@@ -82,23 +134,18 @@ class DriverChatRepository:
         record with a random id (see git history for the old
         find_or_create_carrier behaviour this replaced).
         """
-        try:
-            return self._rows(
-                self.client.table("carriers")
-                .select("carrier_id,carrier_name")
-                .order("carrier_name", desc=False)
-                .execute()
+        return self._rows(
+            self._execute(
+                self.client.table("carriers").select("carrier_id,carrier_name").order("carrier_name", desc=False)
             )
-        except APIError as exc:
-            self._raise_persistence(exc)
+        )
 
     def get_carrier(self, carrier_id: str) -> dict[str, Any] | None:
-        try:
-            rows = self._rows(
-                self.client.table("carriers").select("carrier_id,carrier_name").eq("carrier_id", carrier_id).limit(1).execute()
+        rows = self._rows(
+            self._execute(
+                self.client.table("carriers").select("carrier_id,carrier_name").eq("carrier_id", carrier_id).limit(1)
             )
-        except APIError as exc:
-            self._raise_persistence(exc)
+        )
         return rows[0] if rows else None
 
     def list_active_vehicle_carrier_ids(self) -> set[str]:
@@ -107,34 +154,23 @@ class DriverChatRepository:
         is about to register under that has no active vehicle yet (rather
         than only surfacing that gap later when TMS tries to create a
         shipment for them)."""
-        try:
-            rows = self._rows(
-                self.client.table("vehicles").select("carrier_id").eq("active_flag", 1).execute()
-            )
-        except APIError as exc:
-            self._raise_persistence(exc)
+        rows = self._rows(self._execute(self.client.table("vehicles").select("carrier_id").eq("active_flag", 1)))
         return {row["carrier_id"] for row in rows if row.get("carrier_id")}
 
     def list_home_base_cities(self) -> list[str]:
         """Distinct, already-used driver home_base_city values -- there's no
         lookup table for this column, so "real data from Supabase" means
         whatever cities existing driver rows already have on file."""
-        try:
-            rows = self._rows(self.client.table("drivers").select("home_base_city").execute())
-        except APIError as exc:
-            self._raise_persistence(exc)
+        rows = self._rows(self._execute(self.client.table("drivers").select("home_base_city")))
         cities = {row["home_base_city"] for row in rows if row.get("home_base_city")}
         return sorted(cities)
 
     # -- vehicles / facilities / docks ---------------------------------
 
     def get_vehicle(self, vehicle_id: str) -> dict[str, Any] | None:
-        try:
-            rows = self._rows(
-                self.client.table("vehicles").select("*").eq("vehicle_id", vehicle_id).limit(1).execute()
-            )
-        except APIError as exc:
-            self._raise_persistence(exc)
+        rows = self._rows(
+            self._execute(self.client.table("vehicles").select("*").eq("vehicle_id", vehicle_id).limit(1))
+        )
         return rows[0] if rows else None
 
     def get_facility(self, facility_id: str) -> dict[str, Any] | None:
@@ -146,12 +182,9 @@ class DriverChatRepository:
         cached = redis_cache.get_json(cache_key)
         if cached is not None:
             return cached
-        try:
-            rows = self._rows(
-                self.client.table("facilities").select("*").eq("facility_id", facility_id).limit(1).execute()
-            )
-        except APIError as exc:
-            self._raise_persistence(exc)
+        rows = self._rows(
+            self._execute(self.client.table("facilities").select("*").eq("facility_id", facility_id).limit(1))
+        )
         result = rows[0] if rows else None
         if result is not None:
             redis_cache.set_json(cache_key, result, _FACILITY_CACHE_TTL_SECONDS)
@@ -167,50 +200,37 @@ class DriverChatRepository:
         cached = redis_cache.get_json(cache_key)
         if cached is not None:
             return cached
-        try:
-            result = self._rows(
-                self.client.table("docks")
-                .select("*")
-                .eq("facility_id", facility_id)
-                .eq("dock_status", "ACTIVE")
-                .execute()
+        result = self._rows(
+            self._execute(
+                self.client.table("docks").select("*").eq("facility_id", facility_id).eq("dock_status", "ACTIVE")
             )
-        except APIError as exc:
-            self._raise_persistence(exc)
+        )
         redis_cache.set_json(cache_key, result, _DOCKS_CACHE_TTL_SECONDS)
         return result
 
     # -- shipments --------------------------------------------------------
 
     def get_active_shipment_for_driver(self, driver_id: str) -> dict[str, Any] | None:
-        try:
-            rows = self._rows(
+        rows = self._rows(
+            self._execute(
                 self.client.table("shipments")
                 .select("*")
                 .eq("driver_id", driver_id)
                 .not_.in_("current_status", ["COMPLETED", "CANCELLED"])
                 .order("original_eta_ts", desc=False)
                 .limit(1)
-                .execute()
             )
-        except APIError as exc:
-            self._raise_persistence(exc)
+        )
         return rows[0] if rows else None
 
     def update_shipment(self, shipment_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
-        try:
-            rows = self._rows(
-                self.client.table("shipments").update(payload).eq("shipment_id", shipment_id).execute()
-            )
-        except APIError as exc:
-            self._raise_persistence(exc)
+        rows = self._rows(
+            self._execute(self.client.table("shipments").update(payload).eq("shipment_id", shipment_id))
+        )
         return rows[0] if rows else None
 
     def insert_eta_update(self, payload: dict[str, Any]) -> dict[str, Any]:
-        try:
-            rows = self._rows(self.client.table("eta_updates").insert(payload).execute())
-        except APIError as exc:
-            self._raise_persistence(exc)
+        rows = self._rows(self._execute(self.client.table("eta_updates").insert(payload)))
         if not rows:
             raise PersistenceError("The ETA update insert returned no record.")
         return rows[0]
@@ -218,165 +238,116 @@ class DriverChatRepository:
     # -- appointment slots & holds ------------------------------------------
 
     def list_open_slots(self, facility_id: str) -> list[dict[str, Any]]:
-        try:
-            return self._rows(
+        return self._rows(
+            self._execute(
                 self.client.table("appointment_slots")
                 .select("*")
                 .eq("facility_id", facility_id)
                 .eq("slot_status", "OPEN")
                 .order("slot_start_ts", desc=False)
-                .execute()
             )
-        except APIError as exc:
-            self._raise_persistence(exc)
+        )
 
     def get_slot(self, slot_id: str) -> dict[str, Any] | None:
-        try:
-            rows = self._rows(
-                self.client.table("appointment_slots").select("*").eq("slot_id", slot_id).limit(1).execute()
-            )
-        except APIError as exc:
-            self._raise_persistence(exc)
+        rows = self._rows(self._execute(self.client.table("appointment_slots").select("*").eq("slot_id", slot_id).limit(1)))
         return rows[0] if rows else None
 
     def list_active_holds_for_facility_slots(self, slot_ids: list[str]) -> list[dict[str, Any]]:
         if not slot_ids:
             return []
-        try:
-            return self._rows(
-                self.client.table("slot_holds")
-                .select("*")
-                .in_("slot_id", slot_ids)
-                .eq("hold_status", "HELD")
-                .execute()
+        return self._rows(
+            self._execute(
+                self.client.table("slot_holds").select("*").in_("slot_id", slot_ids).eq("hold_status", "HELD")
             )
-        except APIError as exc:
-            self._raise_persistence(exc)
+        )
 
     def get_active_hold_for_shipment(self, shipment_id: str) -> dict[str, Any] | None:
-        try:
-            rows = self._rows(
+        rows = self._rows(
+            self._execute(
                 self.client.table("slot_holds")
                 .select("*")
                 .eq("shipment_id", shipment_id)
                 .eq("hold_status", "HELD")
                 .order("held_at", desc=True)
                 .limit(1)
-                .execute()
             )
-        except APIError as exc:
-            self._raise_persistence(exc)
+        )
         return rows[0] if rows else None
 
     def create_hold(self, payload: dict[str, Any]) -> dict[str, Any]:
-        try:
-            rows = self._rows(self.client.table("slot_holds").insert(payload).execute())
-        except APIError as exc:
-            self._raise_persistence(exc)
+        rows = self._rows(self._execute(self.client.table("slot_holds").insert(payload)))
         if not rows:
             raise PersistenceError("The slot hold insert returned no record.")
         return rows[0]
 
     def update_hold(self, hold_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
-        try:
-            rows = self._rows(self.client.table("slot_holds").update(payload).eq("hold_id", hold_id).execute())
-        except APIError as exc:
-            self._raise_persistence(exc)
+        rows = self._rows(self._execute(self.client.table("slot_holds").update(payload).eq("hold_id", hold_id)))
         return rows[0] if rows else None
 
     # -- appointments -------------------------------------------------
 
     def get_current_appointment_for_shipment(self, shipment_id: str) -> dict[str, Any] | None:
-        try:
-            rows = self._rows(
-                self.client.table("appointments")
-                .select("*")
-                .eq("shipment_id", shipment_id)
-                .eq("is_current", 1)
-                .limit(1)
-                .execute()
+        rows = self._rows(
+            self._execute(
+                self.client.table("appointments").select("*").eq("shipment_id", shipment_id).eq("is_current", 1).limit(1)
             )
-        except APIError as exc:
-            self._raise_persistence(exc)
+        )
         return rows[0] if rows else None
 
     def create_appointment(self, payload: dict[str, Any]) -> dict[str, Any]:
-        try:
-            rows = self._rows(self.client.table("appointments").insert(payload).execute())
-        except APIError as exc:
-            self._raise_persistence(exc)
+        rows = self._rows(self._execute(self.client.table("appointments").insert(payload)))
         if not rows:
             raise PersistenceError("The appointment insert returned no record.")
         return rows[0]
 
     def update_appointment(self, appointment_id: str, payload: dict[str, Any]) -> None:
-        try:
-            self.client.table("appointments").update(payload).eq("appointment_id", appointment_id).execute()
-        except APIError as exc:
-            self._raise_persistence(exc)
+        self._execute(self.client.table("appointments").update(payload).eq("appointment_id", appointment_id))
 
     # -- facility checkins ----------------------------------------------
 
     def get_checkin_for_shipment(self, shipment_id: str) -> dict[str, Any] | None:
-        try:
-            rows = self._rows(
-                self.client.table("facility_checkins").select("*").eq("shipment_id", shipment_id).limit(1).execute()
-            )
-        except APIError as exc:
-            self._raise_persistence(exc)
+        rows = self._rows(
+            self._execute(self.client.table("facility_checkins").select("*").eq("shipment_id", shipment_id).limit(1))
+        )
         return rows[0] if rows else None
 
     def create_checkin(self, payload: dict[str, Any]) -> dict[str, Any]:
-        try:
-            rows = self._rows(self.client.table("facility_checkins").insert(payload).execute())
-        except APIError as exc:
-            self._raise_persistence(exc)
+        rows = self._rows(self._execute(self.client.table("facility_checkins").insert(payload)))
         if not rows:
             raise PersistenceError("The check-in insert returned no record.")
         return rows[0]
 
     def update_checkin(self, checkin_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
-        try:
-            rows = self._rows(
-                self.client.table("facility_checkins").update(payload).eq("checkin_id", checkin_id).execute()
-            )
-        except APIError as exc:
-            self._raise_persistence(exc)
+        rows = self._rows(
+            self._execute(self.client.table("facility_checkins").update(payload).eq("checkin_id", checkin_id))
+        )
         return rows[0] if rows else None
 
     # -- driver exceptions ------------------------------------------------
 
     def get_active_exception_for_driver(self, driver_id: str) -> dict[str, Any] | None:
-        try:
-            rows = self._rows(
+        rows = self._rows(
+            self._execute(
                 self.client.table("driver_exceptions")
                 .select("*")
                 .eq("driver_id", driver_id)
                 .not_.in_("exception_status", ["RESOLVED", "CANCELLED", "DUPLICATE"])
                 .order("reported_at", desc=True)
                 .limit(1)
-                .execute()
             )
-        except APIError as exc:
-            self._raise_persistence(exc)
+        )
         return rows[0] if rows else None
 
     def create_exception(self, payload: dict[str, Any]) -> dict[str, Any]:
-        try:
-            rows = self._rows(self.client.table("driver_exceptions").insert(payload).execute())
-        except APIError as exc:
-            self._raise_persistence(exc)
+        rows = self._rows(self._execute(self.client.table("driver_exceptions").insert(payload)))
         if not rows:
             raise PersistenceError("The exception insert returned no record.")
         return rows[0]
 
     def update_exception(self, exception_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
-        try:
-            rows = self._rows(
-                self.client.table("driver_exceptions").update(payload).eq("exception_id", exception_id).execute()
-            )
-        except APIError as exc:
-            self._raise_persistence(exc)
+        rows = self._rows(
+            self._execute(self.client.table("driver_exceptions").update(payload).eq("exception_id", exception_id))
+        )
         return rows[0] if rows else None
 
     # -- server-side snapshot bundle (perf) --------------------------------
@@ -390,46 +361,40 @@ class DriverChatRepository:
 
         Raises (does not swallow) if the RPC call itself fails -- e.g.
         `PGRST202`/`42883` (function not found) when the migration hasn't
-        been applied yet, or any other PostgREST/network error. Callers
+        been applied yet, or any other PostgREST/network error (converted to
+        our own PersistenceError by _execute(), same as everywhere else in
+        this file, after its own transient-network retry). Callers
         (DriverChatService._build_snapshot) are expected to catch broadly
         and fall back to the original sequential per-table calls, so this
         method's job is only to attempt the fast path and surface exactly
         what went wrong if it isn't available.
         """
-        response = self.client.rpc("driver_snapshot", {"p_driver_id": driver_id}).execute()
+        response = self._execute(self.client.rpc("driver_snapshot", {"p_driver_id": driver_id}))
         return response.data
 
     # -- chat threads & messages ------------------------------------------
 
     def get_open_thread_for_driver(self, driver_id: str) -> dict[str, Any] | None:
-        try:
-            rows = self._rows(
+        rows = self._rows(
+            self._execute(
                 self.client.table("chat_threads")
                 .select("*")
                 .eq("driver_id", driver_id)
                 .not_.in_("thread_status", ["RESOLVED", "CLOSED"])
                 .order("opened_at", desc=True)
                 .limit(1)
-                .execute()
             )
-        except APIError as exc:
-            self._raise_persistence(exc)
+        )
         return rows[0] if rows else None
 
     def create_thread(self, payload: dict[str, Any]) -> dict[str, Any]:
-        try:
-            rows = self._rows(self.client.table("chat_threads").insert(payload).execute())
-        except APIError as exc:
-            self._raise_persistence(exc)
+        rows = self._rows(self._execute(self.client.table("chat_threads").insert(payload)))
         if not rows:
             raise PersistenceError("The thread insert returned no record.")
         return rows[0]
 
     def update_thread(self, thread_id: str, payload: dict[str, Any]) -> None:
-        try:
-            self.client.table("chat_threads").update(payload).eq("thread_id", thread_id).execute()
-        except APIError as exc:
-            self._raise_persistence(exc)
+        self._execute(self.client.table("chat_threads").update(payload).eq("thread_id", thread_id))
 
     def list_chat_messages(self, thread_id: str, limit: int = 100) -> list[dict[str, Any]]:
         """The most recent `limit` messages on a thread, in chronological
@@ -453,24 +418,19 @@ class DriverChatRepository:
         limit, then reverse back to ascending order before returning, since
         every caller expects chronological order.
         """
-        try:
-            rows = self._rows(
+        rows = self._rows(
+            self._execute(
                 self.client.table("chat_messages")
                 .select("*")
                 .eq("thread_id", thread_id)
                 .order("message_ts", desc=True)
                 .limit(limit)
-                .execute()
             )
-        except APIError as exc:
-            self._raise_persistence(exc)
+        )
         return list(reversed(rows))
 
     def insert_chat_message(self, payload: dict[str, Any]) -> dict[str, Any]:
-        try:
-            rows = self._rows(self.client.table("chat_messages").insert(payload).execute())
-        except APIError as exc:
-            self._raise_persistence(exc)
+        rows = self._rows(self._execute(self.client.table("chat_messages").insert(payload)))
         if not rows:
             raise PersistenceError("The chat message insert returned no record.")
         return rows[0]

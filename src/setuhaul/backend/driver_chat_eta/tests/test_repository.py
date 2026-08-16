@@ -15,8 +15,12 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta
 
-from setuhaul.backend._testing.fake_supabase import FakeSupabaseClient
+import httpx
+import pytest
+
+from setuhaul.backend._testing.fake_supabase import FakeQuery, FakeSupabaseClient
 from setuhaul.backend.driver_chat_eta import redis_cache
+from setuhaul.backend.driver_chat_eta.exceptions import PersistenceError
 from setuhaul.backend.driver_chat_eta.repository import DriverChatRepository
 from setuhaul.backend.driver_chat_eta.tests.conftest import FACILITY
 
@@ -114,6 +118,51 @@ def test_list_chat_messages_returns_the_newest_messages_not_the_oldest(tables):
     assert [r["chat_message_id"] for r in rows] == [f"MSG-{i:03d}" for i in range(50, 150)]
     assert rows[0]["message_text"] == "message 50"
     assert rows[-1]["message_text"] == "message 149"
+
+
+def test_execute_retries_a_transient_network_error_then_succeeds(monkeypatch, tables):
+    # Regression test for the live `httpx.ReadError: [WinError 10035] ...`
+    # 500 reported on the chat endpoint. This repository's Supabase clients
+    # are long-lived and reused across requests (infrastructure/
+    # supabase_client.py), so a pooled/kept-alive HTTP connection can go
+    # stale between requests and fail on its very next reuse -- a raw
+    # httpx/httpcore connection-layer exception that used to propagate
+    # straight out of `.execute()` uncaught (only postgrest's own
+    # `APIError` was ever handled), crashing the whole chat turn with a 500
+    # instead of just retrying once against a fresh connection.
+    client = FakeSupabaseClient(tables)
+    repo = DriverChatRepository(client)
+
+    real_execute = FakeQuery.execute
+    calls = {"n": 0}
+
+    def flaky_execute(self):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ReadError("simulated stale pooled connection")
+        return real_execute(self)
+
+    monkeypatch.setattr(FakeQuery, "execute", flaky_execute)
+
+    result = repo.get_facility(FACILITY)
+
+    assert result is not None
+    assert result["facility_name"] == "Jaipur DC"
+    assert calls["n"] == 2  # first call failed, retry succeeded
+
+
+def test_execute_gives_up_after_repeated_transient_network_errors(monkeypatch, tables):
+    client = FakeSupabaseClient(tables)
+    repo = DriverChatRepository(client)
+
+    def always_flaky(self):
+        raise httpx.ConnectError("simulated connection reset")
+
+    monkeypatch.setattr(FakeQuery, "execute", always_flaky)
+    monkeypatch.setattr("setuhaul.backend.driver_chat_eta.repository.time.sleep", lambda _seconds: None)
+
+    with pytest.raises(PersistenceError):
+        repo.get_facility(FACILITY)
 
 
 def test_get_facility_falls_back_to_supabase_when_redis_is_unavailable(monkeypatch, tables):
