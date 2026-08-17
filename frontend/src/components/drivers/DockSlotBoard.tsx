@@ -27,6 +27,7 @@ export default function DockSlotBoard({
   onHoldSlot,
   onConfirmSlot,
   onRequestSlotChange,
+  disabled,
 }: {
   color: string;
   facility?: DriverFacilitySummary | null;
@@ -35,6 +36,11 @@ export default function DockSlotBoard({
   onHoldSlot: (slotId: string) => Promise<void>;
   onConfirmSlot: (slotId: string) => Promise<void>;
   onRequestSlotChange: (slotId: string) => Promise<void>;
+  // True while a hold/confirm/request-change/check-in action is already in
+  // flight elsewhere in the portal -- disables these buttons so a
+  // double-tap can't fire a second overlapping request (see DriversPortal's
+  // dockActionLockRef).
+  disabled?: boolean;
 }) {
   // Once a slot is already confirmed, the hold -> confirm flow no longer
   // applies to other slots -- switching means asking WMS to move the
@@ -141,7 +147,8 @@ export default function DockSlotBoard({
                         {!opt.is_booked_by_me && !opt.is_held && opt.is_compatible && hasConfirmedBooking && (
                           <button
                             onClick={() => void onRequestSlotChange(opt.slot_id)}
-                            className="flex min-h-[40px] w-full items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-bold transition active:scale-95"
+                            disabled={disabled}
+                            className="flex min-h-[40px] w-full items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-bold transition active:scale-95 disabled:opacity-50"
                             style={{ borderColor: `${color}4D`, background: `${color}1A`, color }}
                           >
                             <ArrowRightLeft className="h-3.5 w-3.5" /> Request this slot
@@ -150,7 +157,8 @@ export default function DockSlotBoard({
                         {!opt.is_booked_by_me && !opt.is_held && opt.is_compatible && !hasConfirmedBooking && (
                           <button
                             onClick={() => void onHoldSlot(opt.slot_id)}
-                            className="flex min-h-[40px] w-full items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-bold transition active:scale-95"
+                            disabled={disabled}
+                            className="flex min-h-[40px] w-full items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-bold transition active:scale-95 disabled:opacity-50"
                             style={{ borderColor: `${color}4D`, background: `${color}1A`, color }}
                           >
                             <Lock className="h-3.5 w-3.5" /> Hold slot (5m)
@@ -159,7 +167,8 @@ export default function DockSlotBoard({
                         {!opt.is_booked_by_me && opt.is_held && (
                           <button
                             onClick={() => void onConfirmSlot(opt.slot_id)}
-                            className="flex min-h-[40px] w-full items-center justify-center gap-1.5 rounded-xl bg-emerald-600 px-3 py-2 text-xs font-black text-white shadow-soft transition hover:bg-emerald-500 active:scale-95"
+                            disabled={disabled}
+                            className="flex min-h-[40px] w-full items-center justify-center gap-1.5 rounded-xl bg-emerald-600 px-3 py-2 text-xs font-black text-white shadow-soft transition hover:bg-emerald-500 active:scale-95 disabled:opacity-50"
                           >
                             <CheckCircle2 className="h-4 w-4" /> Confirm booking
                           </button>

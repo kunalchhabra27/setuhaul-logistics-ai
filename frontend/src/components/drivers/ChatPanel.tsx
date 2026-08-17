@@ -97,17 +97,35 @@ export default function ChatPanel({
     };
   }, []);
 
+  // Belt-and-suspenders alongside the `isSending` prop check: the prop only
+  // updates after the parent re-renders following its own setIsSending(true),
+  // so a same-tick double-tap (e.g. two rapid clicks on a quick action) can
+  // slip past an `isSending`-only guard before that re-render lands. This
+  // ref is set synchronously, closing that window locally; the parent
+  // (DriversPortal) still holds the authoritative lock across all send
+  // paths, this is just a first line of defense that also avoids firing an
+  // extra request at all.
+  const sendingRef = useRef(false);
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!inputText.trim() || isSending || isRecording) return;
+    if (!inputText.trim() || isSending || isRecording || sendingRef.current) return;
     const text = inputText;
     setInputText("");
-    await onSendMessage(text);
+    sendingRef.current = true;
+    try {
+      await onSendMessage(text);
+    } finally {
+      sendingRef.current = false;
+    }
   };
 
   const quickPrompt = (prompt: string) => {
-    if (isSending || isRecording) return;
-    void onSendMessage(prompt);
+    if (isSending || isRecording || sendingRef.current) return;
+    sendingRef.current = true;
+    void onSendMessage(prompt).finally(() => {
+      sendingRef.current = false;
+    });
   };
 
   const startRecording = async () => {
@@ -306,10 +324,18 @@ export default function ChatPanel({
 
       <div className="no-scrollbar flex flex-shrink-0 items-center gap-2 overflow-x-auto border-t border-line bg-cloud px-3 py-2">
         <span className="shrink-0 text-xs font-bold uppercase tracking-wide text-mist">Quick:</span>
-        <button onClick={() => quickPrompt("I have a tyre damage delay. I will arrive 45 minutes late.")} className="shrink-0 rounded-xl border border-line bg-white px-3 py-2 text-xs font-bold text-ink-soft transition hover:bg-line sm:text-sm">
+        <button
+          onClick={() => quickPrompt("I have a tyre damage delay. I will arrive 45 minutes late.")}
+          disabled={isSending || isRecording}
+          className="shrink-0 rounded-xl border border-line bg-white px-3 py-2 text-xs font-bold text-ink-soft transition hover:bg-line disabled:opacity-50 sm:text-sm"
+        >
           🛞 Tyre delay (+45m)
         </button>
-        <button onClick={() => quickPrompt("I need to exit the facility before 9 PM for my next shipment.")} className="shrink-0 rounded-xl border border-line bg-white px-3 py-2 text-xs font-bold text-ink-soft transition hover:bg-line sm:text-sm">
+        <button
+          onClick={() => quickPrompt("I need to exit the facility before 9 PM for my next shipment.")}
+          disabled={isSending || isRecording}
+          className="shrink-0 rounded-xl border border-line bg-white px-3 py-2 text-xs font-bold text-ink-soft transition hover:bg-line disabled:opacity-50 sm:text-sm"
+        >
           ⏱️ Must leave &lt; 9 PM
         </button>
       </div>

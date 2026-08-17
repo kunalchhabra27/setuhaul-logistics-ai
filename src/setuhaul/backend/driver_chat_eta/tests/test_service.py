@@ -12,7 +12,7 @@ from setuhaul.backend.driver_chat_eta.exceptions import (
     PersistenceError,
     SlotConflictError,
 )
-from setuhaul.backend.driver_chat_eta.tests.conftest import DRIVER_ID, FACILITY, SHIPMENT_ID
+from setuhaul.backend.driver_chat_eta.tests.conftest import DOCK_STANDARD, DRIVER_ID, FACILITY, SHIPMENT_ID, _iso
 
 
 def test_handle_chat_message_propagates_driver_chat_errors_from_the_llm_path(service, principal, monkeypatch):
@@ -250,6 +250,34 @@ def test_hold_slot_rejects_incompatible_dock_type(service, principal):
 def test_confirm_slot_requires_an_active_hold(service, principal):
     with pytest.raises(SlotConflictError, match="not currently held"):
         service.confirm_slot(principal, "SLOT-1")
+
+
+def test_chat_history_survives_exception_and_thread_resolution(service, principal, tables):
+    # Regression test: a real driver reported chat history (both old AND
+    # newly-sent messages) disappearing entirely after confirming a dock
+    # slot. confirm_slot resolves both the exception and its thread in the
+    # same call (see service.py) and inserts an "Appointment confirmed..."
+    # SYSTEM message into that now-resolved thread. chat_messages used to be
+    # sourced from the *active* exception's thread_id -- once resolved,
+    # get_active_exception_for_driver returns None on every future
+    # snapshot/chat call, silently emptying history forever, including that
+    # very confirmation message.
+    service._handle_chat_message_regex(principal, "I have a tyre issue, 5 minutes late")
+
+    driver = service.get_my_profile(principal)
+    snapshot_before = service._build_snapshot(principal, driver)
+    assert snapshot_before.chat_messages, "history should exist before the exception resolves"
+    message_count_before = len(snapshot_before.chat_messages)
+
+    service.hold_slot(principal, "SLOT-1")
+    service.confirm_slot(principal, "SLOT-1")
+
+    assert tables["driver_exceptions"][-1]["exception_status"] == "RESOLVED"
+    assert tables["chat_threads"][-1]["thread_status"] == "RESOLVED"
+
+    snapshot_after = service._build_snapshot(principal, driver)
+    assert len(snapshot_after.chat_messages) > message_count_before
+    assert any("Appointment confirmed" in (m.message_text or "") for m in snapshot_after.chat_messages)
 
 
 def test_confirm_slot_books_a_confirmed_appointment(service, principal, tables):
@@ -743,6 +771,35 @@ def test_regex_fallback_unrecognized_question_gets_a_fallback_reply_not_escalati
     assert tables["driver_exceptions"] == []
     assert tables["eta_updates"] == []
     assert service.dock_scheduler.list_change_requests() == []
+
+
+def test_reply_general_question_caps_suggested_options_but_snapshot_keeps_the_full_list(service, principal, tables):
+    # Regression test: a real driver session showed the chatbot returning a
+    # "Lost connection to dispatch" network error on an ordinary question
+    # ("what should I do next?") that turned out to be a symptom of a huge
+    # response body -- ChatResponse.suggested_options was set to the FULL,
+    # unbounded slot_options list (every dock, every slot across the 7-day
+    # search horizon) on every single chat turn, not just slot-search turns.
+    # suggested_options is meant to be a short, best-first list (same as the
+    # LLM tool result's LLM_SLOT_SUMMARY_LIMIT elsewhere in this file) --
+    # snapshot.slot_options is the one that's meant to carry everything, for
+    # DockSlotBoard.
+    for i in range(20):
+        tables["appointment_slots"].append(
+            {
+                "slot_id": f"SLOT-EXTRA-{i}",
+                "facility_id": FACILITY,
+                "dock_id": DOCK_STANDARD,
+                "slot_start_ts": _iso(timedelta(hours=5 + i)),
+                "slot_end_ts": _iso(timedelta(hours=6 + i)),
+                "slot_status": "OPEN",
+            }
+        )
+
+    response = service._handle_chat_message_regex(principal, "what should I do next?")
+
+    assert len(response.suggested_options) <= 8
+    assert len(response.snapshot.slot_options) > 8
 
 
 def test_regex_fallback_still_auto_books_when_message_has_a_delay_signal(service, principal, tables):

@@ -42,22 +42,76 @@ export class ApiClientError extends Error {
   }
 }
 
+// Distinguishes "the server never got a chance to respond" (timeout, dropped
+// connection, CORS failure, etc.) from an HTTP-level error, so callers can
+// show a message like "try again" instead of one implying something the
+// backend actually rejected.
+export class ApiNetworkError extends Error {
+  cause?: unknown;
+
+  constructor(message: string, cause?: unknown) {
+    super(message);
+    this.name = "ApiNetworkError";
+    this.cause = cause;
+  }
+}
+
+type RequestOptions = RequestInit & {
+  // Bounds how long this specific call waits for a response before the
+  // request is aborted client-side. Left unset for short-lived endpoints
+  // (profile fetch, snapshot poll, dock actions) so they keep the browser's
+  // own default behavior; callers with a genuinely slow backend path (the
+  // chat send, which can involve an LLM/tool-calling round trip) pass an
+  // explicit budget instead of every endpoint being forced onto one global
+  // timeout that's either too short for chat or needlessly long for
+  // everything else.
+  timeoutMs?: number;
+};
+
 // Each portal (drivers/tms/wms/checkin) gets its own API client bound to that
 // portal's own stored access token -- so a TMS request always carries the TMS
 // session's token, never a token borrowed from whichever portal logged in most
 // recently. This is what lets the four portals be used in parallel in one
 // browser without one login clobbering another's outgoing requests.
 export function createApiClient(serviceId: string) {
-  async function request<T>(path: string, init?: RequestInit, isRetry = false): Promise<T> {
+  async function request<T>(path: string, init?: RequestOptions, isRetry = false): Promise<T> {
     const token = getAccessToken(serviceId);
-    const response = await fetch(`${baseUrl}${path}`, {
-      headers: {
-        "Content-Type": "application/json",
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        ...(init?.headers ?? {}),
-      },
-      ...init,
-    });
+    const { timeoutMs, ...fetchInit } = init ?? {};
+
+    const timeoutController = timeoutMs !== undefined ? new AbortController() : null;
+    const timeoutId =
+      timeoutController !== null ? window.setTimeout(() => timeoutController.abort(), timeoutMs) : null;
+
+    let response: Response;
+    try {
+      response = await fetch(`${baseUrl}${path}`, {
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          ...(fetchInit.headers ?? {}),
+        },
+        ...fetchInit,
+        signal: timeoutController?.signal ?? fetchInit.signal,
+      });
+    } catch (err) {
+      // A raw fetch() rejection means the request never got a response at
+      // all -- a dropped connection, CORS failure, DNS error, or (if we
+      // aborted it above) a client-side timeout. This is exactly the case
+      // that previously surfaced the browser's own "TypeError: Failed to
+      // fetch" string verbatim in a toast; log the real error for
+      // diagnostics and hand callers a message that's actually actionable
+      // for a driver.
+      const isAbort = err instanceof DOMException && err.name === "AbortError";
+      console.error(`API request failed: ${path}`, err);
+      throw new ApiNetworkError(
+        isAbort
+          ? "The dispatch assistant is taking longer than expected. Please try again."
+          : "Lost connection to dispatch. Check your network and try again.",
+        err
+      );
+    } finally {
+      if (timeoutId !== null) window.clearTimeout(timeoutId);
+    }
 
     const contentType = response.headers.get("content-type") ?? "";
     const payload = contentType.includes("application/json")

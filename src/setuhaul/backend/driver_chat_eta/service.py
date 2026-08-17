@@ -546,11 +546,21 @@ class DriverChatService:
             exception_row = self.repository.get_active_exception_for_driver(principal.user_id)
         exception = DriverExceptionSummary.model_validate(exception_row) if exception_row else None
 
+        # Sourced from the driver's most recent thread regardless of its
+        # status, not from the current exception's thread_id -- a resolved
+        # exception (e.g. after confirm_slot marks both the exception and
+        # its thread RESOLVED) is a normal end state whose history should
+        # stay visible, not a signal to hide it. Using exception_row here
+        # instead used to make chat_messages -- and any message inserted
+        # afterward, including confirm_slot's own "Appointment confirmed"
+        # system message -- permanently disappear the instant the exception
+        # resolved.
         chat_messages: list[ChatMessageSummary] = []
-        if exception_row and exception_row.get("thread_id"):
+        thread_row = self.repository.get_latest_thread_for_driver(principal.user_id)
+        if thread_row and thread_row.get("thread_id"):
             chat_messages = [
                 ChatMessageSummary.model_validate(row)
-                for row in self.repository.list_chat_messages(exception_row["thread_id"])
+                for row in self.repository.list_chat_messages(thread_row["thread_id"])
             ]
 
         # Dock slot booking must be available as soon as a shipment is
@@ -1032,7 +1042,11 @@ class DriverChatService:
         snapshot = self._build_snapshot(principal, driver)
         return ChatResponse(
             agent_message=ChatMessageSummary.model_validate(agent_row),
-            suggested_options=options,
+            # `options` is already sorted compatible-first (see _feasible_slots),
+            # so this keeps the best candidates -- same short-list rationale as
+            # LLM_SLOT_SUMMARY_LIMIT's other call sites. snapshot.slot_options
+            # (below) still carries the full list for DockSlotBoard.
+            suggested_options=options[:LLM_SLOT_SUMMARY_LIMIT],
             exception=DriverExceptionSummary.model_validate(exception_row),
             snapshot=snapshot,
         )
@@ -1275,7 +1289,11 @@ class DriverChatService:
         snapshot = self._build_snapshot(principal, driver)
         return ChatResponse(
             agent_message=ChatMessageSummary.model_validate(agent_row),
-            suggested_options=snapshot.slot_options,
+            # Same short-list rationale as the other ChatResponse call sites --
+            # a general question isn't a slot-search turn, so it doesn't need
+            # the entire dock inventory duplicated into suggested_options.
+            # snapshot.slot_options (below) still carries the full list.
+            suggested_options=snapshot.slot_options[:LLM_SLOT_SUMMARY_LIMIT],
             exception=DriverExceptionSummary.model_validate(exception_row) if exception_row else None,
             snapshot=snapshot,
         )

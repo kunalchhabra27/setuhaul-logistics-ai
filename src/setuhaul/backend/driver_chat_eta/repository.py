@@ -414,6 +414,28 @@ class DriverChatRepository:
         )
         return rows[0] if rows else None
 
+    def get_latest_thread_for_driver(self, driver_id: str) -> dict[str, Any] | None:
+        """The driver's most recent thread, regardless of status.
+
+        Unlike get_open_thread_for_driver (which excludes RESOLVED/CLOSED
+        threads -- correct for "which thread should a new message be filed
+        into"), this is for "what chat history should the driver see". A
+        thread reaching RESOLVED (e.g. once its exception is resolved via
+        confirm_slot) is a normal, expected end state, not a reason to stop
+        showing its messages -- see driver_snapshot_rpc.sql's parallel fix
+        and _build_snapshot_sequential's use of this method.
+        """
+        rows = self._rows(
+            self._execute(
+                self.client.table("chat_threads")
+                .select("*")
+                .eq("driver_id", driver_id)
+                .order("opened_at", desc=True)
+                .limit(1)
+            )
+        )
+        return rows[0] if rows else None
+
     def create_thread(self, payload: dict[str, Any]) -> dict[str, Any]:
         rows = self._rows(self._execute(self.client.table("chat_threads").insert(payload)))
         if not rows:

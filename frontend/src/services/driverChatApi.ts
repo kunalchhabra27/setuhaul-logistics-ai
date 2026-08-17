@@ -43,10 +43,20 @@ export function getDriverSnapshot() {
   return api.request<DriverSnapshot>(`${base}/snapshot`);
 }
 
+// Chat sends can involve an LLM/tool-calling round trip (e.g. checking dock
+// availability) that runs meaningfully longer than any other endpoint here,
+// so they get an explicit client-side budget instead of the unbounded
+// default: comfortably under the deployed Vercel function's 60s maxDuration
+// (vercel.json), comfortably over the backend's 45s AgentCore invoke budget
+// (settings.py's AGENTCORE_INVOKE_TIMEOUT_SECONDS) plus margin for network
+// and serialization overhead.
+const CHAT_SEND_TIMEOUT_MS = 55_000;
+
 export function sendDriverChatMessage(message: string) {
   return api.request<DriverChatResponse>(`${base}/chat`, {
     method: "POST",
     body: JSON.stringify({ message }),
+    timeoutMs: CHAT_SEND_TIMEOUT_MS,
   });
 }
 
@@ -54,6 +64,7 @@ export function sendDriverVoiceMessage(audioBase64: string, mimeType: string) {
   return api.request<DriverChatResponse>(`${base}/chat/voice`, {
     method: "POST",
     body: JSON.stringify({ audio_base64: audioBase64, mime_type: mimeType }),
+    timeoutMs: CHAT_SEND_TIMEOUT_MS,
   });
 }
 
