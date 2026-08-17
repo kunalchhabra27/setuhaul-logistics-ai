@@ -66,7 +66,7 @@ from setuhaul.backend.driver_chat_eta.llm.prompts import build_system_prompt
 from setuhaul.backend.driver_chat_eta.llm.session_store import load_history, save_history
 from setuhaul.backend.driver_chat_eta.llm.tools import build_tools
 from setuhaul.backend.driver_chat_eta.models import ChatMessageSummary, ChatResponse
-from setuhaul.backend.driver_chat_eta.service import _new_id, _now_iso
+from setuhaul.backend.driver_chat_eta.service import LLM_SLOT_SUMMARY_LIMIT, _new_id, _now_iso
 from setuhaul.infrastructure.settings import get_settings
 from setuhaul.infrastructure.metrics import Duration, emit_domain_event, increment
 from setuhaul.infrastructure.telemetry import (
@@ -319,7 +319,12 @@ def _run_chat_turn(service: "DriverChatService", principal: "DriverPrincipal", t
 
     return ChatResponse(
         agent_message=ChatMessageSummary.model_validate(agent_row),
-        suggested_options=fresh_snapshot.slot_options,
+        # Short, best-first list -- same rationale as the other ChatResponse
+        # call sites in service.py (LLM_SLOT_SUMMARY_LIMIT). fresh_snapshot's
+        # own slot_options (below) still carries the full list for
+        # DockSlotBoard; slot_options is already sorted compatible-first by
+        # _feasible_slots, so slicing keeps the best candidates.
+        suggested_options=fresh_snapshot.slot_options[:LLM_SLOT_SUMMARY_LIMIT],
         exception=DriverExceptionSummary.model_validate(exception_row) if exception_row else None,
         snapshot=fresh_snapshot,
     )
