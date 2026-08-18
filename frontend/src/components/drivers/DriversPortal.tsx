@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import { Loader2, MessageCircle, X } from "lucide-react";
 import { ApiClientError } from "../../services/api";
@@ -8,13 +9,16 @@ import {
   getDriverSnapshot,
   getMyDriverProfile,
   holdDockSlot,
+  requestDriverDockSlotChange,
   sendDriverChatMessage,
   sendDriverVoiceMessage,
+  sendEmergencyAlert,
   updateDriverCheckin,
 } from "../../services/driverChatApi";
 import type { ArrivalUpdateChoice, DriverProfile, DriverSnapshot } from "../../types/driverChat";
 import ProfileSetupForm from "./ProfileSetupForm";
 import ContextBar from "./ContextBar";
+import AppointmentBanner from "./AppointmentBanner";
 import GateTimeline from "./GateTimeline";
 import ChatPanel from "./ChatPanel";
 import DockSlotBoard from "./DockSlotBoard";
@@ -33,10 +37,41 @@ export default function DriversPortal({ color }: { color: string }) {
 
   const showToast = (text: string, tone: "success" | "error" | "info" = "info") => {
     setToast({ text, tone });
-    setTimeout(() => setToast(null), 4000);
+    setTimeout(() => setToast(null), 120_000);
   };
 
+  const snapshotInFlight = useRef(false);
+
+  // Bumped synchronously at the start of every chat send (see
+  // handleSendMessage/handleSendVoiceMessage below) -- gives each send a
+  // unique, monotonically increasing generation number. refreshSnapshot
+  // captures the current value before its own fetch and compares it again
+  // when the fetch resolves: if a chat send started in between, this poll's
+  // data was fetched before that send's reply existed and must not be
+  // allowed to overwrite it. This is deterministic (a counter comparison),
+  // not a timing heuristic -- it holds regardless of which of the two
+  // requests happens to resolve first.
+  const chatGenerationRef = useRef(0);
+  // Only one send in flight at a time (see sendLockRef below), so by the
+  // time a send's own response resolves, chatGenerationRef can't have moved
+  // past that send's number -- this ref exists to make that invariant
+  // explicit and self-checking rather than relying implicitly on the lock.
+  const appliedChatGenerationRef = useRef(0);
+
   const refreshSnapshot = useCallback(async () => {
+    // The backend's /snapshot read is several sequential Supabase round
+    // trips deep (shipment, vehicle, facility, docks, appointment,
+    // checkin, exception, chat messages, dock-slot feasibility) and can
+    // legitimately take longer than this poll's own 8s interval -- without
+    // this guard, setInterval fires again before the previous fetch
+    // resolves, so overlapping polls pile up on the single backend worker
+    // and can starve a driver's actual chat message behind a growing queue
+    // of stale background polls (this is what made the chatbot look
+    // completely unresponsive: the message was queued behind several
+    // already-overlapping snapshot polls, not failing to parse the query).
+    if (snapshotInFlight.current) return;
+    snapshotInFlight.current = true;
+    const pollStartGeneration = chatGenerationRef.current;
     try {
       const data = await getDriverSnapshot();
       setSnapshot((prev) => {
@@ -51,6 +86,35 @@ export default function DriversPortal({ color }: { color: string }) {
         if (data.chat_messages.length === 0 && !data.shipment && prev?.chat_messages?.length) {
           return { ...data, chat_messages: prev.chat_messages };
         }
+
+        // Generation check: a chat send that started after this poll began
+        // (chatGenerationRef moved past pollStartGeneration) may have
+        // already applied its own newer chat_messages to state by now --
+        // this poll's data predates that reply, so keep the already-visible
+        // messages and only refresh the non-chat fields (shipment/docks/
+        // exception/etc.) from the poll.
+        const chatMutatedDuringPoll = chatGenerationRef.current !== pollStartGeneration;
+
+        // ID-aware fallback: even with no generation mismatch, if the poll's
+        // chat_messages doesn't contain the last message the driver already
+        // saw for this same shipment, treat it as stale rather than trust
+        // an array-shape/length coincidence. Stable chat_message_id is only
+        // meaningful once a real (persisted) shipment thread exists -- the
+        // no-shipment/ambiguous-shipment fallback path mints a fresh,
+        // non-persisted id on every turn by design, so this check is
+        // skipped unless both snapshots agree on the shipment.
+        const prevLastMessage = prev?.chat_messages?.[prev.chat_messages.length - 1];
+        const sameShipment = (prev?.shipment?.shipment_id ?? null) === (data.shipment?.shipment_id ?? null);
+        const pollDataMissingKnownReply =
+          !!prevLastMessage &&
+          !!prev?.shipment &&
+          sameShipment &&
+          !data.chat_messages.some((m) => m.chat_message_id === prevLastMessage.chat_message_id);
+
+        if (prev && (chatMutatedDuringPoll || pollDataMissingKnownReply)) {
+          return { ...data, chat_messages: prev.chat_messages };
+        }
+
         return data;
       });
       setDriver(data.driver);
@@ -58,6 +122,8 @@ export default function DriversPortal({ color }: { color: string }) {
       if (!(err instanceof ApiClientError && err.status === 404)) {
         console.warn("Failed to refresh driver snapshot:", err);
       }
+    } finally {
+      snapshotInFlight.current = false;
     }
   }, []);
 
@@ -111,57 +177,133 @@ export default function DriversPortal({ color }: { color: string }) {
     void refreshSnapshot();
   };
 
+  // Authoritative send lock: synchronous check-and-set, so it closes the
+  // window a React prop/state update can't -- unlike `isSending` (state,
+  // only visible to callers after a re-render), this is checked and set in
+  // the same tick a caller invokes the handler, so two overlapping calls
+  // (a double-tap quick action, a typed send racing handleQuickUpdateEta,
+  // etc.) can never both get past the guard. Every send path funnels
+  // through these two functions, so locking here covers all of them: typed
+  // messages, quick actions, voice messages, and handleQuickUpdateEta.
+  const sendLockRef = useRef(false);
+
   const handleSendMessage = async (text: string) => {
+    if (sendLockRef.current) return;
+    sendLockRef.current = true;
+    const myGeneration = ++chatGenerationRef.current;
     setIsSending(true);
     try {
       const res = await sendDriverChatMessage(text);
-      setSnapshot(res.snapshot);
+      // Should always hold given the lock above prevents any overlapping
+      // send from bumping chatGenerationRef in between -- kept as an
+      // explicit, self-checking guard rather than relying implicitly on
+      // the lock elsewhere.
+      if (chatGenerationRef.current === myGeneration) {
+        appliedChatGenerationRef.current = myGeneration;
+        setSnapshot(res.snapshot);
+      }
     } catch (err) {
+      // Deliberately does not touch `snapshot` here -- a failed send must
+      // never roll back or replace previously-rendered messages, only
+      // surface a recoverable error and let the driver retry.
       showToast(err instanceof Error ? err.message : "Error communicating with the dispatch agent", "error");
     } finally {
+      sendLockRef.current = false;
       setIsSending(false);
     }
   };
 
   const handleSendVoiceMessage = async (audioBase64: string, mimeType: string) => {
+    if (sendLockRef.current) return;
+    sendLockRef.current = true;
+    const myGeneration = ++chatGenerationRef.current;
     setIsSending(true);
     try {
       const res = await sendDriverVoiceMessage(audioBase64, mimeType);
-      setSnapshot(res.snapshot);
+      if (chatGenerationRef.current === myGeneration) {
+        appliedChatGenerationRef.current = myGeneration;
+        setSnapshot(res.snapshot);
+      }
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Could not process that voice message", "error");
     } finally {
+      sendLockRef.current = false;
       setIsSending(false);
     }
   };
 
+  // Same synchronous-lock pattern as sendLockRef above, applied to the dock
+  // slot/check-in actions -- these had no guard at all before, so a
+  // double-tap on "Hold slot" or "Confirm booking" (an easy touch-device
+  // gesture) could fire two overlapping requests that both pass the
+  // backend's slot-availability check before either commits, then collide
+  // on insert and surface as a raw "RESOURCE_CONFLICT" 409 to the driver.
+  // One shared lock is enough -- these are all "one dock/gate action at a
+  // time" for a single driver, not independently concurrent operations.
+  const dockActionLockRef = useRef(false);
+  const [dockActionInFlight, setDockActionInFlight] = useState(false);
+
   const handleHoldSlot = async (slotId: string) => {
+    if (dockActionLockRef.current) return;
+    dockActionLockRef.current = true;
+    setDockActionInFlight(true);
     try {
       const res = await holdDockSlot(slotId);
       setSnapshot(res.snapshot);
       showToast(res.message, "success");
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Failed to hold slot", "error");
+    } finally {
+      dockActionLockRef.current = false;
+      setDockActionInFlight(false);
     }
   };
 
   const handleConfirmSlot = async (slotId: string) => {
+    if (dockActionLockRef.current) return;
+    dockActionLockRef.current = true;
+    setDockActionInFlight(true);
     try {
       const res = await confirmDockSlot(slotId);
       setSnapshot(res.snapshot);
       showToast(res.message, "success");
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Failed to confirm slot", "error");
+    } finally {
+      dockActionLockRef.current = false;
+      setDockActionInFlight(false);
+    }
+  };
+
+  const handleRequestSlotChange = async (slotId: string) => {
+    if (!snapshot?.shipment) return;
+    if (dockActionLockRef.current) return;
+    dockActionLockRef.current = true;
+    setDockActionInFlight(true);
+    try {
+      await requestDriverDockSlotChange(snapshot.shipment.shipment_id, slotId);
+      showToast("Slot change requested -- waiting on WMS approval.", "success");
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Failed to request a slot change", "error");
+    } finally {
+      dockActionLockRef.current = false;
+      setDockActionInFlight(false);
     }
   };
 
   const handleUpdateCheckin = async (status: ArrivalUpdateChoice) => {
+    if (dockActionLockRef.current) return;
+    dockActionLockRef.current = true;
+    setDockActionInFlight(true);
     try {
       const res = await updateDriverCheckin(status);
       setSnapshot(res.snapshot);
       showToast(`Check-in updated to ${status.replace("_", " ")}`, "success");
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Error updating gate status", "error");
+    } finally {
+      dockActionLockRef.current = false;
+      setDockActionInFlight(false);
     }
   };
 
@@ -213,33 +355,76 @@ export default function DriversPortal({ color }: { color: string }) {
     }
   };
 
+  // The assistant flags a safety-critical situation (accident, engine
+  // failure, etc.) via its flag_emergency_situation tool, which sets
+  // severity_code=CRITICAL on the active exception -- that alone (no extra
+  // field on ChatResponse needed) is what unlocks the "Send Emergency
+  // Alert" button in ChatPanel.
+  const emergencyAvailable = snapshot?.exception?.severity_code === "CRITICAL";
+
+  const handleEmergencyAlert = async () => {
+    try {
+      const res = await sendEmergencyAlert(snapshot?.exception?.description || "Driver-reported emergency");
+      showToast(
+        res.status === "sent" ? "Emergency alert sent to dispatch" : "Could not send SMS -- call your carrier's safety line directly",
+        res.status === "sent" ? "success" : "error"
+      );
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Could not send the emergency alert", "error");
+    }
+  };
+
+  const toastPortal =
+    toast &&
+    createPortal(
+      <motion.div
+        initial={{ opacity: 0, y: -12, scale: 0.97 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: -12, scale: 0.97 }}
+        transition={{ duration: 0.18 }}
+        className={`fixed right-5 top-5 z-[9999] flex max-w-sm items-start gap-2.5 rounded-2xl border px-4 py-3 text-sm font-bold shadow-lg ${
+          toast.tone === "success"
+            ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+            : toast.tone === "error"
+              ? "border-rose-200 bg-rose-50 text-rose-800"
+              : "border-line bg-cloud text-ink"
+        }`}
+      >
+        <span className="flex-1">{toast.text}</span>
+        <button
+          onClick={() => setToast(null)}
+          className="shrink-0 opacity-60 transition hover:opacity-100"
+          aria-label="Dismiss"
+        >
+          <X className="h-4 w-4" />
+        </button>
+      </motion.div>,
+      document.body
+    );
+
   if (loading) {
     return (
-      <div className="flex items-center justify-center gap-2 py-16 text-sm font-semibold text-ink-soft">
-        <Loader2 className="h-4 w-4 animate-spin" /> Loading driver portal...
-      </div>
+      <>
+        {toastPortal}
+        <div className="flex items-center justify-center gap-2 py-16 text-sm font-semibold text-ink-soft">
+          <Loader2 className="h-4 w-4 animate-spin" /> Loading driver portal...
+        </div>
+      </>
     );
   }
 
   if (needsProfile || !driver) {
-    return <ProfileSetupForm color={color} onComplete={handleProfileComplete} />;
+    return (
+      <>
+        {toastPortal}
+        <ProfileSetupForm color={color} onComplete={handleProfileComplete} />
+      </>
+    );
   }
 
   return (
     <div className="space-y-5">
-      {toast && (
-        <div
-          className={`rounded-xl border px-4 py-3 text-sm font-bold ${
-            toast.tone === "success"
-              ? "border-emerald-200 bg-emerald-50 text-emerald-800"
-              : toast.tone === "error"
-              ? "border-rose-200 bg-rose-50 text-rose-800"
-              : "border-line bg-cloud text-ink"
-          }`}
-        >
-          {toast.text}
-        </div>
-      )}
+      {toastPortal}
 
       <div className="grid gap-4 sm:grid-cols-3">
         {driverStats.map((s, i) => (
@@ -259,7 +444,13 @@ export default function DriversPortal({ color }: { color: string }) {
       {snapshot?.shipment ? (
         <>
           <ContextBar snapshot={snapshot} color={color} onQuickUpdateEta={handleQuickUpdateEta} />
-          <GateTimeline snapshot={snapshot} color={color} onUpdateCheckin={handleUpdateCheckin} />
+          <AppointmentBanner appointment={snapshot.appointment} color={color} />
+          <GateTimeline
+            snapshot={snapshot}
+            color={color}
+            onUpdateCheckin={handleUpdateCheckin}
+            disabled={dockActionInFlight}
+          />
         </>
       ) : (
         <div className="rounded-2xl border border-line bg-cloud/60 p-5 text-sm text-ink-soft">
@@ -277,6 +468,8 @@ export default function DriversPortal({ color }: { color: string }) {
           slotOptions={snapshot.slot_options}
           onHoldSlot={handleHoldSlot}
           onConfirmSlot={handleConfirmSlot}
+          onRequestSlotChange={handleRequestSlotChange}
+          disabled={dockActionInFlight}
         />
       )}
 
@@ -298,13 +491,12 @@ export default function DriversPortal({ color }: { color: string }) {
               <ChatPanel
                 color={color}
                 messages={snapshot?.chat_messages ?? []}
-                suggestedOptions={snapshot?.slot_options ?? []}
                 isSending={isSending}
                 onSendMessage={handleSendMessage}
                 onSendVoiceMessage={handleSendVoiceMessage}
-                onHoldSlot={handleHoldSlot}
-                onConfirmSlot={handleConfirmSlot}
                 onEscalate={handleEscalate}
+                emergencyAvailable={emergencyAvailable}
+                onEmergencyAlert={handleEmergencyAlert}
                 onClose={() => setChatOpen(false)}
                 isExpanded={chatExpanded}
                 onToggleExpand={() => setChatExpanded((v) => !v)}

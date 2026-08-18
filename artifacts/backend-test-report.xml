@@ -1,0 +1,212 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="7" skipped="0" tests="163" time="3.495" timestamp="2026-08-14T23:04:56.761219+05:30" hostname="Dishas-MacBook-Air.local"><testcase classname="tests.test_scheduler" name="test_returns_only_slots_after_effective_eta" time="0.024"><failure message="AttributeError: 'sqlite3.Connection' object has no attribute 'table'">repo = &lt;setuhaul.backend.dock_scheduler.repository.DockSchedulerRepository object at 0x10a5da660&gt;
+
+    def test_returns_only_slots_after_effective_eta(repo):
+&gt;       suggestions = DeterministicReschedulingEngine(repo).suggest("SHP1006")
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_scheduler.py:34: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+src/setuhaul/backend/dock_scheduler/scheduler.py:31: in suggest
+    shipment = self.repository.shipment(shipment_id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src/setuhaul/backend/dock_scheduler/repository.py:191: in shipment
+    return self._operational_state(shipment_id)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src/setuhaul/backend/dock_scheduler/repository.py:123: in _operational_state
+    rows = self._select("shipments", shipment_id=shipment_id)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = &lt;setuhaul.backend.dock_scheduler.repository.DockSchedulerRepository object at 0x10a5da660&gt;
+table = 'shipments'
+filters = {'shipment_id': 'SHP1006'}
+
+    def _select(self, table: str, **filters: Any) -&gt; list[dict[str, Any]]:
+        try:
+&gt;           query = self.backend.table(table).select("*")
+                    ^^^^^^^^^^^^^^^^^^
+E           AttributeError: 'sqlite3.Connection' object has no attribute 'table'
+
+src/setuhaul/backend/dock_scheduler/repository.py:110: AttributeError</failure></testcase><testcase classname="tests.test_scheduler" name="test_respects_driver_deadline" time="0.017"><failure message="AttributeError: 'sqlite3.Connection' object has no attribute 'table'">repo = &lt;setuhaul.backend.dock_scheduler.repository.DockSchedulerRepository object at 0x10b32b890&gt;
+
+    def test_respects_driver_deadline(repo):
+        deadline = datetime.fromisoformat("2026-08-04T13:00:00+05:30")
+&gt;       suggestions = DeterministicReschedulingEngine(repo).suggest(
+            "SHP1006", DriverConstraints(must_finish_by=deadline)
+        )
+
+tests/test_scheduler.py:42: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+src/setuhaul/backend/dock_scheduler/scheduler.py:31: in suggest
+    shipment = self.repository.shipment(shipment_id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src/setuhaul/backend/dock_scheduler/repository.py:191: in shipment
+    return self._operational_state(shipment_id)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src/setuhaul/backend/dock_scheduler/repository.py:123: in _operational_state
+    rows = self._select("shipments", shipment_id=shipment_id)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = &lt;setuhaul.backend.dock_scheduler.repository.DockSchedulerRepository object at 0x10b32b890&gt;
+table = 'shipments'
+filters = {'shipment_id': 'SHP1006'}
+
+    def _select(self, table: str, **filters: Any) -&gt; list[dict[str, Any]]:
+        try:
+&gt;           query = self.backend.table(table).select("*")
+                    ^^^^^^^^^^^^^^^^^^
+E           AttributeError: 'sqlite3.Connection' object has no attribute 'table'
+
+src/setuhaul/backend/dock_scheduler/repository.py:110: AttributeError</failure></testcase><testcase classname="tests.test_scheduler" name="test_cancelled_shipment_has_no_options" time="0.016"><failure message="AttributeError: 'sqlite3.Connection' object has no attribute 'table'">repo = &lt;setuhaul.backend.dock_scheduler.repository.DockSchedulerRepository object at 0x10b4a8190&gt;
+
+    def test_cancelled_shipment_has_no_options(repo):
+&gt;       assert DeterministicReschedulingEngine(repo).suggest("SHP1019") == []
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_scheduler.py:49: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+src/setuhaul/backend/dock_scheduler/scheduler.py:31: in suggest
+    shipment = self.repository.shipment(shipment_id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src/setuhaul/backend/dock_scheduler/repository.py:191: in shipment
+    return self._operational_state(shipment_id)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src/setuhaul/backend/dock_scheduler/repository.py:123: in _operational_state
+    rows = self._select("shipments", shipment_id=shipment_id)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = &lt;setuhaul.backend.dock_scheduler.repository.DockSchedulerRepository object at 0x10b4a8190&gt;
+table = 'shipments'
+filters = {'shipment_id': 'SHP1019'}
+
+    def _select(self, table: str, **filters: Any) -&gt; list[dict[str, Any]]:
+        try:
+&gt;           query = self.backend.table(table).select("*")
+                    ^^^^^^^^^^^^^^^^^^
+E           AttributeError: 'sqlite3.Connection' object has no attribute 'table'
+
+src/setuhaul/backend/dock_scheduler/repository.py:110: AttributeError</failure></testcase><testcase classname="tests.test_scheduler" name="test_booking_requires_explicit_acceptance" time="0.015" /><testcase classname="tests.test_scheduler" name="test_reefer_shipment_only_gets_reefer_docks" time="0.016"><failure message="AttributeError: 'sqlite3.Connection' object has no attribute 'table'">repo = &lt;setuhaul.backend.dock_scheduler.repository.DockSchedulerRepository object at 0x10a65eea0&gt;
+
+    def test_reefer_shipment_only_gets_reefer_docks(repo):
+&gt;       suggestions = DeterministicReschedulingEngine(repo).suggest("SHP1010", limit=10)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_scheduler.py:58: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+src/setuhaul/backend/dock_scheduler/scheduler.py:31: in suggest
+    shipment = self.repository.shipment(shipment_id)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src/setuhaul/backend/dock_scheduler/repository.py:191: in shipment
+    return self._operational_state(shipment_id)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src/setuhaul/backend/dock_scheduler/repository.py:123: in _operational_state
+    rows = self._select("shipments", shipment_id=shipment_id)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = &lt;setuhaul.backend.dock_scheduler.repository.DockSchedulerRepository object at 0x10a65eea0&gt;
+table = 'shipments'
+filters = {'shipment_id': 'SHP1010'}
+
+    def _select(self, table: str, **filters: Any) -&gt; list[dict[str, Any]]:
+        try:
+&gt;           query = self.backend.table(table).select("*")
+                    ^^^^^^^^^^^^^^^^^^
+E           AttributeError: 'sqlite3.Connection' object has no attribute 'table'
+
+src/setuhaul/backend/dock_scheduler/repository.py:110: AttributeError</failure></testcase><testcase classname="tests.test_scheduler" name="test_hold_marks_slot_unavailable_for_others" time="0.015"><failure message="AttributeError: 'sqlite3.Connection' object has no attribute 'table'">service = &lt;setuhaul.backend.dock_scheduler.service.DockSchedulerService object at 0x10a5dacf0&gt;
+repo = &lt;setuhaul.backend.dock_scheduler.repository.DockSchedulerRepository object at 0x10b3e16d0&gt;
+
+    def test_hold_marks_slot_unavailable_for_others(service, repo):
+&gt;       hold = service.hold_slot("SHP1006", "SLOT-JAI-020")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_scheduler.py:64: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+src/setuhaul/backend/dock_scheduler/service.py:92: in hold_slot
+    compatible = self.repository.compatible_slots(shipment_id)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src/setuhaul/backend/dock_scheduler/repository.py:284: in compatible_slots
+    target = self._operational_state(shipment_id)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src/setuhaul/backend/dock_scheduler/repository.py:123: in _operational_state
+    rows = self._select("shipments", shipment_id=shipment_id)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = &lt;setuhaul.backend.dock_scheduler.repository.DockSchedulerRepository object at 0x10b3e16d0&gt;
+table = 'shipments'
+filters = {'shipment_id': 'SHP1006'}
+
+    def _select(self, table: str, **filters: Any) -&gt; list[dict[str, Any]]:
+        try:
+&gt;           query = self.backend.table(table).select("*")
+                    ^^^^^^^^^^^^^^^^^^
+E           AttributeError: 'sqlite3.Connection' object has no attribute 'table'
+
+src/setuhaul/backend/dock_scheduler/repository.py:110: AttributeError</failure></testcase><testcase classname="tests.test_scheduler" name="test_confirm_after_hold_and_pending" time="0.016"><failure message="AttributeError: 'sqlite3.Connection' object has no attribute 'table'">service = &lt;setuhaul.backend.dock_scheduler.service.DockSchedulerService object at 0x10b4a8050&gt;
+repo = &lt;setuhaul.backend.dock_scheduler.repository.DockSchedulerRepository object at 0x10b34ef10&gt;
+
+    def test_confirm_after_hold_and_pending(service, repo):
+&gt;       service.hold_slot("SHP1006", "SLOT-JAI-021")
+
+tests/test_scheduler.py:72: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+src/setuhaul/backend/dock_scheduler/service.py:92: in hold_slot
+    compatible = self.repository.compatible_slots(shipment_id)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src/setuhaul/backend/dock_scheduler/repository.py:284: in compatible_slots
+    target = self._operational_state(shipment_id)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+src/setuhaul/backend/dock_scheduler/repository.py:123: in _operational_state
+    rows = self._select("shipments", shipment_id=shipment_id)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = &lt;setuhaul.backend.dock_scheduler.repository.DockSchedulerRepository object at 0x10b34ef10&gt;
+table = 'shipments'
+filters = {'shipment_id': 'SHP1006'}
+
+    def _select(self, table: str, **filters: Any) -&gt; list[dict[str, Any]]:
+        try:
+&gt;           query = self.backend.table(table).select("*")
+                    ^^^^^^^^^^^^^^^^^^
+E           AttributeError: 'sqlite3.Connection' object has no attribute 'table'
+
+src/setuhaul/backend/dock_scheduler/repository.py:110: AttributeError</failure></testcase><testcase classname="tests.test_scheduler" name="test_concurrent_booking_only_one_succeeds" time="0.017"><failure message="assert 0 == 1&#10; +  where 0 = len([])">tmp_path = PosixPath('/private/var/folders/4k/hdd2ddtn2tqcvgfqh77lmjvc0000gn/T/pytest-of-dishachaudhary/pytest-7/test_concurrent_booking_only_o0')
+
+    def test_concurrent_booking_only_one_succeeds(tmp_path):
+        root = Path(__file__).resolve().parents[1]
+        db_path = tmp_path / "concurrent.db"
+        build_database(root / "data" / "setuhaul_schema_and_seed.sql", db_path)
+    
+        slot_id = "SLOT-JAI-022"
+        results: list[str | BaseException] = []
+    
+        def attempt(shipment_id: str) -&gt; None:
+            connection = connect(db_path)
+            repository = DockSchedulerRepository(connection)
+            try:
+                repository.create_hold(shipment_id, slot_id, ttl_minutes=5)
+                appointment_id = repository.book_after_acceptance(shipment_id, slot_id, accepted=True)
+                results.append(appointment_id)
+            except BaseException as exc:
+                results.append(exc)
+            finally:
+                connection.close()
+    
+        threads = [Thread(target=attempt, args=("SHP1006",)), Thread(target=attempt, args=("SHP1012",))]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    
+        successes = [item for item in results if isinstance(item, str)]
+        failures = [item for item in results if isinstance(item, SlotUnavailableError)]
+&gt;       assert len(successes) == 1
+E       assert 0 == 1
+E        +  where 0 = len([])
+
+tests/test_scheduler.py:108: AssertionError</failure></testcase><testcase classname="src.setuhaul.infrastructure.tests.test_sms" name="test_normalize_phone_strips_dashes_and_keeps_plus" time="0.002" /><testcase classname="src.setuhaul.infrastructure.tests.test_sms" name="test_send_sms_skips_when_no_destination_number" time="0.006" /><testcase classname="src.setuhaul.infrastructure.tests.test_sms" name="test_send_sms_skips_when_twilio_not_configured" time="0.005" /><testcase classname="src.setuhaul.infrastructure.tests.test_sms" name="test_send_sms_skips_when_from_number_missing" time="0.005" /><testcase classname="src.setuhaul.infrastructure.tests.test_sms" name="test_send_sms_success_returns_message_sid" time="0.005" /><testcase classname="src.setuhaul.infrastructure.tests.test_sms" name="test_send_sms_swallows_twilio_errors" time="0.007" /><testcase classname="src.setuhaul.infrastructure.tests.test_telemetry" name="test_operation_span_is_noop_when_disabled" time="0.001" /><testcase classname="src.setuhaul.infrastructure.tests.test_telemetry" name="test_telemetry_setup_does_not_break_without_optional_sdk" time="0.066" /><testcase classname="src.setuhaul.backend.tms.tests.test_api" name="test_unauthenticated_tms_request_is_denied" time="0.061" /><testcase classname="src.setuhaul.backend.tms.tests.test_api" name="test_reader_can_fetch_ambiguous_context" time="0.008" /><testcase classname="src.setuhaul.backend.tms.tests.test_api" name="test_agent_reader_cannot_create_driver" time="0.007" /><testcase classname="src.setuhaul.backend.tms.tests.test_api" name="test_admin_can_create_driver" time="0.008" /><testcase classname="src.setuhaul.backend.tms.tests.test_api" name="test_admin_can_assign_shipment" time="0.485" /><testcase classname="src.setuhaul.backend.tms.tests.test_facility_staff" name="test_register_staff_facility_persists_assignment" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_facility_staff" name="test_register_staff_facility_rejects_unknown_facility" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_facility_staff" name="test_get_staff_facility_returns_none_when_unregistered" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_facility_staff" name="test_require_staff_facility_raises_when_unregistered" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_facility_staff" name="test_list_shipments_for_staff_facility_requires_registration" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_facility_staff" name="test_list_shipments_for_staff_facility_is_scoped_to_own_facility_only" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_models" name="test_every_shipment_status_has_explicit_active_policy[PLANNED-True]" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_models" name="test_every_shipment_status_has_explicit_active_policy[ASSIGNED-True]" time="0.002" /><testcase classname="src.setuhaul.backend.tms.tests.test_models" name="test_every_shipment_status_has_explicit_active_policy[IN_TRANSIT-True]" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_models" name="test_every_shipment_status_has_explicit_active_policy[AT_GATE-True]" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_models" name="test_every_shipment_status_has_explicit_active_policy[WAITING-True]" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_models" name="test_every_shipment_status_has_explicit_active_policy[IN_DOCK-True]" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_models" name="test_every_shipment_status_has_explicit_active_policy[COMPLETED-False]" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_models" name="test_every_shipment_status_has_explicit_active_policy[CANCELLED-False]" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_models" name="test_shipment_create_requires_destination" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_models" name="test_empty_patch_is_rejected" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_models" name="test_shipment_create_defaults_dock_type_and_status" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_repository" name="test_create_driver_generates_sequential_id_from_existing_rows" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_repository" name="test_create_driver_starts_at_one_on_an_empty_table" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_repository" name="test_create_driver_ignores_non_matching_id_formats" time="0.000" /><testcase classname="src.setuhaul.backend.tms.tests.test_repository" name="test_create_vehicle_generates_sequential_id" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_repository" name="test_generate_shipment_id_continues_seed_style_numbering" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_repository" name="test_generate_shipment_id_preserves_wider_digit_widths" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_repository" name="test_get_staff_facility_returns_none_when_missing" time="0.000" /><testcase classname="src.setuhaul.backend.tms.tests.test_repository" name="test_register_staff_facility_then_get_staff_facility_round_trip" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_repository" name="test_list_shipment_reference_data_deduplicates_origins_and_categories" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_repository" name="test_register_staff_facility_upserts_on_re_registration" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_service" name="test_single_active_shipment_resolves" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_service" name="test_multiple_active_shipments_require_disambiguation" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_service" name="test_driver_without_shipments_returns_not_found_resolution" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_service" name="test_inactive_driver_returns_no_context" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_service" name="test_unknown_driver_raises_404_domain_error" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_service" name="test_maintenance_vehicle_cannot_receive_active_shipment" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_service" name="test_mismatched_carriers_are_rejected" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_service" name="test_context_does_not_cross_system_boundary" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_service" name="test_assign_shipment_sets_driver_and_vehicle" time="0.323" /><testcase classname="src.setuhaul.backend.tms.tests.test_service" name="test_assign_shipment_without_vehicle_reuses_existing" time="0.311" /><testcase classname="src.setuhaul.backend.tms.tests.test_service" name="test_archive_requires_completed_status" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_service" name="test_archive_completed_shipment" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_service" name="test_completing_a_shipment_via_update_auto_archives" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_service" name="test_cancel_shipment_sets_cancelled_status" time="0.294" /><testcase classname="src.setuhaul.backend.tms.tests.test_service" name="test_cancel_shipment_releases_any_current_appointment" time="0.332" /><testcase classname="src.setuhaul.backend.tms.tests.test_service" name="test_cancel_completed_shipment_is_rejected" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_service" name="test_cancel_already_cancelled_shipment_is_rejected" time="0.002" /><testcase classname="src.setuhaul.backend.tms.tests.test_service" name="test_shipment_context_includes_dock_and_checkin_trace" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_service" name="test_shipment_reference_data_surfaces_existing_origins_and_categories" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_service" name="test_shipment_context_trace_is_none_when_no_wms_data" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_service" name="test_assign_shipment_sends_sms_to_the_assigned_driver" time="0.001" /><testcase classname="src.setuhaul.backend.tms.tests.test_service" name="test_assign_shipment_succeeds_even_if_sms_send_fails" time="0.003" /><testcase classname="src.setuhaul.backend.tms.tests.test_service" name="test_assign_shipment_skips_sms_when_driver_has_no_phone" time="0.002" /><testcase classname="src.setuhaul.backend.tms.tests.test_service" name="test_create_shipment_with_driver_sends_sms" time="0.001" /><testcase classname="src.setuhaul.backend.dock_scheduler.tests.test_repository" name="test_ensure_future_slots_backfills_when_seeded_data_is_in_the_past" time="0.004" /><testcase classname="src.setuhaul.backend.dock_scheduler.tests.test_repository" name="test_ensure_future_slots_is_idempotent" time="0.002" /><testcase classname="src.setuhaul.backend.dock_scheduler.tests.test_repository" name="test_ensure_future_slots_only_clones_open_slots_forward" time="0.001" /><testcase classname="src.setuhaul.backend.dock_scheduler.tests.test_repository" name="test_ensure_future_slots_does_not_clone_slots_outside_operating_hours" time="0.002" /><testcase classname="src.setuhaul.backend.dock_scheduler.tests.test_repository" name="test_ensure_future_slots_for_shipment_resolves_facility_from_shipment" time="0.002" /><testcase classname="src.setuhaul.backend.dock_scheduler.tests.test_repository" name="test_ensure_future_slots_for_unknown_facility_is_a_no_op" time="0.001" /><testcase classname="src.setuhaul.backend.dock_scheduler.tests.test_repository" name="test_compatible_slots_excludes_rows_far_in_the_past" time="0.001" /><testcase classname="src.setuhaul.backend.dock_scheduler.tests.test_service" name="test_suggest_returns_only_standard_docks_for_standard_shipment" time="0.001" /><testcase classname="src.setuhaul.backend.dock_scheduler.tests.test_service" name="test_suggest_returns_only_reefer_dock_for_temperature_controlled_shipment" time="0.001" /><testcase classname="src.setuhaul.backend.dock_scheduler.tests.test_service" name="test_suggestions_sorted_by_start_then_dock" time="0.001" /><testcase classname="src.setuhaul.backend.dock_scheduler.tests.test_service" name="test_hold_request_confirm_flow" time="0.003" /><testcase classname="src.setuhaul.backend.dock_scheduler.tests.test_service" name="test_cancel_hold_frees_the_slot" time="0.001" /><testcase classname="src.setuhaul.backend.dock_scheduler.tests.test_service" name="test_priority_swap_suggested_when_higher_priority_shipment_competes" time="0.001" /><testcase classname="src.setuhaul.backend.dock_scheduler.tests.test_service" name="test_dock_board_returns_every_compatible_slot_not_just_top_ranked" time="0.003" /><testcase classname="src.setuhaul.backend.dock_scheduler.tests.test_service" name="test_dock_board_excludes_slots_outside_facility_operating_hours" time="0.002" /><testcase classname="src.setuhaul.backend.dock_scheduler.tests.test_service" name="test_hold_slot_accepts_any_compatible_slot_not_just_top_ranked" time="0.002" /><testcase classname="src.setuhaul.backend.dock_scheduler.tests.test_service" name="test_dock_board_shows_occupant_driver_name" time="0.002" /><testcase classname="src.setuhaul.backend.dock_scheduler.tests.test_service" name="test_facility_and_docks_lookup" time="0.001" /><testcase classname="src.setuhaul.backend.dock_scheduler.tests.test_service" name="test_rebook_slot_moves_a_confirmed_appointment_to_a_new_slot" time="0.002" /><testcase classname="src.setuhaul.backend.dock_scheduler.tests.test_service" name="test_rebook_slot_rejects_an_incompatible_slot" time="0.001" /><testcase classname="src.setuhaul.backend.dock_scheduler.tests.test_service" name="test_change_request_approval_actually_moves_the_appointment" time="0.002" /><testcase classname="src.setuhaul.backend.dock_scheduler.tests.test_service" name="test_change_request_decline_leaves_the_appointment_untouched" time="0.001" /><testcase classname="src.setuhaul.backend.dock_scheduler.tests.test_service" name="test_change_request_cannot_be_decided_twice" time="0.002" /><testcase classname="src.setuhaul.backend.dock_scheduler.tests.test_service" name="test_change_request_approval_executes_a_priority_swap" time="0.002" /><testcase classname="src.setuhaul.backend.dock_scheduler.tests.test_service" name="test_list_change_requests_filters_by_status" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_repository" name="test_repository_crud_round_trip" time="0.002" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_repository" name="test_get_by_shipment_returns_none_when_missing" time="0.000" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_repository" name="test_get_driver_contact_for_shipment_returns_phone" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_repository" name="test_get_driver_contact_for_shipment_returns_none_without_driver" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_repository" name="test_get_driver_contact_for_shipment_returns_none_when_shipment_missing" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_repository" name="test_shipment_exists" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_repository" name="test_get_confirmed_dock_for_shipment" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_repository" name="test_get_confirmed_dock_for_shipment_returns_none_without_confirmed_appointment" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_service" name="test_gate_checkin_success" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_service" name="test_duplicate_gate_checkin" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_service" name="test_queue_before_gate" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_service" name="test_queue_success" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_service" name="test_dock_before_checkin" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_service" name="test_dock_success" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_service" name="test_dock_blocked_without_confirmed_wms_appointment" time="0.002" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_service" name="test_complete_before_dock" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_service" name="test_complete_success" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_service" name="test_completed_cannot_return_to_queue" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_service" name="test_gate_checkin_sends_sms_to_assigned_driver" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_service" name="test_gate_checkin_succeeds_even_if_sms_lookup_fails" time="0.010" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_service" name="test_gate_checkin_without_driver_skips_sms_silently" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_service" name="test_gate_checkin_rejects_unknown_shipment" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_service" name="test_gate_checkin_alone_does_not_reflect_on_tms_status" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_service" name="test_approve_gate_checkin_reflects_at_gate_on_tms" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_service" name="test_approve_gate_checkin_requires_a_checkin_first" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_service" name="test_approve_gate_checkin_is_not_idempotent" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_service" name="test_queue_update_reflects_waiting_on_tms" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_service" name="test_mark_docked_reflects_in_dock_on_tms" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_service" name="test_complete_reflects_completed_and_auto_archives_on_tms" time="0.002" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_service" name="test_timing_status_early" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_service" name="test_timing_status_on_time" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_service" name="test_timing_status_late" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_service" name="test_timing_status_handles_mixed_naive_and_offset_aware_timestamps" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_service" name="test_timing_status_none_without_a_confirmed_appointment" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_service" name="test_locked_for_rescheduling" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_state_machine" name="test_allowed_transitions_pass[GATE_IN-WAITING]" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_state_machine" name="test_allowed_transitions_pass[GATE_IN-DOCKED]" time="0.002" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_state_machine" name="test_allowed_transitions_pass[WAITING-DOCKED]" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_state_machine" name="test_allowed_transitions_pass[DOCKED-COMPLETED]" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_state_machine" name="test_invalid_transitions_fail[COMPLETED-WAITING]" time="0.002" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_state_machine" name="test_invalid_transitions_fail[COMPLETED-DOCKED]" time="0.002" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_state_machine" name="test_invalid_transitions_fail[DOCKED-GATE_IN]" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_state_machine" name="test_invalid_transitions_fail[DOCKED-YARD_QUEUE]" time="0.001" /><testcase classname="src.setuhaul.backend.checkin_portal.tests.test_state_machine" name="test_invalid_transitions_fail[WAITING-COMPLETED]" time="0.001" /><testcase classname="src.setuhaul.backend.driver_chat_eta.tests.test_api" name="test_missing_bearer_token_is_401_not_500" time="0.064" /><testcase classname="src.setuhaul.backend.driver_chat_eta.tests.test_api" name="test_malformed_auth_scheme_is_401_not_500" time="0.005" /><testcase classname="src.setuhaul.backend.driver_chat_eta.tests.test_profile" name="test_list_carriers_returns_existing_carriers_only" time="0.001" /><testcase classname="src.setuhaul.backend.driver_chat_eta.tests.test_profile" name="test_list_carriers_flags_carriers_with_no_active_vehicle" time="0.001" /><testcase classname="src.setuhaul.backend.driver_chat_eta.tests.test_profile" name="test_list_home_base_cities_returns_distinct_existing_cities" time="0.002" /><testcase classname="src.setuhaul.backend.driver_chat_eta.tests.test_profile" name="test_complete_profile_with_known_carrier_id_succeeds" time="0.001" /><testcase classname="src.setuhaul.backend.driver_chat_eta.tests.test_profile" name="test_complete_profile_rejects_unknown_carrier_id" time="0.001" /><testcase classname="src.setuhaul.backend.driver_chat_eta.tests.test_service" name="test_handle_chat_message_propagates_driver_chat_errors_from_the_llm_path" time="0.011" /><testcase classname="src.setuhaul.backend.driver_chat_eta.tests.test_service" name="test_get_current_feasible_slots_returns_open_compatible_slot" time="0.002" /><testcase classname="src.setuhaul.backend.driver_chat_eta.tests.test_service" name="test_hold_slot_creates_a_hold_via_dock_scheduler" time="0.002" /><testcase classname="src.setuhaul.backend.driver_chat_eta.tests.test_service" name="test_hold_slot_releases_previous_hold_on_a_different_slot" time="0.003" /><testcase classname="src.setuhaul.backend.driver_chat_eta.tests.test_service" name="test_hold_slot_rejects_incompatible_dock_type" time="0.002" /><testcase classname="src.setuhaul.backend.driver_chat_eta.tests.test_service" name="test_confirm_slot_requires_an_active_hold" time="0.001" /><testcase classname="src.setuhaul.backend.driver_chat_eta.tests.test_service" name="test_confirm_slot_books_a_confirmed_appointment" time="0.004" /><testcase classname="src.setuhaul.backend.driver_chat_eta.tests.test_service" name="test_auto_book_books_the_earliest_compatible_slot_without_a_manual_hold_confirm_step" time="0.005" /><testcase classname="src.setuhaul.backend.driver_chat_eta.tests.test_service" name="test_auto_book_is_idempotent_once_a_confirmed_appointment_exists" time="0.014" /><testcase classname="src.setuhaul.backend.driver_chat_eta.tests.test_service" name="test_auto_book_escalates_when_nothing_is_compatible" time="0.015" /><testcase classname="src.setuhaul.backend.driver_chat_eta.tests.test_service" name="test_auto_book_prefers_a_pending_swap_upgrade_over_the_direct_slot_when_earlier" time="0.004" /><testcase classname="src.setuhaul.backend.driver_chat_eta.tests.test_service" name="test_auto_book_requests_a_swap_without_booking_when_nothing_is_directly_available" time="0.002" /><testcase classname="src.setuhaul.backend.driver_chat_eta.tests.test_service" name="test_confirm_slot_for_a_slot_not_held_by_this_driver_is_rejected" time="0.002" /><testcase classname="src.setuhaul.backend.driver_chat_eta.tests.test_snapshot" name="test_snapshot_shows_feasible_slots_without_any_reported_exception" time="0.002" /><testcase classname="src.setuhaul.backend.driver_chat_eta.tests.test_snapshot" name="test_snapshot_slot_options_still_reflect_declared_eta_after_exception" time="0.002" /></testsuite></testsuites>

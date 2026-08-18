@@ -5,7 +5,6 @@ import {
   ArrowLeft,
   Eye,
   EyeOff,
-  MapPin,
   Lock,
   Mail,
   User,
@@ -17,8 +16,6 @@ import { getService, type ServiceId } from "../data/services";
 import { useAuth } from "../context/AuthContext";
 import { cn } from "../lib/cn";
 import { useEffect } from "react";
-import { listCheckinFacilityOptions } from "../services/checkinApi";
-import type { TmsFacility } from "../types/api";
 
 type Mode = "login" | "register";
 
@@ -32,8 +29,6 @@ export default function AuthPage() {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [facilityId, setFacilityId] = useState("");
-  const [facilities, setFacilities] = useState<TmsFacility[]>([]);
   const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [success, setSuccess] = useState(false);
@@ -51,18 +46,6 @@ export default function AuthPage() {
     }
   }, [service.id, canAccess, navigate]);
 
-  useEffect(() => {
-    if (service.id !== "checkin") return;
-    void (async () => {
-      try {
-        const options = await listCheckinFacilityOptions();
-        setFacilities(options);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Unable to load warehouse locations.");
-      }
-    })();
-  }, [service.id]);
-
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
     if (submitting || success) return;
@@ -73,12 +56,7 @@ export default function AuthPage() {
         if (mode === "login") {
           await login(service.id as ServiceId, email, password);
         } else {
-          if (service.id === "checkin" && !facilityId) {
-            throw new Error("Warehouse Location is required for Check-in access.");
-          }
-          await register(service.id as ServiceId, displayName, email, password, {
-            facilityId: service.id === "checkin" ? facilityId : undefined,
-          });
+          await register(service.id as ServiceId, displayName, email, password);
         }
         setSuccess(true);
         window.setTimeout(() => {
@@ -243,25 +221,6 @@ export default function AuthPage() {
                         placeholder="Ravi Kumar"
                         className="peer w-full bg-transparent text-sm font-medium text-ink outline-none placeholder:text-mist"
                       />
-                    </Field>
-                  )}
-
-                  {mode === "register" && service.id === "checkin" && (
-                    <Field icon={MapPin} label="Warehouse Location">
-                      <select
-                        required
-                        value={facilityId}
-                        onChange={(e) => setFacilityId(e.target.value)}
-                        className="w-full bg-transparent text-sm font-medium text-ink outline-none"
-                      >
-                        <option value="">Select warehouse…</option>
-                        {facilities.map((facility) => (
-                          <option key={facility.facility_id} value={facility.facility_id}>
-                            {facility.facility_name ?? facility.facility_id}
-                            {facility.city ? ` — ${facility.city}, ${facility.state ?? ""}` : ""}
-                          </option>
-                        ))}
-                      </select>
                     </Field>
                   )}
 

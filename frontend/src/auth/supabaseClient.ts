@@ -9,7 +9,6 @@ type SupabaseSession = {
   access_token: string;
   refresh_token: string;
   expires_in: number;
-  expires_at?: number;
   token_type: string;
   user: SupabaseUser;
 };
@@ -32,8 +31,7 @@ function storageKey(serviceId: string) {
 function loadSession(serviceId: string): SupabaseSession | null {
   try {
     const raw = localStorage.getItem(storageKey(serviceId));
-    const parsed = raw ? (JSON.parse(raw) as SupabaseSession) : null;
-    return parsed ? normalizeSession(parsed) : null;
+    return raw ? (JSON.parse(raw) as SupabaseSession) : null;
   } catch {
     return null;
   }
@@ -46,34 +44,6 @@ function saveSession(serviceId: string, session: SupabaseSession | null) {
   } catch {
     /* ignore */
   }
-}
-
-function decodeJwtExpiry(accessToken: string): number | null {
-  try {
-    const [, payload] = accessToken.split(".");
-    if (!payload) return null;
-    const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
-    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
-    const decoded = JSON.parse(atob(padded)) as { exp?: unknown };
-    return typeof decoded.exp === "number" ? decoded.exp : null;
-  } catch {
-    return null;
-  }
-}
-
-function normalizeSession(session: SupabaseSession): SupabaseSession {
-  const expiresAt =
-    typeof session.expires_at === "number"
-      ? session.expires_at
-      : decodeJwtExpiry(session.access_token) ?? Math.floor(Date.now() / 1000) + session.expires_in;
-  return { ...session, expires_at: expiresAt };
-}
-
-function isSessionStale(session: SupabaseSession | null, leewaySeconds = 30) {
-  if (!session?.access_token) return false;
-  const expiresAt = session.expires_at ?? decodeJwtExpiry(session.access_token);
-  if (!expiresAt) return false;
-  return expiresAt <= Math.floor(Date.now() / 1000) + leewaySeconds;
 }
 
 async function request<T>(path: string, init: RequestInit = {}) {
@@ -100,7 +70,6 @@ async function request<T>(path: string, init: RequestInit = {}) {
 // (e.g. TMS signing in) never notifies a subscriber listening for a different
 // portal (e.g. Drivers), and therefore never overwrites that portal's state.
 const listenersByService = new Map<string, Set<AuthListener>>();
-const refreshPromises = new Map<string, Promise<SupabaseSession | null>>();
 
 function listenersFor(serviceId: string) {
   let set = listenersByService.get(serviceId);
@@ -111,43 +80,42 @@ function listenersFor(serviceId: string) {
   return set;
 }
 
+// Access tokens are short-lived (Supabase default: 1 hour). Previously
+// nothing ever used the stored refresh_token, so once a token expired every
+// authenticated request -- including chat -- failed until the driver
+// manually signed out and back in ("chatbot not responding" turned out to
+// be an expired session, not a chat bug). scheduleRefresh proactively
+// refreshes shortly before expiry; api.ts additionally retries once on a
+// 401 as a fallback for when a background tab's timer got throttled.
+const refreshTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function scheduleRefresh(serviceId: string, session: SupabaseSession | null) {
+  const existing = refreshTimers.get(serviceId);
+  if (existing) clearTimeout(existing);
+  refreshTimers.delete(serviceId);
+  if (!session) return;
+  const refreshInMs = Math.max((session.expires_in - 60) * 1000, 5_000);
+  const timer = setTimeout(() => {
+    void supabase.auth.refreshSession(serviceId);
+  }, refreshInMs);
+  refreshTimers.set(serviceId, timer);
+}
+
 function emit(serviceId: string, event: "SIGNED_IN" | "SIGNED_OUT" | "TOKEN_REFRESHED" | "USER_UPDATED", session: SupabaseSession | null) {
   saveSession(serviceId, session);
+  if (event === "SIGNED_OUT") {
+    const existing = refreshTimers.get(serviceId);
+    if (existing) clearTimeout(existing);
+    refreshTimers.delete(serviceId);
+  } else if (session) {
+    scheduleRefresh(serviceId, session);
+  }
   listenersFor(serviceId).forEach((listener) => listener(event, session));
 }
 
-async function refreshSession(serviceId: string): Promise<SupabaseSession | null> {
-  const existing = refreshPromises.get(serviceId);
-  if (existing) return existing;
-
-  const refresh = (async () => {
-    const session = loadSession(serviceId);
-    if (!session?.refresh_token) return session;
-    try {
-      const data = await request<{
-        access_token: string;
-        refresh_token: string;
-        expires_in: number;
-        token_type: string;
-        user: SupabaseUser;
-      }>("/auth/v1/token?grant_type=refresh_token", {
-        method: "POST",
-        body: JSON.stringify({ refresh_token: session.refresh_token }),
-      });
-      const refreshed = normalizeSession({ ...data });
-      emit(serviceId, "TOKEN_REFRESHED", refreshed);
-      return refreshed;
-    } catch {
-      emit(serviceId, "SIGNED_OUT", null);
-      return null;
-    } finally {
-      refreshPromises.delete(serviceId);
-    }
-  })();
-
-  refreshPromises.set(serviceId, refresh);
-  return refresh;
-}
+// Concurrent 401s (several in-flight requests at once) should share a single
+// refresh call rather than each spending the one-time-use refresh token.
+const refreshInFlight = new Map<string, Promise<{ data: { session: SupabaseSession | null }; error: Error | null }>>();
 
 export const supabase = {
   isConfigured,
@@ -160,7 +128,7 @@ export const supabase = {
         method: "POST",
         body: JSON.stringify({ email, password, data: options?.data ?? {} }),
       });
-      if (data.session) emit(serviceId, "SIGNED_IN", normalizeSession(data.session));
+      if (data.session) emit(serviceId, "SIGNED_IN", data.session);
       return { data, error: null };
     },
     async signInWithPassword(serviceId: string, { email, password }: { email: string; password: string }) {
@@ -168,7 +136,7 @@ export const supabase = {
         method: "POST",
         body: JSON.stringify({ email, password }),
       });
-      const session: SupabaseSession = normalizeSession({ ...data });
+      const session: SupabaseSession = { ...data };
       emit(serviceId, "SIGNED_IN", session);
       return { data: { session, user: data.user }, error: null };
     },
@@ -186,14 +154,53 @@ export const supabase = {
       emit(serviceId, "SIGNED_OUT", null);
       return { error: null };
     },
-    async getSession(serviceId: string, options?: { forceRefresh?: boolean }) {
-      const current = loadSession(serviceId);
-      if (!current) return { data: { session: null }, error: null };
-      if ((options?.forceRefresh || isSessionStale(current)) && current.refresh_token) {
-        const refreshed = await refreshSession(serviceId);
-        return { data: { session: refreshed }, error: null };
+    async getSession(serviceId: string) {
+      const session = loadSession(serviceId);
+      // A page reload restores the session straight from localStorage
+      // without going through signIn/refreshSession, so it must schedule
+      // its own proactive refresh too -- otherwise a session loaded a few
+      // minutes before its natural expiry would never get renewed.
+      scheduleRefresh(serviceId, session);
+      return { data: { session }, error: null };
+    },
+    async refreshSession(serviceId: string) {
+      const inFlight = refreshInFlight.get(serviceId);
+      if (inFlight) return inFlight;
+
+      const promise = (async () => {
+        const current = loadSession(serviceId);
+        if (!current?.refresh_token) {
+          return { data: { session: null }, error: new Error("No refresh token available.") };
+        }
+        try {
+          const data = await request<{
+            access_token: string;
+            refresh_token: string;
+            expires_in: number;
+            token_type: string;
+            user: SupabaseUser;
+          }>("/auth/v1/token?grant_type=refresh_token", {
+            method: "POST",
+            body: JSON.stringify({ refresh_token: current.refresh_token }),
+          });
+          const session: SupabaseSession = { ...data };
+          emit(serviceId, "TOKEN_REFRESHED", session);
+          return { data: { session }, error: null };
+        } catch (err) {
+          // The refresh token itself is invalid/expired/revoked -- there's
+          // no way back without a fresh login, so clear the stale session
+          // rather than leaving a dead token in storage.
+          emit(serviceId, "SIGNED_OUT", null);
+          return { data: { session: null }, error: err instanceof Error ? err : new Error("Failed to refresh session.") };
+        }
+      })();
+
+      refreshInFlight.set(serviceId, promise);
+      try {
+        return await promise;
+      } finally {
+        refreshInFlight.delete(serviceId);
       }
-      return { data: { session: current }, error: null };
     },
     onAuthStateChange(serviceId: string, listener: AuthListener) {
       const set = listenersFor(serviceId);

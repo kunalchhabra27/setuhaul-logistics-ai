@@ -16,39 +16,13 @@ export type CheckInRecord = {
   queue_status: "NONE" | "GATE_QUEUE" | "YARD_QUEUE" | "CALLED_TO_DOCK";
   dock_in_at: string | null;
   completed_at: string | null;
-};
-
-export type CheckInShipmentSummary = {
-  shipment_id: string;
-  order_reference?: string | null;
-  carrier_id?: string | null;
-  driver_id?: string | null;
   driver_name?: string | null;
-  vehicle_id?: string | null;
-  registration_number?: string | null;
-  origin_name?: string | null;
-  origin_city?: string | null;
-  destination_facility_id?: string | null;
-  destination_facility_name?: string | null;
-  destination_facility_city?: string | null;
-  customer_name?: string | null;
-  product_category?: string | null;
-  load_weight_kg?: number | null;
-  required_dock_type?: string | null;
-  temperature_control_required?: boolean | null;
-  priority_code?: string | null;
-  planned_departure_ts?: string | null;
-  original_eta_ts?: string | null;
-  latest_eta_ts?: string | null;
-  expected_unload_min?: number | null;
-  current_status?: ShipmentStatus | null;
-  created_at?: string | null;
-  updated_at?: string | null;
-  checkin?: CheckInRecord | null;
-  can_gate_in: boolean;
-  can_queue: boolean;
-  can_dock: boolean;
-  can_complete: boolean;
+  driver_phone?: string | null;
+  staff_approved?: boolean;
+  // Real timeliness vs. the booked slot -- separate from arrival_status
+  // above, which despite its name is actually a check-in stage label, not
+  // a timing classification. See CheckInService._compute_timing_status.
+  timing_status?: "EARLY" | "ON_TIME" | "LATE" | null;
 };
 
 export type ShipmentStatus =
@@ -86,14 +60,12 @@ export type ShipmentSummary = {
   updated_at?: string | null;
 };
 
-export type NextShipmentIds = {
-  shipment_id: string;
-  order_reference: string;
-};
-
 export type ShipmentCreateInput = {
-  shipment_id?: string;
-  order_reference?: string;
+  // Required fields here mirror the real Supabase shipments table's NOT
+  // NULL columns -- omitting any of these used to reach Postgres and fail
+  // with an opaque "database operation failed" error instead of being
+  // caught by the form itself.
+  order_reference: string;
   carrier_id: string;
   driver_id: string;
   vehicle_id: string;
@@ -103,16 +75,13 @@ export type ShipmentCreateInput = {
   customer_name: string;
   product_category: string;
   load_weight_kg: number;
-  pallet_count?: number;
+  planned_departure_ts: string;
+  original_eta_ts: string;
+  expected_unload_min: number;
   required_dock_type?: string;
   temperature_control_required?: boolean;
   priority_code?: string;
-  planned_departure_ts: string;
-  actual_departure_ts?: string;
-  original_eta_ts: string;
   latest_eta_ts?: string;
-  expected_unload_min: number;
-  current_status?: ShipmentStatus;
 };
 
 export type TmsDriver = {
@@ -140,7 +109,22 @@ export type TmsFacility = {
   facility_name?: string | null;
   city?: string | null;
   state?: string | null;
-  active_flag?: boolean | null;
+};
+
+export type FacilityStaffAssignment = {
+  staff_user_id: string;
+  facility_id: string;
+  facility_name?: string | null;
+};
+
+export type OriginSummary = {
+  origin_name: string;
+  origin_city?: string | null;
+};
+
+export type ShipmentReferenceData = {
+  origins: OriginSummary[];
+  product_categories: string[];
 };
 
 export type DockSlot = {
@@ -151,6 +135,59 @@ export type DockSlot = {
   end: string;
   availability_status: "AVAILABLE" | "HELD" | "OCCUPIED" | "BLOCKED" | "CLOSED" | string;
   occupant_shipment_id?: string | null;
+  occupant_driver_name?: string | null;
+};
+
+export type DockTraceSummary = {
+  appointment_id?: string | null;
+  appointment_status?: string | null;
+  dock_code?: string | null;
+  slot_start_ts?: string | null;
+  slot_end_ts?: string | null;
+};
+
+export type CheckinTraceSummary = {
+  arrival_state?: string | null;
+  queue_state?: string | null;
+  gate_in_ts?: string | null;
+  dock_in_ts?: string | null;
+  unload_end_ts?: string | null;
+};
+
+export type ShipmentContext = {
+  driver: { driver_id: string; driver_name?: string | null; carrier_id?: string | null; driver_status?: string | null };
+  vehicle: { vehicle_id: string; registration_number?: string | null; vehicle_type_code?: string | null };
+  shipment: ShipmentSummary;
+  dock?: DockTraceSummary | null;
+  checkin?: CheckinTraceSummary | null;
+};
+
+export type ChangeRequestRole = "TMS" | "DRIVER";
+export type ChangeRequestStatus = "PENDING" | "APPROVED" | "DECLINED";
+
+export type ChangeRequest = {
+  change_request_id: string;
+  shipment_id: string;
+  current_appointment_id?: string | null;
+  requested_slot_id: string;
+  requested_by_role: ChangeRequestRole;
+  requested_by_user_id: string;
+  reason?: string | null;
+  request_status: ChangeRequestStatus;
+  created_at?: string | null;
+  decided_at?: string | null;
+  decided_by_user_id?: string | null;
+  decision_note?: string | null;
+  dock_code?: string | null;
+  slot_start_ts?: string | null;
+  slot_end_ts?: string | null;
+  // Set only for a priority-swap request (see DriverChatService.
+  // auto_book_earliest_feasible_slot / DeterministicReschedulingEngine's
+  // PRIORITY_SWAP suggestions): the shipment currently occupying
+  // requested_slot_id that would be moved to displaced_to_slot_id if this
+  // request is approved. Null for an ordinary change request.
+  displaced_shipment_id?: string | null;
+  displaced_to_slot_id?: string | null;
 };
 
 export type DockSuggestion = {

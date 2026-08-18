@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Deterministic dock rescheduling engine for the SetuHaul FDE challenge"
 requires-python = ">=3.11"
 dependencies = [
+    "bedrock-agentcore>=1.9.1",
     "fastapi>=0.110",
     "pydantic>=2.0",
     "pydantic-settings==2.14.2",
@@ -15,14 +16,43 @@ dependencies = [
     "supabase==2.31.0",
     "uvicorn>=0.30",
     "langchain>=0.3",
+    # Driver chat agent's main tool-calling LLM -- an open-weights model
+    # (default meta-llama/Llama-3.3-70B-Instruct) served over Hugging Face
+    # Inference Providers via ChatHuggingFace/HuggingFaceEndpoint.
+    "langchain-huggingface>=1.2",
+    # Kept for voice-note transcription ONLY (llm/agent.py's transcribe_audio)
+    # -- there's no equivalent native audio-input path through HF's routed
+    # chat-completions API, so Gemini's multimodal audio support is still
+    # used for that one call.
     "langchain-google-genai>=2.0",
     "redis>=5.0",
     "twilio>=9.0",
+    "openpyxl>=3.1",
+    "boto3>=1.34",
+    "opentelemetry-api>=1.27",
+    "opentelemetry-sdk>=1.27",
+    "opentelemetry-instrumentation-fastapi>=0.48b0",
+    "opentelemetry-exporter-otlp-proto-http>=1.27",
+    "langsmith>=0.1",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "httpx>=0.27"]
+dev = ["pytest>=8.0", "httpx>=0.27", "locust>=2.31"]
+
+# Local dev/Vercel have always run this as PYTHONPATH=src (see README's
+# uvicorn commands), never as an installed package, so this project never
+# needed setuptools to know where "setuhaul" actually lives. The AWS
+# AgentCore container build (agentcore_app/, see its README) may run a
+# standard `pip install .` step instead of relying on PYTHONPATH -- this
+# tells setuptools the package root is src/, so `pip install .` correctly
+# finds and installs setuhaul either way. Purely additive: doesn't change
+# behavior for the existing PYTHONPATH-based workflows at all.
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.vercel]
+entrypoint = "api.index:app"
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = [".", "src"]
 testpaths = ["tests", "src/setuhaul/backend/tms/tests"]

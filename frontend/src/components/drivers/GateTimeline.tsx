@@ -24,10 +24,12 @@ export default function GateTimeline({
   snapshot,
   color,
   onUpdateCheckin,
+  disabled,
 }: {
   snapshot: DriverSnapshot;
   color: string;
   onUpdateCheckin: (status: ArrivalUpdateChoice) => void;
+  disabled?: boolean;
 }) {
   const { checkin, facility } = snapshot;
   const currentStatus = deriveStage(checkin);
@@ -56,7 +58,8 @@ export default function GateTimeline({
         {nextAction && (
           <button
             onClick={() => onUpdateCheckin(nextAction.value)}
-            className="flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-black text-white shadow-soft transition active:scale-95 sm:text-sm"
+            disabled={disabled}
+            className="flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-black text-white shadow-soft transition active:scale-95 disabled:opacity-50 sm:text-sm"
             style={{ background: color }}
           >
             {nextAction.label}
