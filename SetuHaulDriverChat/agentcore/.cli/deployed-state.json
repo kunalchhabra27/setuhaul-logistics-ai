@@ -1,0 +1,17 @@
+{
+  "targets": {
+    "default": {
+      "resources": {
+        "runtimes": {
+          "SetuHaulDriverChat": {
+            "runtimeId": "SetuHaulDriverChat_SetuHaulDriverChat-cTsy0LGpXz",
+            "runtimeArn": "arn:aws:bedrock-agentcore:us-east-1:040105285212:runtime/SetuHaulDriverChat_SetuHaulDriverChat-cTsy0LGpXz",
+            "roleArn": "arn:aws:iam::040105285212:role/AgentCore-SetuHaulDriverC-ApplicationAgentSetuHaulD-cOsB6dGxTvZj"
+          }
+        },
+        "stackName": "AgentCore-SetuHaulDriverChat-default",
+        "deployHash": "c08c169a289f14a8"
+      }
+    }
+  }
+}

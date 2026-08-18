@@ -1,0 +1,31 @@
+# Requirements for the AWS Bedrock AgentCore container (agentcore_app/app.py).
+# Deliberately smaller than the main app's dependencies -- this container
+# never runs FastAPI/uvicorn or the tms/dock_scheduler/checkin_portal REST
+# routers, only driver_chat_eta's LLM tool-calling path. Versions pinned to
+# match pyproject.toml's floors so behavior doesn't drift between the two
+# deployments of the same setuhaul package.
+bedrock-agentcore
+# Never runs uvicorn/the REST API itself, but driver_chat_eta.auth (needed
+# for DriverPrincipal) also defines get_current_driver using fastapi.Depends/
+# HTTPBearer at module scope -- the import fails without this regardless of
+# whether that function is ever called. Confirmed via a real CloudWatch
+# traceback (ModuleNotFoundError: No module named 'fastapi') on first deploy.
+fastapi>=0.110
+langchain>=0.3
+# The actual, currently-live tool-calling model -- llm/agent.py's
+# is_configured()/_run_chat_turn (which this container's entrypoint calls
+# directly) checks HUGGINGFACEHUB_API_TOKEN and imports ChatHuggingFace/
+# HuggingFaceEndpoint, not Gemini. Without this package the import fails at
+# runtime, gets swallowed by the broad except in agentcore_app/app.py, and
+# every invocation silently falls back to the regex parser instead of
+# actually running the LLM.
+langchain-huggingface>=1.2
+# Kept only because transcribe_audio() (Vercel/FastAPI voice-note path,
+# never called from this container) imports langchain_google_genai -- left
+# in so the vendored setuhaul/ package's imports resolve identically.
+langchain-google-genai>=2.0
+supabase==2.31.0
+redis>=5.0
+pydantic>=2.0
+pydantic-settings==2.14.2
+python-dotenv>=1.0

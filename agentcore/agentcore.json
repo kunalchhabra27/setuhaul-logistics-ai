@@ -1,0 +1,23 @@
+{
+  "$schema": "https://schema.agentcore.aws.dev/v1/agentcore.json",
+  "name": "SetuHaul",
+  "version": 1,
+  "managedBy": "CDK",
+  "runtimes": [
+    {
+      "name": "SetuHaulAgent",
+      "build": "CodeZip",
+      "entrypoint": "app/SetuHaulAgent/main.py",
+      "codeLocation": ".",
+      "runtimeVersion": "PYTHON_3_14",
+      "networkMode": "PUBLIC",
+      "protocol": "HTTP",
+      "envVars": [
+        {
+          "name": "PYTHONPATH",
+          "value": "src"
+        }
+      ]
+    }
+  ]
+}

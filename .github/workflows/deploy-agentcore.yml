@@ -1,0 +1,135 @@
+name: Deploy AgentCore (driver chatbot)
+
+# Manual-only on purpose: this deploys/updates a real AWS Bedrock AgentCore
+# Runtime (billed resources, a CDK/CloudFormation stack, an ECR image push).
+# Never triggers automatically on push -- see DEPLOYMENT_PLAN.md section 2
+# for the full architecture this reproduces in CI. Runs on ubuntu-latest
+# specifically because it has Docker preinstalled, which the CLI's
+# `--build Container` step needs to build the agent's image -- no sandbox
+# or local dev machine without Docker can run this (that's the whole reason
+# this workflow exists instead of a local runbook).
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "deploy" to confirm -- this creates/updates real AWS resources'
+        required: true
+
+jobs:
+  deploy:
+    if: github.event.inputs.confirm == 'deploy'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install AgentCore CLI + AWS CDK
+        run: |
+          npm install -g @aws/agentcore aws-cdk
+          agentcore --version
+          cdk --version
+
+      # Uses the AWS access key pair you add as repo secrets below -- never
+      # typed into this file, never seen by Claude. Scope this identity to
+      # the permissions listed in DEPLOYMENT_PLAN.md section 2.6 (broad,
+      # deploy-time permissions: CloudFormation, bedrock-agentcore,
+      # ECR, S3 staging bucket, IAM PassRole/CreateRole, logs, X-Ray,
+      # CloudWatch, Secrets Manager) -- this is a deploy-time identity, not
+      # the narrowly-scoped one Vercel uses later just to invoke the runtime.
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # One-time per account/region in reality, but safe and idempotent to
+      # rerun every deploy -- cdk bootstrap no-ops if already bootstrapped.
+      - name: CDK bootstrap
+        run: cdk bootstrap
+
+      # Mirrors agentcore_app/README.md's manual "keeping the vendored copy
+      # in sync" step -- the Container build's entire build context is
+      # SetuHaulDriverChat/app/SetuHaulDriverChat/ (see agentcore.json's
+      # codeLocation), so it can't see src/setuhaul directly. This
+      # guarantees every deploy ships the exact current state of the shared
+      # package, not whatever was last manually copied in.
+      - name: Resync vendored setuhaul/ package from src/setuhaul
+        run: |
+          rm -rf SetuHaulDriverChat/app/SetuHaulDriverChat/setuhaul
+          cp -r src/setuhaul SetuHaulDriverChat/app/SetuHaulDriverChat/setuhaul
+          find SetuHaulDriverChat/app/SetuHaulDriverChat/setuhaul -name "__pycache__" -type d -prune -exec rm -rf {} + 2>/dev/null || true
+
+      # Plain runtime env vars via agentcore.json's runtimes[].envVars field
+      # (confirmed schema -- see the PYTHONPATH example in agentcore/agentcore.json
+      # at the repo root, a separate/earlier scaffold attempt). DEPLOYMENT_PLAN.md
+      # also documents an `agentcore add credential` path that stores secrets in
+      # AWS Secrets Manager instead of plain CloudFormation-visible env vars --
+      # worth migrating HUGGINGFACEHUB_API_TOKEN to that once its exact CLI flags
+      # are confirmed against a real run (`agentcore add credential --help`);
+      # this workflow uses the plain-envVars path first for functional
+      # correctness, since it's schema-verified rather than guessed.
+      - name: Inject runtime environment variables
+        working-directory: SetuHaulDriverChat
+        env:
+          HUGGINGFACEHUB_API_TOKEN: ${{ secrets.HUGGINGFACEHUB_API_TOKEN }}
+          DRIVER_CHAT_LLM_MODEL: ${{ vars.DRIVER_CHAT_LLM_MODEL }}
+          DRIVER_CHAT_LLM_PROVIDER: ${{ vars.DRIVER_CHAT_LLM_PROVIDER }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+          REDIS_URL: ${{ secrets.REDIS_URL }}
+          LANGCHAIN_TRACING_V2: ${{ vars.LANGCHAIN_TRACING_V2 }}
+          LANGCHAIN_API_KEY: ${{ secrets.LANGCHAIN_API_KEY }}
+          LANGCHAIN_PROJECT: ${{ vars.LANGCHAIN_PROJECT }}
+        run: |
+          jq --arg hf "$HUGGINGFACEHUB_API_TOKEN" \
+             --arg model "${DRIVER_CHAT_LLM_MODEL:-meta-llama/Llama-3.3-70B-Instruct}" \
+             --arg provider "${DRIVER_CHAT_LLM_PROVIDER:-auto}" \
+             --arg supaurl "$SUPABASE_URL" \
+             --arg supakey "$SUPABASE_PUBLISHABLE_KEY" \
+             --arg redis "$REDIS_URL" \
+             --arg lctracing "${LANGCHAIN_TRACING_V2:-true}" \
+             --arg lckey "$LANGCHAIN_API_KEY" \
+             --arg lcproj "${LANGCHAIN_PROJECT:-setuhaul-driver-chat-prod}" \
+             '.runtimes[0].envVars = ([
+                {name: "HUGGINGFACEHUB_API_TOKEN", value: $hf},
+                {name: "DRIVER_CHAT_LLM_MODEL", value: $model},
+                {name: "DRIVER_CHAT_LLM_PROVIDER", value: $provider},
+                {name: "SUPABASE_URL", value: $supaurl},
+                {name: "SUPABASE_PUBLISHABLE_KEY", value: $supakey},
+                {name: "REDIS_URL", value: $redis},
+                {name: "LANGCHAIN_TRACING_V2", value: $lctracing},
+                {name: "LANGCHAIN_API_KEY", value: $lckey},
+                {name: "LANGCHAIN_PROJECT", value: $lcproj}
+             ] | map(select(.value != "" and .value != null)))' \
+             agentcore/agentcore.json > agentcore/agentcore.json.tmp
+          mv agentcore/agentcore.json.tmp agentcore/agentcore.json
+          echo "Runtime env vars that will be set (values redacted):"
+          jq '.runtimes[0].envVars | map(.name)' agentcore/agentcore.json
+
+      - name: Deploy
+        working-directory: SetuHaulDriverChat
+        run: agentcore deploy
+
+      - name: Get Runtime ARN
+        working-directory: SetuHaulDriverChat
+        run: |
+          agentcore status | tee /tmp/agentcore-status.txt
+          {
+            echo "## AgentCore deploy status"
+            echo '```'
+            cat /tmp/agentcore-status.txt
+            echo '```'
+            echo ""
+            echo "Copy the Runtime ARN above into Vercel's \`AGENTCORE_RUNTIME_ARN\` env var."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload status as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentcore-status
+          path: /tmp/agentcore-status.txt

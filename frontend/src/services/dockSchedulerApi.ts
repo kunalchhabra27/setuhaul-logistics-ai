@@ -1,5 +1,5 @@
 import { createApiClient } from "./api";
-import type { DockSlot, DockSuggestion, ShipmentSummary } from "../types/api";
+import type { ChangeRequest, DockSlot, DockSuggestion, FacilityStaffAssignment, ShipmentSummary, TmsFacility } from "../types/api";
 
 const api = createApiClient("wms");
 
@@ -15,6 +15,16 @@ export function suggestSlots(input: { shipment_id: string; earliest_start?: stri
 // which only returns the top-ranked handful of options.
 export function getDockBoard(shipmentId: string) {
   return api.request<DockSlot[]>(`/dock-scheduler/board?shipment_id=${encodeURIComponent(shipmentId)}`);
+}
+
+// Called only when getDockBoard() above comes back empty -- explains the
+// specific reason (no active docks, dock-type/refrigeration/weight
+// mismatch, or no slots within operating hours) instead of leaving the
+// board silently blank.
+export function getDockBoardUnavailableReason(shipmentId: string) {
+  return api.request<{ reason: string | null }>(
+    `/dock-scheduler/board/reason?shipment_id=${encodeURIComponent(shipmentId)}`
+  );
 }
 
 export function holdSlot(input: { shipment_id: string; slot_id: string; ttl_minutes?: number }) {
@@ -36,4 +46,46 @@ export function confirmBooking(input: { shipment_id: string; slot_id: string; ac
 // instead of a hardcoded shipment id, without depending on a TMS login.
 export function listShipmentsForScheduling() {
   return api.request<ShipmentSummary[]>("/tms/shipments");
+}
+
+// -- facility-scoped registration (see PortalWorkspace's WMS facility gate) --
+
+export function listFacilitiesForRegistration() {
+  return api.request<TmsFacility[]>("/tms/facilities");
+}
+
+export function getMyWmsFacility() {
+  return api.request<FacilityStaffAssignment>("/tms/facility-staff/me");
+}
+
+export function registerMyWmsFacility(facilityId: string) {
+  return api.request<FacilityStaffAssignment>("/tms/facility-staff/register", {
+    method: "POST",
+    body: JSON.stringify({ facility_id: facilityId }),
+  });
+}
+
+// Shipments scoped to ONLY the WMS staff member's own registered facility --
+// the facility filter is resolved server-side from staff_facility_assignments,
+// never a client-supplied parameter, so staff at one facility cannot see
+// another facility's shipments here.
+export function listShipmentsForMyFacility() {
+  return api.request<ShipmentSummary[]>("/tms/facility-staff/shipments");
+}
+
+// -- dock-slot change requests (TMS/driver requested, WMS approved) --------
+//
+// TMS and Driver call POST /dock-scheduler/change-requests through their OWN
+// api client (see tmsApi.ts / driverChatApi.ts) so the request is attributed
+// to the right requester -- this file only owns the WMS-side review actions.
+
+export function listPendingChangeRequests() {
+  return api.request<ChangeRequest[]>("/dock-scheduler/change-requests?status=PENDING");
+}
+
+export function decideChangeRequest(changeRequestId: string, approve: boolean, note?: string) {
+  return api.request<ChangeRequest>(`/dock-scheduler/change-requests/${encodeURIComponent(changeRequestId)}/decide`, {
+    method: "POST",
+    body: JSON.stringify({ approve, ...(note ? { note } : {}) }),
+  });
 }

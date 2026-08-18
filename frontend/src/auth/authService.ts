@@ -40,14 +40,7 @@ export function subscribeAuthState(serviceId: string, listener: AuthStateListene
   return () => listenersFor(serviceId).delete(listener);
 }
 
-export async function signUpWithEmail(
-  serviceId: string,
-  email: string,
-  password: string,
-  name: string,
-  serviceRole: string,
-  extraProfileData?: Record<string, unknown>
-) {
+export async function signUpWithEmail(serviceId: string, email: string, password: string, name: string, serviceRole: string) {
   const { data, error } = await supabase.auth.signUp(serviceId, {
     email,
     password,
@@ -55,7 +48,6 @@ export async function signUpWithEmail(
       data: {
         full_name: name,
         service_role: serviceRole,
-        ...(extraProfileData ?? {}),
       },
     },
   });
@@ -77,13 +69,6 @@ export async function signOut(serviceId: string) {
   emit(serviceId, null);
 }
 
-export async function getSession(serviceId: string, options?: { forceRefresh?: boolean }) {
-  const { data, error } = await supabase.auth.getSession(serviceId, options);
-  if (error) throw error;
-  emit(serviceId, data.session ?? null);
-  return data.session ?? null;
-}
-
 export function getCurrentSession(serviceId: string) {
   return currentSessions.get(serviceId) ?? null;
 }
@@ -94,6 +79,16 @@ export function getCurrentUser(serviceId: string): SupabaseUser | null {
 
 export function getAccessToken(serviceId: string) {
   return currentSessions.get(serviceId)?.access_token ?? null;
+}
+
+// Fallback for when the proactive refresh timer in supabaseClient.ts missed
+// its window (e.g. a background tab whose timers were throttled by the
+// browser while asleep). api.ts calls this once on a 401 before giving up,
+// so a request made right after a laptop wakes from sleep self-heals
+// instead of surfacing as "the chatbot isn't responding".
+export async function refreshAccessToken(serviceId: string): Promise<boolean> {
+  const { data, error } = await supabase.auth.refreshSession(serviceId);
+  return !error && Boolean(data.session);
 }
 
 export const isAuthConfigured = supabase.isConfigured;

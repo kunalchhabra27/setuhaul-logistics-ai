@@ -1,72 +1,50 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { User, Phone, CreditCard, Building2, MapPin, CheckCircle2, AlertCircle } from "lucide-react";
-import { completeDriverProfile, getDriverOnboardingOptions } from "../../services/driverChatApi";
-import type { DriverOnboardingOptions, DriverProfile } from "../../types/driverChat";
-
-const CARRIER_ID_PATTERN = /^CAR\d{3}$/;
-const LICENCE_PATTERN = /^[A-Z]{2}[0-9]{2}[- ]?[0-9]{4}[- ]?[0-9]{6,7}$/;
+import { useEffect, useState, type FormEvent } from "react";
+import { User, Phone, CreditCard, Building2, MapPin, CheckCircle2, AlertCircle, AlertTriangle } from "lucide-react";
+import { completeDriverProfile, listDriverCarriers, listDriverHomeBaseCities } from "../../services/driverChatApi";
+import type { DriverCarrierSummary, DriverProfile } from "../../types/driverChat";
 
 export default function ProfileSetupForm({ color, onComplete }: { color: string; onComplete: (driver: DriverProfile) => void }) {
   const [driverName, setDriverName] = useState("");
-  const [phoneDigits, setPhoneDigits] = useState("");
+  const [phone, setPhone] = useState("");
   const [licenceNumber, setLicenceNumber] = useState("");
   const [carrierId, setCarrierId] = useState("");
   const [homeBaseCity, setHomeBaseCity] = useState("");
-  const [options, setOptions] = useState<DriverOnboardingOptions>({ carrier_ids: [], home_base_cities: [] });
-  const [loadingOptions, setLoadingOptions] = useState(true);
+  const [carriers, setCarriers] = useState<DriverCarrierSummary[]>([]);
+  const [carriersLoading, setCarriersLoading] = useState(true);
+  const [cities, setCities] = useState<string[]>([]);
+  const [citiesLoading, setCitiesLoading] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
     void (async () => {
       try {
-        setLoadingOptions(true);
-        setOptions(await getDriverOnboardingOptions());
+        const list = await listDriverCarriers();
+        setCarriers(list);
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to load onboarding options.");
+        setError(err instanceof Error ? err.message : "Failed to load carriers from Supabase.");
       } finally {
-        setLoadingOptions(false);
+        setCarriersLoading(false);
+      }
+    })();
+    void (async () => {
+      try {
+        const list = await listDriverHomeBaseCities();
+        setCities(list);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to load cities from Supabase.");
+      } finally {
+        setCitiesLoading(false);
       }
     })();
   }, []);
 
-  const carrierIdError = useMemo(() => {
-    if (!carrierId.trim()) return "";
-    return CARRIER_ID_PATTERN.test(carrierId.trim()) ? "" : "Carrier ID must look like CAR001.";
-  }, [carrierId]);
-
-  const nameError = useMemo(() => {
-    if (!driverName.trim()) return "";
-    return /^[A-Za-z ]{1,40}$/.test(driverName.trim()) ? "" : "Name must contain only letters and spaces, up to 40 characters.";
-  }, [driverName]);
-
-  const phoneError = useMemo(() => {
-    if (!phoneDigits.trim()) return "";
-    return /^[6-9][0-9]{9}$/.test(phoneDigits.trim()) ? "" : "Enter a valid 10-digit Indian mobile number starting with 6, 7, 8, or 9.";
-  }, [phoneDigits]);
+  const selectedCarrier = carriers.find((c) => c.carrier_id === carrierId);
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (
-      !driverName.trim() ||
-      !phoneDigits.trim() ||
-      !licenceNumber.trim() ||
-      !carrierId.trim() ||
-      !homeBaseCity.trim()
-    ) {
+    if (!driverName.trim() || !phone.trim() || !licenceNumber.trim() || !carrierId || !homeBaseCity.trim()) {
       setError("All fields are mandatory to register your driver profile.");
-      return;
-    }
-    if (!/^[A-Za-z ]{1,40}$/.test(driverName.trim())) {
-      setError("Name must contain only letters and spaces, up to 40 characters.");
-      return;
-    }
-    if (!/^[6-9][0-9]{9}$/.test(phoneDigits.trim())) {
-      setError("Enter a valid 10-digit Indian mobile number starting with 6, 7, 8, or 9.");
-      return;
-    }
-    if (!CARRIER_ID_PATTERN.test(carrierId.trim())) {
-      setError("Carrier ID must match the CAR001 format.");
       return;
     }
     setError("");
@@ -74,9 +52,9 @@ export default function ProfileSetupForm({ color, onComplete }: { color: string;
     try {
       const driver = await completeDriverProfile({
         driver_name: driverName.trim(),
-        phone: phoneDigits.trim(),
+        phone: phone.trim(),
         licence_number: licenceNumber.trim(),
-        carrier_id: carrierId.trim(),
+        carrier_id: carrierId,
         home_base_city: homeBaseCity.trim(),
       });
       onComplete(driver);
@@ -102,79 +80,66 @@ export default function ProfileSetupForm({ color, onComplete }: { color: string;
       )}
 
       <form onSubmit={handleSubmit} className="mt-4 flex flex-col gap-3.5">
-        <div className="rounded-xl border border-dashed border-line bg-cloud/40 px-3.5 py-3 text-xs font-semibold text-ink-soft">
-          Your driver ID will be assigned automatically after saving and will follow the next available `DRV###`
-          sequence from the database.
-        </div>
         <Field icon={User} label="Full name">
-          <input
-            value={driverName}
-            onChange={(e) => setDriverName(e.target.value.replace(/[^A-Za-z ]/g, "").slice(0, 40))}
-            maxLength={40}
-            placeholder="Ravi Kumar"
-            className="peer w-full bg-transparent text-sm font-medium text-ink outline-none placeholder:text-mist"
-          />
+          <input value={driverName} onChange={(e) => setDriverName(e.target.value)} placeholder="Ravi Kumar" className="peer w-full bg-transparent text-sm font-medium text-ink outline-none placeholder:text-mist" />
         </Field>
         <div className="grid gap-3.5 sm:grid-cols-2">
           <Field icon={Phone} label="Phone number">
-            <div className="flex w-full items-center gap-2">
-              <span className="text-sm font-bold text-ink-soft">+91-</span>
-              <input
-                value={phoneDigits}
-                onChange={(e) => setPhoneDigits(e.target.value.replace(/\D/g, "").slice(0, 10))}
-                inputMode="numeric"
-                maxLength={10}
-                pattern="[6-9][0-9]{9}"
-                placeholder="9876543210"
-                className="peer w-full bg-transparent text-sm font-medium text-ink outline-none placeholder:text-mist"
-              />
-            </div>
+            <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+91 98765 43210" className="peer w-full bg-transparent text-sm font-medium text-ink outline-none placeholder:text-mist" />
           </Field>
           <Field icon={CreditCard} label="Driving licence number">
-            <input
-              value={licenceNumber}
-              onChange={(e) => setLicenceNumber(e.target.value.toUpperCase().slice(0, 16))}
-              maxLength={16}
-              pattern={LICENCE_PATTERN.source}
-              placeholder="RJ14 2024 1234567"
-              className="peer w-full bg-transparent text-sm font-medium text-ink outline-none placeholder:text-mist"
-            />
+            <input value={licenceNumber} onChange={(e) => setLicenceNumber(e.target.value)} placeholder="DL-1420240011" className="peer w-full bg-transparent text-sm font-medium text-ink outline-none placeholder:text-mist" />
           </Field>
         </div>
-        <Field icon={Building2} label="Carrier ID">
+        <Field icon={Building2} label="Carrier / fleet">
           <select
             value={carrierId}
-            onChange={(e) => setCarrierId(e.target.value.toUpperCase())}
-            className="peer w-full bg-transparent text-sm font-medium text-ink outline-none"
-            disabled={loadingOptions}
+            onChange={(e) => setCarrierId(e.target.value)}
+            disabled={carriersLoading}
+            className="peer w-full bg-transparent text-sm font-medium text-ink outline-none disabled:opacity-60"
           >
-            <option value="">{loadingOptions ? "Loading carriers..." : "Select a carrier"}</option>
-            {options.carrier_ids.map((id) => (
-              <option key={id} value={id}>{id}</option>
+            <option value="" disabled>
+              {carriersLoading ? "Loading carriers..." : "Select your carrier"}
+            </option>
+            {carriers.map((carrier) => (
+              <option key={carrier.carrier_id} value={carrier.carrier_id}>
+                {carrier.carrier_name ?? carrier.carrier_id}
+                {carrier.has_active_vehicle ? "" : " (no active vehicle yet)"}
+              </option>
             ))}
           </select>
         </Field>
+        {selectedCarrier && !selectedCarrier.has_active_vehicle && (
+          <div className="flex items-start gap-2 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>
+              {selectedCarrier.carrier_name ?? selectedCarrier.carrier_id} has no active vehicle on file yet. You can
+              still register, but TMS won't be able to assign you a shipment until a vehicle is added for this
+              carrier.
+            </span>
+          </div>
+        )}
         <Field icon={MapPin} label="Home base city">
           <select
             value={homeBaseCity}
             onChange={(e) => setHomeBaseCity(e.target.value)}
-            className="peer w-full bg-transparent text-sm font-medium text-ink outline-none"
-            disabled={loadingOptions}
+            disabled={citiesLoading}
+            className="peer w-full bg-transparent text-sm font-medium text-ink outline-none disabled:opacity-60"
           >
-            <option value="">{loadingOptions ? "Loading cities..." : "Select a city"}</option>
-            {options.home_base_cities.map((city) => (
-              <option key={city} value={city}>{city}</option>
+            <option value="" disabled>
+              {citiesLoading ? "Loading cities..." : cities.length === 0 ? "No cities on file yet" : "Select your home base city"}
+            </option>
+            {cities.map((city) => (
+              <option key={city} value={city}>
+                {city}
+              </option>
             ))}
           </select>
         </Field>
 
-        {carrierIdError && <p className="text-xs font-semibold text-rose-600">{carrierIdError}</p>}
-        {nameError && <p className="text-xs font-semibold text-rose-600">{nameError}</p>}
-        {phoneError && <p className="text-xs font-semibold text-rose-600">{phoneError}</p>}
-
         <button
           type="submit"
-          disabled={isLoading || loadingOptions}
+          disabled={isLoading}
           className="mt-2 flex items-center justify-center gap-2 rounded-2xl py-3.5 text-sm font-bold text-white shadow-soft transition-all disabled:opacity-70"
           style={{ background: color }}
         >

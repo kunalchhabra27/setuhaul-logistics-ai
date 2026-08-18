@@ -15,7 +15,6 @@ import {
 
 type ServiceSession = {
   name: string;
-  facilityId?: string;
 };
 
 // Sessions are tracked per portal (drivers/tms/wms/checkin) rather than as one
@@ -30,7 +29,7 @@ interface AuthContextValue {
   isAuthed: (id: ServiceId) => boolean;
   canAccess: (id: ServiceId) => boolean;
   login: (id: ServiceId, email: string, password: string) => Promise<void>;
-  register: (id: ServiceId, name: string, email: string, password: string, options?: { facilityId?: string }) => Promise<void>;
+  register: (id: ServiceId, name: string, email: string, password: string) => Promise<void>;
   logout: (id: ServiceId) => Promise<void>;
 }
 
@@ -111,11 +110,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     ALL_SERVICE_IDS.forEach((id) => {
       const session = sessionsByService[id];
       if (session && roleFor(session.user ?? null) === id) {
-        const facilityId = session.user?.user_metadata?.facility_id;
-        value[id] = {
-          name: displayNameFor(session.user ?? null),
-          facilityId: typeof facilityId === "string" && facilityId.trim() ? facilityId : undefined,
-        };
+        value[id] = { name: displayNameFor(session.user ?? null) };
       }
     });
     return value;
@@ -125,15 +120,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await signInWithEmail(id, email, password);
   }, []);
 
-  const register = useCallback(async (id: ServiceId, name: string, email: string, password: string, options?: { facilityId?: string }) => {
-    await signUpWithEmail(
-      id,
-      email,
-      password,
-      name,
-      id,
-      options?.facilityId ? { facility_id: options.facilityId } : undefined
-    );
+  const register = useCallback(async (id: ServiceId, name: string, email: string, password: string) => {
+    await signUpWithEmail(id, email, password, name, id);
   }, []);
 
   const logout = useCallback(async (id: ServiceId) => {
